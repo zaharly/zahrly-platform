@@ -1,64 +1,68 @@
-name: provider-quota-gateway
+name: provider-quota-worker-ci
 
 on:
   workflow_dispatch:
   push:
     paths:
       - '.github/workflows/provider-quota-gateway.yml'
-  schedule:
-    - cron: '*/30 * * * *'
+      - 'workers/provider_gateway/**'
+      - 'docker/Dockerfile.runtime'
+      - 'providers/api-football/**'
 
 permissions:
   contents: read
 
 jobs:
-  api-football-quota:
+  provider-worker-integration:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Fetch API-Football quota snapshot
-        id: quota
+      - name: Build provider worker image
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-provider-worker:ci .
+
+      - name: Run real API-Football quota adapter
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
-          python3 providers/api-football/quota_snapshot.py > quota_snapshot.json
+          test -n "${API_FOOTBALL_KEY}"
+          docker run --rm \
+            -e API_FOOTBALL_KEY \
+            zahrly-provider-worker:ci \
+            python -m workers.provider_gateway.worker > quota_snapshot.json
           cat quota_snapshot.json
 
-      - name: Validate snapshot
+      - name: Validate real provider snapshot
         run: |
           python3 - <<'PY'
           import json
-          with open('quota_snapshot.json', 'r', encoding='utf-8') as f:
-              s = json.load(f)
-          required = ['provider', 'observed_at', 'daily_budget', 'quota_used', 'quota_remaining']
-          missing = [k for k in required if s.get(k) is None]
+          from pathlib import Path
+
+          snapshot = json.loads(Path('quota_snapshot.json').read_text(encoding='utf-8'))
+          required = {
+              'provider', 'observed_at', 'daily_budget',
+              'quota_used', 'quota_remaining', 'provider_status_ok'
+          }
+          missing = sorted(required.difference(snapshot))
           if missing:
-              raise SystemExit(f'missing snapshot fields: {missing}')
-          if s['daily_budget'] < 0 or s['quota_used'] < 0 or s['quota_remaining'] < 0:
+              raise SystemExit(f'missing fields: {missing}')
+          if snapshot['provider'] != 'api-football':
+              raise SystemExit('unexpected provider')
+          if not snapshot['provider_status_ok']:
+              raise SystemExit('provider status is not healthy')
+          if snapshot['daily_budget'] < 0 or snapshot['quota_used'] < 0 or snapshot['quota_remaining'] < 0:
               raise SystemExit('quota values must be non-negative')
-          if s['quota_used'] > s['daily_budget']:
+          if snapshot['quota_used'] > snapshot['daily_budget']:
               raise SystemExit('quota_used exceeds daily_budget')
-          print('quota snapshot validation: PASS')
+          if snapshot['quota_remaining'] > snapshot['daily_budget']:
+              raise SystemExit('quota_remaining exceeds daily_budget')
+          print('real provider worker quota validation: PASS')
           PY
 
-      - name: Persist quota snapshot through provider gateway boundary
-        env:
-          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway-v3
-        run: |
-          set -euo pipefail
-          curl --fail-with-body --silent --show-error \
-            -X POST \
-            -H "content-type: application/json" \
-            -H "x-provider-gateway-secret: ${API_FOOTBALL_KEY}" \
-            --data-binary @quota_snapshot.json \
-            "${PROVIDER_QUOTA_GATEWAY_URL}"
-
-      - name: Upload quota snapshot artifact
+      - name: Upload real provider snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: api-football-quota-snapshot-${{ github.run_id }}
+          name: api-football-provider-worker-quota-${{ github.run_id }}
           path: quota_snapshot.json

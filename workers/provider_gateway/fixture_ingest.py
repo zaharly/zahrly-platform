@@ -10,7 +10,7 @@ import json
 import os
 import sys
 
-from providers.api_football.fixtures import fetch_upcoming_fixtures
+from .api_football import fetch_upcoming_fixtures
 from .supabase_fixture_persistence import persist_fixture
 
 

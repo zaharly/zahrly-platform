@@ -1,0 +1,47 @@
+name: provider-quota-gateway
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  api-football-quota:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch API-Football quota snapshot
+        id: quota
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+        run: |
+          set -euo pipefail
+          python3 providers/api-football/quota_snapshot.py | tee quota_snapshot.json
+
+      - name: Validate snapshot
+        run: |
+          python3 - <<'PY'
+          import json
+          with open('quota_snapshot.json', 'r', encoding='utf-8') as f:
+              s = json.load(f)
+          required = ['provider', 'observed_at', 'daily_budget', 'quota_used', 'quota_remaining']
+          missing = [k for k in required if s.get(k) is None]
+          if missing:
+              raise SystemExit(f'missing snapshot fields: {missing}')
+          if s['daily_budget'] < 0 or s['quota_used'] < 0 or s['quota_remaining'] < 0:
+              raise SystemExit('quota values must be non-negative')
+          if s['quota_used'] > s['daily_budget']:
+              raise SystemExit('quota_used exceeds daily_budget')
+          print('quota snapshot validation: PASS')
+          PY
+
+      - name: Upload quota snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-football-quota-snapshot-${{ github.run_id }}
+          path: quota_snapshot.json

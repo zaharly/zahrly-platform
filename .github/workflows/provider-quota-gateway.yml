@@ -75,7 +75,7 @@ jobs:
           PY
 
       - name: Upload provider worker integration artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: api-football-provider-worker-quota-${{ github.run_id }}
           path: quota_snapshot.json

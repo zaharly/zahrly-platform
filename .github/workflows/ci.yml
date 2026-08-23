@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate repository baseline
+        shell: bash
+        run: |
+          test -f README.md
+          test -f .gitignore
+          test -f docker/Dockerfile.runtime
+
+      - name: Build runtime container
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-runtime:ci .

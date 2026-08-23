@@ -5,5 +5,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Runtime foundation only. Application dependencies and component entrypoints
-# are added by their respective implementation tasks.
+COPY workers /app/workers
+
+CMD ["python", "-m", "workers.provider_gateway.worker"]

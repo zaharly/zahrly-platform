@@ -39,6 +39,7 @@ jobs:
             python -m workers.provider_gateway.worker > quota_snapshot.json
           cat quota_snapshot.json
 
+      # This CI gate verifies the worker can persist a real provider observation.
       - name: Validate real provider worker result
         run: |
           python3 - <<'PY'

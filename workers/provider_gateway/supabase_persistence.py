@@ -4,6 +4,9 @@
 The provider worker never exposes internal Postgres schemas through the Data
 API. It sends the normalized snapshot to the private Supabase Edge Function,
 which performs the privileged database write server-side.
+
+Production persistence uses a dedicated inter-service credential. The
+provider API key is never reused as gateway authentication.
 """
 from __future__ import annotations
 
@@ -14,9 +17,9 @@ from urllib.request import Request, urlopen
 
 def persist_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
     gateway_url = os.environ.get("PROVIDER_QUOTA_GATEWAY_URL")
-    provider_key = (os.environ.get("API_FOOTBALL_KEY") or "").strip()
-    if not gateway_url or not provider_key:
-        raise RuntimeError("PROVIDER_QUOTA_GATEWAY_URL and API_FOOTBALL_KEY are required")
+    gateway_secret = (os.environ.get("PROVIDER_GATEWAY_SECRET") or "").strip()
+    if not gateway_url or not gateway_secret:
+        raise RuntimeError("PROVIDER_QUOTA_GATEWAY_URL and PROVIDER_GATEWAY_SECRET are required")
 
     request = Request(
         gateway_url.rstrip("/"),
@@ -24,7 +27,7 @@ def persist_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
         method="POST",
         headers={
             "content-type": "application/json",
-            "x-provider-gateway-secret": provider_key,
+            "x-provider-gateway-secret": gateway_secret,
         },
     )
     with urlopen(request, timeout=20) as response:

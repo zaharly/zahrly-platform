@@ -14,7 +14,7 @@ permissions:
 
 env:
   SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
-  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway-v3
+  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence
 
 jobs:
   provider-worker-integration:

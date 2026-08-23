@@ -47,7 +47,7 @@ jobs:
       - name: Persist quota snapshot through provider gateway boundary
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway-v2
+          PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway-v3
         run: |
           set -euo pipefail
           curl --fail-with-body --silent --show-error \

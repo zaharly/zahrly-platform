@@ -14,6 +14,7 @@ permissions:
 
 env:
   PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence-v5
+  PROVIDER_FIXTURE_PERSISTENCE_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-fixture-persistence
 
 jobs:
   provider-worker-ci:
@@ -74,8 +75,42 @@ jobs:
           print('provider worker + private Supabase persistence: PASS')
           PY
 
+      - name: Ingest first canonical API-Football fixture
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
+          PROVIDER_FIXTURE_PERSISTENCE_URL: ${{ env.PROVIDER_FIXTURE_PERSISTENCE_URL }}
+        run: |
+          set -euo pipefail
+          test -n "${API_FOOTBALL_KEY}"
+          test -n "${PROVIDER_GATEWAY_SECRET}"
+          python -m workers.provider_gateway.fixture_ingest > fixture_ingest.json
+          cat fixture_ingest.json
+
+      - name: Validate canonical fixture ingestion
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('fixture_ingest.json').read_text(encoding='utf-8'))
+          if result.get('persisted') is not True:
+              if result.get('reason') == 'no_upcoming_fixtures':
+                  raise SystemExit('no upcoming fixture returned by API-Football for the selected ingestion date')
+              raise SystemExit(f'fixture ingestion failed: {result}')
+          rows = result.get('fixtures') or []
+          if not rows:
+              raise SystemExit('fixture ingestion reported success without a persisted fixture')
+          for row in rows:
+              for key in ('fixture_id', 'episode_id', 'provider_fixture_id'):
+                  if not row.get(key):
+                      raise SystemExit(f'missing canonical identifier: {key}')
+          print('canonical API-Football fixture ingestion: PASS')
+          PY
+
       - name: Upload provider worker integration artifact
         uses: actions/upload-artifact@v6
         with:
-          name: api-football-provider-worker-quota-${{ github.run_id }}
-          path: quota_snapshot.json
+          name: api-football-provider-worker-${{ github.run_id }}
+          path: |
+            quota_snapshot.json
+            fixture_ingest.json

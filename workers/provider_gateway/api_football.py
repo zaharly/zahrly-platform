@@ -49,6 +49,22 @@ def fetch_quota() -> dict[str, object]:
     }
 
 
+def canonical_fixture_status(provider_status: str | None) -> str:
+    """Map official API-Football status codes to the canonical fixture states."""
+    code = (provider_status or "").upper()
+    if code == "NS":
+        return "scheduled"
+    if code in {"1H", "HT", "2H", "ET", "P", "BT", "SUSP"}:
+        return "live"
+    if code in {"FT", "AET", "PEN"}:
+        return "finished"
+    if code == "PST":
+        return "postponed"
+    if code == "CANC":
+        return "cancelled"
+    raise RuntimeError(f"Unsupported API-Football fixture status: {code or '<empty>'}")
+
+
 def fetch_upcoming_fixtures(date: str | None = None) -> list[dict[str, object]]:
     """Fetch and normalize fixture observations for the canonical ingest worker."""
     if date is None:
@@ -75,6 +91,7 @@ def fetch_upcoming_fixtures(date: str | None = None) -> list[dict[str, object]]:
         if not fixture.get("id") or not league.get("id") or not home.get("id") or not away.get("id"):
             continue
 
+        provider_status = (fixture.get("status") or {}).get("short")
         normalized.append(
             {
                 "provider": "api-football",
@@ -90,7 +107,7 @@ def fetch_upcoming_fixtures(date: str | None = None) -> list[dict[str, object]]:
                 "home_team": {"id": home["id"], "name": home.get("name") or str(home["id"])},
                 "away_team": {"id": away["id"], "name": away.get("name") or str(away["id"])},
                 "kickoff_at": fixture.get("date"),
-                "status": (fixture.get("status") or {}).get("short") or "NS",
+                "status": canonical_fixture_status(provider_status),
             }
         )
 

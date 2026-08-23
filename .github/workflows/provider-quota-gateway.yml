@@ -21,7 +21,8 @@ jobs:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
         run: |
           set -euo pipefail
-          python3 providers/api-football/quota_snapshot.py | tee quota_snapshot.json
+          python3 providers/api-football/quota_snapshot.py > quota_snapshot.json
+          cat quota_snapshot.json
 
       - name: Validate snapshot
         run: |
@@ -39,6 +40,19 @@ jobs:
               raise SystemExit('quota_used exceeds daily_budget')
           print('quota snapshot validation: PASS')
           PY
+
+      - name: Persist quota snapshot through provider gateway boundary
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway
+        run: |
+          set -euo pipefail
+          curl --fail-with-body --silent --show-error \
+            -X POST \
+            -H "content-type: application/json" \
+            -H "x-provider-gateway-secret: ${API_FOOTBALL_KEY}" \
+            --data-binary @quota_snapshot.json \
+            "${PROVIDER_QUOTA_GATEWAY_URL}"
 
       - name: Upload quota snapshot artifact
         uses: actions/upload-artifact@v4

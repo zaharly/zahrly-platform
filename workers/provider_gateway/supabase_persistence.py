@@ -14,7 +14,7 @@ from urllib.request import Request, urlopen
 
 def persist_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
     gateway_url = os.environ.get("PROVIDER_QUOTA_GATEWAY_URL")
-    service_role_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    service_role_key = (os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
     if not gateway_url or not service_role_key:
         raise RuntimeError("PROVIDER_QUOTA_GATEWAY_URL and SUPABASE_SERVICE_ROLE_KEY are required")
 

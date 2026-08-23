@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
 
@@ -18,16 +19,19 @@ def persist_snapshot(snapshot: dict[str, object]) -> dict[str, object]:
     if not supabase_url or not service_role_key:
         raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for worker persistence")
 
+    observed = datetime.fromisoformat(str(snapshot["observed_at"]).replace("Z", "+00:00")).astimezone(timezone.utc)
+    window_start = datetime(observed.year, observed.month, observed.day, tzinfo=timezone.utc)
+    window_end = window_start + timedelta(days=1)
     payload = {
         "p_provider": snapshot["provider"],
-        "p_window_start": snapshot["observed_at"],
-        "p_window_end": snapshot["observed_at"],
+        "p_window_start": window_start.isoformat(),
+        "p_window_end": window_end.isoformat(),
         "p_daily_budget": snapshot["daily_budget"],
         "p_quota_used": snapshot["quota_used"],
         "p_protected_production_budget": snapshot["quota_remaining"],
         "p_backfill_budget": snapshot["quota_remaining"],
         "p_reserve_policy_version": "provider_observed_v1",
-        "p_observed_at": snapshot["observed_at"],
+        "p_observed_at": observed.isoformat(),
     }
     request = Request(
         f"{supabase_url.rstrip('/')}/rest/v1/rpc/record_provider_quota_snapshot",

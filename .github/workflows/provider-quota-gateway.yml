@@ -14,7 +14,7 @@ permissions:
 
 env:
   SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
-  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence-v3
+  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence-v4
 
 jobs:
   provider-worker-integration:
@@ -29,16 +29,13 @@ jobs:
       - name: Run real API-Football provider worker
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
           test -n "${API_FOOTBALL_KEY}"
-          test -n "${SUPABASE_SERVICE_ROLE_KEY}"
           docker run --rm \
             -e API_FOOTBALL_KEY \
             -e SUPABASE_URL \
             -e PROVIDER_QUOTA_GATEWAY_URL \
-            -e SUPABASE_SERVICE_ROLE_KEY \
             zahrly-provider-worker:ci \
             python -m workers.provider_gateway.worker > quota_snapshot.json
           cat quota_snapshot.json

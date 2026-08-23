@@ -31,7 +31,10 @@ def main() -> int:
 
 def persist_snapshot_enabled() -> bool:
     import os
-    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+    return bool(
+        os.environ.get("PROVIDER_QUOTA_GATEWAY_URL")
+        and os.environ.get("PROVIDER_GATEWAY_SECRET")
+    )
 
 
 if __name__ == "__main__":

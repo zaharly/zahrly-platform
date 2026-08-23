@@ -12,6 +12,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence-v5
+
 jobs:
   provider-worker-ci:
     runs-on: ubuntu-latest
@@ -22,25 +25,31 @@ jobs:
       - name: Build provider worker image
         run: docker build -f docker/Dockerfile.runtime -t zahrly-provider-worker:ci .
 
-      - name: Run real API-Football provider adapter
+      - name: Run real API-Football provider adapter and persistence boundary
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
         run: |
           set -euo pipefail
           test -n "${API_FOOTBALL_KEY}"
+          test -n "${PROVIDER_GATEWAY_SECRET}"
           docker run --rm \
             -e API_FOOTBALL_KEY \
+            -e PROVIDER_GATEWAY_SECRET \
+            -e PROVIDER_QUOTA_GATEWAY_URL \
             zahrly-provider-worker:ci \
-            python -m workers.provider_gateway.api_football > quota_snapshot.json
+            python -m workers.provider_gateway.worker > quota_snapshot.json
           cat quota_snapshot.json
 
-      - name: Validate real provider quota observation
+      - name: Validate live provider observation and persistence
         run: |
           python3 - <<'PY'
           import json
           from pathlib import Path
 
-          snapshot = json.loads(Path('quota_snapshot.json').read_text(encoding='utf-8'))
+          result = json.loads(Path('quota_snapshot.json').read_text(encoding='utf-8'))
+          snapshot = result.get('snapshot', {})
+          persistence = result.get('persistence', {})
           required = {
               'provider', 'observed_at', 'daily_budget',
               'quota_used', 'quota_remaining', 'provider_status_ok'
@@ -60,10 +69,12 @@ jobs:
               raise SystemExit('quota_remaining exceeds daily_budget')
           if abs((snapshot['quota_used'] + snapshot['quota_remaining']) - snapshot['daily_budget']) > 1e-9:
               raise SystemExit('quota invariant failed')
-          print('real API-Football provider adapter validation: PASS')
+          if persistence.get('persisted') is not True:
+              raise SystemExit(f'quota snapshot was not persisted: {persistence}')
+          print('provider worker + private Supabase persistence: PASS')
           PY
 
-      - name: Upload real provider snapshot
+      - name: Upload provider worker integration artifact
         uses: actions/upload-artifact@v4
         with:
           name: api-football-provider-worker-quota-${{ github.run_id }}

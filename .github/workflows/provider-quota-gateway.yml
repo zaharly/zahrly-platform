@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+env:
+  SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
+  PROVIDER_QUOTA_GATEWAY_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-gateway-v3
+
 jobs:
   provider-worker-integration:
     runs-on: ubuntu-latest
@@ -25,7 +29,6 @@ jobs:
       - name: Run real API-Football provider worker
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
-          SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
@@ -34,12 +37,12 @@ jobs:
           docker run --rm \
             -e API_FOOTBALL_KEY \
             -e SUPABASE_URL \
+            -e PROVIDER_QUOTA_GATEWAY_URL \
             -e SUPABASE_SERVICE_ROLE_KEY \
             zahrly-provider-worker:ci \
             python -m workers.provider_gateway.worker > quota_snapshot.json
           cat quota_snapshot.json
 
-      # This CI gate verifies the worker can persist a real provider observation.
       - name: Validate real provider worker result
         run: |
           python3 - <<'PY'
@@ -69,7 +72,7 @@ jobs:
               raise SystemExit('quota_remaining exceeds daily_budget')
           if persistence.get('persisted') is not True:
               raise SystemExit(f'quota snapshot was not persisted: {persistence}')
-          print('real provider worker + Supabase persistence validation: PASS')
+          print('real provider worker + private Supabase persistence validation: PASS')
           PY
 
       - name: Upload real provider snapshot

@@ -1,110 +1,67 @@
 # ZAHRLY — P0 Group 10 Archive Layer Source Verification Addendum v1.1
 
 **Date:** 24 August 2026  
-**Branch:** `p0/group10-archive-layer-authoritative-artifact`  
-**Status:** Source Verification — Deployment Remains Blocked
+**Status:** SUPERSEDED BY LIVE RUNTIME RECONCILIATION v1.0
 
-## 1. Correction to Earlier Assumption
+## Supersession Notice
 
-A literal search of the Library copy of `Zahrly_Supabase_Starter_Migration_v1_3.sql` for:
+The earlier conclusion in this document that the Archive Layer was not deployed is no longer current.
 
-```text
-archive_catalog
-archive_completeness_rules
-archive_season
-```
+A later live-schema and runtime reconciliation established that the Archive Layer was deployed through the authoritative Group 10 migration sequence and is operationally exercised.
 
-returned no matches.
-
-Therefore the Starter Migration v1.3 must **not** be described as containing executable definitions for these Archive objects.
-
-## 2. What the Source Actually Establishes
-
-The Architecture/Blueprint defines the Archive concept and the RPC contract:
+Current-state authority:
 
 ```text
-archive_manifests / archive_catalog concept
-internal.archive_season(...)  → admin/worker archive operation
+P0_GROUP10_ARCHIVE_LIVE_RUNTIME_RECONCILIATION_v1_0.md
 ```
 
-The Group 10 decisions also preserve the dataset-aware, non-destructive boundary and explicitly keep retention, eligibility, execution path, and archive-artifact identity unresolved when source-exact evidence is absent.
+## Current authoritative live facts
 
-The queue design lists:
-
-```text
-control_queue
-backfill_queue
-fixture_queue
-odds_queue
-enrichment_queue
-prediction_queue
-repair_queue
-evaluation_queue
-model_training_queue
-```
-
-and does not define an `archive_queue`.
-
-## 3. Live Deployment Evidence
-
-The live Supabase migration history and schema currently contain no deployed:
+The live Supabase project contains:
 
 ```text
 internal.archive_catalog
 internal.archive_completeness_rules
+internal.archive_campaigns
+internal.worker_jobs
 internal.archive_season(...)
-archive_scheduler Cron
+internal.dispatch_archive_campaign(...)
+internal.archive_scheduler()
 ```
 
-`internal.worker_jobs.idempotency_key` remains deployed and unique, but this is only worker-job infrastructure and does not define Archive artifact identity.
+The live migration history contains the Archive implementation sequence, including the DDL foundation, campaign dispatch, campaign finalization, scheduler Cron, and subsequent identity/overload reconciliation migrations.
 
-## 4. Result
-
-There is currently **no source-exact authoritative Archive deployment migration** in the reviewed project materials.
-
-Therefore this repository branch intentionally does NOT add:
+The live execution path is:
 
 ```text
-supabase/migrations/*archive*
-CREATE TABLE internal.archive_catalog
-CREATE TABLE internal.archive_completeness_rules
-CREATE FUNCTION internal.archive_season
-archive_queue
 archive_scheduler
-retention predicates
-archive eligibility SQL
-archive artifact hash/uniqueness
+  → dispatch_archive_campaign
+  → worker_jobs / archive_campaign
+  → Archive Campaign / Worker
+  → AWS S3 artifact
+  → archive_season
+  → archive_catalog
 ```
 
-## 5. Required Next Artifact
+No `archive_queue` is used.
 
-Before Archive Layer deployment, the project must supply an explicit authoritative implementation source that defines, at minimum:
+## Current classification
 
 ```text
-canonical archive tables/constraints
-exact archive_season() signature
-archive worker/execution path
-retention/eligibility ownership
-archive artifact identity
-security grants
-migration/deployment order
+Archive metadata foundation      DEPLOYED
+Archive execution contract       DEPLOYED
+Archive campaign dispatch        DEPLOYED
+Archive scheduler                DEPLOYED
+Archive Cron                     ACTIVE
+Positive runtime path            EVIDENCED
 ```
 
-Only then may an actual Supabase migration be authored and applied.
-
-## 6. Non-Regression
-
-This addendum does not change:
+Remaining work is targeted verification coverage only:
 
 ```text
-fixtures.status
-rolling_fixture_dispatch
-queue_recovery
-provider_health
-Historical Backfill
-7-Day Rolling
-prediction_baselines
-existing queue set
+same-artifact replay/idempotency
+changed-checksum new-lineage
+failure/rollback cleanup
 ```
 
-No Supabase mutation is performed by this file.
+This file is retained as historical governance evidence and must not be used to classify the current live Archive Layer as blocked.

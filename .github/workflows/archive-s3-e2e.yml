@@ -23,15 +23,17 @@ jobs:
     env:
       ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
       SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
-      # GitHub-hosted runners are IPv4-only. Supabase direct DB endpoints are
-      # IPv6-only unless the project has the IPv4 add-on, so the E2E job uses
-      # Supavisor session mode (IPv4, port 5432).
+      # GitHub-hosted runners require an IPv4-reachable Supabase endpoint.
+      # The direct db.<project>.supabase.co endpoint may be IPv6-only.
       SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
       SUPABASE_POOLER_PORT: "5432"
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
-      S3_REGION: ${{ secrets.S3_REGION }}
-      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      # This is the real AWS S3 endpoint for the bucket shown in the AWS console.
+      # Keep it in the workflow so an empty/mismatched S3_ENDPOINT_URL secret
+      # cannot silently select the wrong endpoint.
+      S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
+      S3_REGION: eu-north-1
+      S3_BUCKET: zahrly-community-storage
       S3_PREFIX: ${{ secrets.S3_PREFIX }}
       S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
       S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
@@ -44,9 +46,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for v in SUPABASE_DB_URL S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+          for v in SUPABASE_DB_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
             test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
           done
+          test "$S3_BUCKET" = "zahrly-community-storage"
+          test "$S3_REGION" = "eu-north-1"
 
           if [ -z "${S3_PREFIX:-}" ]; then
             echo "S3_PREFIX secret is empty; using zahrly/archive"
@@ -74,40 +78,35 @@ jobs:
           user = unquote(p.username or "postgres")
 
           if host.endswith(".pooler.supabase.com"):
-              # Keep a valid pooler URL as-is, but repair the common case where
-              # the Supavisor username was supplied as just "postgres".
               selected_host = host
               selected_port = p.port or pooler_port
               if "." not in user:
                   user = f"postgres.{project_ref}"
-              print("Using Supabase Supavisor pooler URL from secret")
+              print("Using Supabase pooler URL from secret")
           elif host == f"db.{project_ref}.supabase.co":
-              # Direct Supabase is IPv6 on projects without the IPv4 add-on.
-              # GitHub-hosted runners do not provide IPv6 routing, so convert
-              # the secret's direct URL to the project's IPv4 session pooler.
               selected_host = pooler_host
               selected_port = pooler_port
-              user = f"postgres.{project_ref}" if user == "postgres" else user
-              print("Detected Supabase direct IPv6 URL; switching E2E to IPv4 session pooler")
+              if user == "postgres":
+                  user = f"postgres.{project_ref}"
+              print("Detected direct Supabase URL; switching to IPv4 session pooler")
           else:
               raise SystemExit(
-                  f"Unsupported SUPABASE_DB_URL host {host!r}. Use the Supabase Session Pooler URL "
-                  f"or the project's direct URL db.{project_ref}.supabase.co."
+                  f"Unsupported SUPABASE_DB_URL host {host!r}. Expected the Supabase pooler "
+                  f"or db.{project_ref}.supabase.co."
               )
 
-          netloc = f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}"
-          query = p.query
+          query = p.query or ""
           if "sslmode=" not in query:
               query = f"{query}&sslmode=require" if query else "sslmode=require"
+          netloc = f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}"
           normalized = urlunsplit(("postgresql", netloc, p.path or "/postgres", query, ""))
 
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               f.write(f"SUPABASE_DB_URL={normalized}\n")
           print(f"PostgreSQL endpoint selected: {selected_host}:{selected_port}")
-          print(f"PostgreSQL database: {(p.path or '/postgres').lstrip('/') or 'postgres'}")
           PY
 
-      - name: Validate PostgreSQL IPv4 DNS and TCP on runner
+      - name: Validate PostgreSQL IPv4 DNS and TCP
         shell: bash
         run: |
           set -euo pipefail
@@ -126,11 +125,8 @@ jobs:
               addresses = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
               raise SystemExit(f"PostgreSQL IPv4 DNS FAILED for {host}: {exc}")
-
           if not addresses:
               raise SystemExit(f"PostgreSQL IPv4 DNS returned no A record for {host}")
-          print("PostgreSQL IPv4 DNS: OK")
-          print(f"resolved_ipv4_addresses={len(addresses)}")
 
           for family, _, _, _, sockaddr in addresses:
               try:
@@ -149,17 +145,16 @@ jobs:
         shell: bash
         run: docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
 
-      - name: Validate PostgreSQL from archive worker container
+      - name: Validate PostgreSQL authentication in container
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm --network host \
-            --entrypoint python \
+          docker run --rm --network host --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
             -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); print(f"Container PostgreSQL port: {p.port or 5432}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
 
-      - name: Validate S3 connectivity
+      - name: Validate S3 DNS and bucket access
         shell: bash
         run: |
           set -euo pipefail
@@ -168,13 +163,13 @@ jobs:
           import socket
           from urllib.parse import urlparse
 
-          region = os.environ["S3_REGION"].strip()
-          custom = os.environ.get("S3_ENDPOINT_URL", "").strip()
-          endpoint = custom or f"https://s3.{region}.amazonaws.com"
+          endpoint = os.environ["S3_ENDPOINT_URL"].strip()
           p = urlparse(endpoint)
           if p.scheme not in {"http", "https"} or not p.hostname:
               raise SystemExit(f"Invalid S3 endpoint: {endpoint!r}")
           print(f"S3 endpoint: {endpoint}")
+          print(f"S3 region: {os.environ['S3_REGION']}")
+          print(f"S3 bucket: {os.environ['S3_BUCKET']}")
           try:
               socket.getaddrinfo(p.hostname, p.port or 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
@@ -182,19 +177,52 @@ jobs:
           print("S3 IPv4 DNS: OK")
           PY
 
-          docker run --rm --network host \
-            --entrypoint python \
+          docker run --rm --network host --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
-            zahrly-archive-worker:e2e \
-            -c 'import os,boto3; region=os.environ["S3_REGION"]; custom=os.environ.get("S3_ENDPOINT_URL","").strip(); kwargs=dict(service_name="s3",region_name=region,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); kwargs["endpoint_url"]=custom if custom else None; boto3.client(**kwargs).head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
+            zahrly-archive-worker:e2e <<'PY'
+          import os
+          import boto3
+          from botocore.exceptions import ClientError, EndpointConnectionError
+
+          bucket = os.environ["S3_BUCKET"]
+          endpoint = os.environ["S3_ENDPOINT_URL"]
+          region = os.environ["S3_REGION"]
+
+          client = boto3.client(
+              "s3",
+              region_name=region,
+              endpoint_url=endpoint,
+              aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
+              aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
+          )
+
+          try:
+              response = client.head_bucket(Bucket=bucket)
+              status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+              print(f"S3 bucket access: OK (HTTP {status})")
+          except EndpointConnectionError as exc:
+              raise SystemExit(f"S3 endpoint connection FAILED: {exc}")
+          except ClientError as exc:
+              error = exc.response.get("Error", {})
+              metadata = exc.response.get("ResponseMetadata", {})
+              status = metadata.get("HTTPStatusCode")
+              code = error.get("Code")
+              request_id = metadata.get("RequestId")
+              raise SystemExit(
+                  "S3 bucket access FAILED: "
+                  f"HTTP={status} code={code} request_id={request_id}. "
+                  f"The bucket {bucket!r} must exist in region {region!r}, "
+                  "and the GitHub AWS credentials must belong to an account with "
+                  "s3:ListBucket and s3:GetBucketLocation permission on that bucket."
+              )
+          PY
 
       - name: Run archive worker
         shell: bash
         run: |
           set -euo pipefail
           set +e
-          docker run --rm --network host \
-            --entrypoint python \
+          docker run --rm --network host --entrypoint python \
             -e ARCHIVE_CAMPAIGN_ID \
             -e SUPABASE_DB_URL \
             -e S3_ENDPOINT_URL \

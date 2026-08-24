@@ -23,11 +23,9 @@ jobs:
     env:
       ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
       SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
-      # GitHub-hosted runners require an IPv4-reachable Supabase endpoint.
       SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
       SUPABASE_POOLER_PORT: "5432"
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      # Canonical AWS endpoint for zahrly-community-storage.
       S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
       S3_REGION: eu-north-1
       S3_BUCKET: zahrly-community-storage
@@ -48,56 +46,36 @@ jobs:
           done
           test "$S3_BUCKET" = "zahrly-community-storage"
           test "$S3_REGION" = "eu-north-1"
-
           if [ -z "${S3_PREFIX:-}" ]; then
-            echo "S3_PREFIX secret is empty; using zahrly/archive"
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
           fi
-
           python - <<'PY'
           import os
           from urllib.parse import quote, unquote, urlsplit, urlunsplit
-
           raw = os.environ["SUPABASE_DB_URL"].strip()
           p = urlsplit(raw)
-          if p.scheme not in {"postgres", "postgresql"}:
-              raise SystemExit(f"SUPABASE_DB_URL must use postgres:// or postgresql://, got {p.scheme!r}")
-          if not p.hostname:
-              raise SystemExit("SUPABASE_DB_URL has no hostname")
-          if p.password is None:
-              raise SystemExit("SUPABASE_DB_URL has no password")
-
+          if p.scheme not in {"postgres", "postgresql"} or not p.hostname or p.password is None:
+              raise SystemExit("SUPABASE_DB_URL must be a valid PostgreSQL URL with a password")
           host = p.hostname.lower().rstrip(".")
           project_ref = os.environ["SUPABASE_PROJECT_REF"]
           pooler_host = os.environ["SUPABASE_POOLER_HOST"]
           pooler_port = int(os.environ["SUPABASE_POOLER_PORT"])
-          password = quote(unquote(p.password), safe="")
           user = unquote(p.username or "postgres")
-
+          password = quote(unquote(p.password), safe="")
           if host.endswith(".pooler.supabase.com"):
-              selected_host = host
-              selected_port = p.port or pooler_port
+              selected_host, selected_port = host, p.port or pooler_port
               if "." not in user:
                   user = f"postgres.{project_ref}"
-              print("Using Supabase pooler URL from secret")
           elif host == f"db.{project_ref}.supabase.co":
-              selected_host = pooler_host
-              selected_port = pooler_port
+              selected_host, selected_port = pooler_host, pooler_port
               if user == "postgres":
                   user = f"postgres.{project_ref}"
-              print("Detected direct Supabase URL; switching to IPv4 session pooler")
           else:
-              raise SystemExit(
-                  f"Unsupported SUPABASE_DB_URL host {host!r}. Expected the Supabase pooler "
-                  f"or db.{project_ref}.supabase.co."
-              )
-
+              raise SystemExit(f"Unsupported Supabase host: {host}")
           query = p.query or ""
           if "sslmode=" not in query:
               query = f"{query}&sslmode=require" if query else "sslmode=require"
-          netloc = f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}"
-          normalized = urlunsplit(("postgresql", netloc, p.path or "/postgres", query, ""))
-
+          normalized = urlunsplit(("postgresql", f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}", p.path or "/postgres", query, ""))
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               f.write(f"SUPABASE_DB_URL={normalized}\n")
           print(f"PostgreSQL endpoint selected: {selected_host}:{selected_port}")
@@ -108,23 +86,12 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os
-          import socket
+          import os, socket
           from urllib.parse import urlsplit
-
           p = urlsplit(os.environ["SUPABASE_DB_URL"])
-          host = p.hostname
-          port = p.port or 5432
-          print(f"PostgreSQL host: {host}")
-          print(f"PostgreSQL port: {port}")
-
-          try:
-              addresses = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
-          except socket.gaierror as exc:
-              raise SystemExit(f"PostgreSQL IPv4 DNS FAILED for {host}: {exc}")
+          addresses = socket.getaddrinfo(p.hostname, p.port or 5432, family=socket.AF_INET, type=socket.SOCK_STREAM)
           if not addresses:
-              raise SystemExit(f"PostgreSQL IPv4 DNS returned no A record for {host}")
-
+              raise SystemExit("PostgreSQL IPv4 DNS returned no addresses")
           for family, _, _, _, sockaddr in addresses:
               try:
                   with socket.socket(family, socket.SOCK_STREAM) as s:
@@ -133,9 +100,9 @@ jobs:
                   print(f"PostgreSQL IPv4 TCP: OK ({sockaddr[0]}:{sockaddr[1]})")
                   break
               except OSError as exc:
-                  print(f"TCP attempt failed for {sockaddr[0]}:{sockaddr[1]}: {exc}")
+                  print(f"TCP attempt failed for {sockaddr}: {exc}")
           else:
-              raise SystemExit("PostgreSQL IPv4 TCP FAILED for all resolved addresses")
+              raise SystemExit("PostgreSQL IPv4 TCP FAILED")
           PY
 
       - name: Build archive worker image
@@ -148,68 +115,61 @@ jobs:
           docker run --rm --network host --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); print(f"Container PostgreSQL port: {p.port or 5432}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
+            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
 
       - name: Validate S3 DNS and bucket access
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import os
-          import socket
+          import os, socket
           from urllib.parse import urlparse
-
-          endpoint = os.environ["S3_ENDPOINT_URL"].strip()
-          p = urlparse(endpoint)
-          if p.scheme not in {"http", "https"} or not p.hostname:
-              raise SystemExit(f"Invalid S3 endpoint: {endpoint!r}")
-          print(f"S3 endpoint: {endpoint}")
+          p = urlparse(os.environ["S3_ENDPOINT_URL"])
+          socket.getaddrinfo(p.hostname, p.port or 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
+          print(f"S3 IPv4 DNS: OK ({p.hostname})")
           print(f"S3 region: {os.environ['S3_REGION']}")
           print(f"S3 bucket: {os.environ['S3_BUCKET']}")
-          try:
-              socket.getaddrinfo(p.hostname, p.port or 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
-          except socket.gaierror as exc:
-              raise SystemExit(f"S3 IPv4 DNS FAILED for {p.hostname}: {exc}")
-          print("S3 IPv4 DNS: OK")
           PY
-
           docker run --rm --network host --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
             zahrly-archive-worker:e2e - <<'PY'
-          import os
-          import boto3
+          import os, boto3
           from botocore.exceptions import ClientError, EndpointConnectionError
-
-          bucket = os.environ["S3_BUCKET"]
-          endpoint = os.environ["S3_ENDPOINT_URL"]
-          region = os.environ["S3_REGION"]
-
-          client = boto3.client(
-              "s3",
-              region_name=region,
-              endpoint_url=endpoint,
-              aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
-              aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
-          )
-
+          c = boto3.client("s3", region_name=os.environ["S3_REGION"], endpoint_url=os.environ["S3_ENDPOINT_URL"], aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"])
           try:
-              response = client.head_bucket(Bucket=bucket)
-              status = response.get("ResponseMetadata", {}).get("HTTPStatusCode")
-              print(f"S3 bucket access: OK (HTTP {status})")
-          except EndpointConnectionError as exc:
-              raise SystemExit(f"S3 endpoint connection FAILED: {exc}")
-          except ClientError as exc:
-              error = exc.response.get("Error", {})
-              metadata = exc.response.get("ResponseMetadata", {})
-              status = metadata.get("HTTPStatusCode")
-              code = error.get("Code")
-              request_id = metadata.get("RequestId")
-              raise SystemExit(
-                  "S3 bucket access FAILED: "
-                  f"HTTP={status} code={code} request_id={request_id}. "
-                  f"The bucket {bucket!r} must exist in region {region!r}, "
-                  "and the GitHub AWS credentials must have bucket/object access."
-              )
+              r = c.head_bucket(Bucket=os.environ["S3_BUCKET"])
+              print(f"S3 bucket access: OK (HTTP {r.get('ResponseMetadata', {}).get('HTTPStatusCode')})")
+          except EndpointConnectionError as e:
+              raise SystemExit(f"S3 endpoint connection FAILED: {e}")
+          except ClientError as e:
+              err, md = e.response.get("Error", {}), e.response.get("ResponseMetadata", {})
+              raise SystemExit(f"S3 bucket access FAILED: HTTP={md.get('HTTPStatusCode')} code={err.get('Code')} request_id={md.get('RequestId')}")
+          PY
+
+      - name: Dispatch archive campaign using official control-plane RPC
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host --entrypoint python \
+            -e ARCHIVE_CAMPAIGN_ID -e SUPABASE_DB_URL \
+            zahrly-archive-worker:e2e - <<'PY'
+          import os, psycopg
+          campaign_id = os.environ["ARCHIVE_CAMPAIGN_ID"]
+          with psycopg.connect(os.environ["SUPABASE_DB_URL"]) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("select internal.dispatch_archive_campaign(%s)", (campaign_id,))
+                  job_id = cur.fetchone()[0]
+                  cur.execute("""
+                      select c.status, c.worker_job_id, w.status, w.attempts
+                      from internal.archive_campaigns c
+                      join internal.worker_jobs w on w.job_id = c.worker_job_id
+                      where c.campaign_id = %s
+                  """, (campaign_id,))
+                  row = cur.fetchone()
+          print(f"archive dispatch job_id={job_id}")
+          print(f"campaign_status={row[0]} worker_job_id={row[1]} worker_status={row[2]} attempts={row[3]}")
+          if row[0] != "QUEUED" or row[2] != "QUEUED":
+              raise SystemExit("Official archive dispatch did not produce QUEUED campaign and worker job")
           PY
 
       - name: Run archive worker
@@ -218,16 +178,9 @@ jobs:
           set -euo pipefail
           set +e
           docker run --rm --network host --entrypoint python \
-            -e ARCHIVE_CAMPAIGN_ID \
-            -e SUPABASE_DB_URL \
-            -e S3_ENDPOINT_URL \
-            -e S3_REGION \
-            -e S3_BUCKET \
-            -e S3_PREFIX \
-            -e S3_ACCESS_KEY_ID \
-            -e S3_SECRET_ACCESS_KEY \
-            zahrly-archive-worker:e2e \
-            -m workers.archive_worker.worker 2>&1 | tee archive_result.json
+            -e ARCHIVE_CAMPAIGN_ID -e SUPABASE_DB_URL -e S3_ENDPOINT_URL -e S3_REGION \
+            -e S3_BUCKET -e S3_PREFIX -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
+            zahrly-archive-worker:e2e -m workers.archive_worker.worker 2>&1 | tee archive_result.json
           status=${PIPESTATUS[0]}
           set -e
           if [ "$status" -ne 0 ]; then
@@ -235,7 +188,7 @@ jobs:
             exit "$status"
           fi
 
-      - name: Verify archive result
+      - name: Verify archive result and database finalization
         shell: bash
         run: |
           set -euo pipefail
@@ -243,8 +196,7 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-
-          lines = [line.strip() for line in Path("archive_result.json").read_text().splitlines() if line.strip().startswith("{")]
+          lines = [x.strip() for x in Path("archive_result.json").read_text().splitlines() if x.strip().startswith("{")]
           if not lines:
               raise SystemExit("archive worker produced no JSON result")
           data = json.loads(lines[-1])
@@ -255,6 +207,27 @@ jobs:
           print(f"object_uri={data.get('object_uri')}")
           print(f"checksum={data.get('checksum')}")
           print(f"manifest_id={data.get('manifest_id')}")
+          PY
+          docker run --rm --network host --entrypoint python \
+            -e ARCHIVE_CAMPAIGN_ID -e SUPABASE_DB_URL \
+            zahrly-archive-worker:e2e - <<'PY'
+          import os, psycopg
+          cid = os.environ["ARCHIVE_CAMPAIGN_ID"]
+          with psycopg.connect(os.environ["SUPABASE_DB_URL"]) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("""
+                    select c.status, w.status, c.manifest_id, c.object_uri, c.checksum, ac.manifest_id
+                    from internal.archive_campaigns c
+                    join internal.worker_jobs w on w.job_id = c.worker_job_id
+                    left join internal.archive_catalog ac on ac.manifest_id = c.manifest_id
+                    where c.campaign_id = %s
+                  """, (cid,))
+                  row = cur.fetchone()
+          if not row or row[0] != "SUCCEEDED" or row[1] != "SUCCEEDED" or row[2] is None or row[3] is None or row[4] is None or row[5] is None:
+              raise SystemExit(f"Archive finalization verification failed: {row}")
+          print("Archive DB finalization: SUCCEEDED")
+          print(f"manifest_id={row[2]}")
+          print(f"object_uri={row[3]}")
           PY
 
       - name: Upload archive E2E result

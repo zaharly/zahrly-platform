@@ -1,55 +1,82 @@
 # ZAHRLY — P0 Group 10 Archive Execution Implementation Authorization v1.0
 
-**Date:** 24 August 2026
-**Status:** Implementation Authorized — constrained to archive metadata registration
+**Date:** 24 August 2026  
+**Status:** Implementation Authorized — constrained to archive metadata registration  
 **Scope:** `internal.archive_season()` registration boundary only; scheduler/Cron remain downstream
 
 ## Authority
 
-Latest project source defines the archive flow as Historical Campaign → S3 season archive → `archive_season()` → `archive_catalog`, with the archive worker responsible for execution and PostgreSQL remaining control/metadata plane. `archive_scheduler` remains a short 03:00 control-plane operation that discovers `ARCHIVE_ONLY` + complete eligible work and dispatches it to the archive worker.
+Latest project source and the live Supabase deployment now provide the executable archive-registration contract. The project architecture places Archive storage in S3-compatible object storage, with workers/campaign execution responsible for artifact creation and PostgreSQL responsible for source-of-truth metadata/manifest registration.
 
-## Authorized execution contract
+The live migration history contains `p0_group10_archive_team_set_hash_reconciliation_v1` and `p0_group10_archive_season_registration_v1`, and the live database exposes the corresponding `internal.archive_season()` function.
 
-`internal.archive_season()` is authorized as a **metadata-registration RPC** invoked by the archive worker after the campaign has produced the S3 artifact.
+## Authorized executable signature
 
-Required inputs are the existing archive-catalog attributes plus `team_set_hash`, because the latest archive identity explicitly requires that stored field:
+The live deployed signature is authoritative:
 
-```text
-country_id
-competition_id
-season
-dataset_type
-provider
-date_start
-date_end
-team_set_hash
-object_uri
-checksum
-row_count
-completeness_score
-schema_version
+```sql
+internal.archive_season(
+  p_country_id uuid,
+  p_competition_id uuid,
+  p_season integer,
+  p_dataset_type text,
+  p_provider text,
+  p_date_start timestamptz,
+  p_date_end timestamptz,
+  p_team_set_hash text,
+  p_object_uri text,
+  p_checksum text,
+  p_row_count bigint,
+  p_completeness_score numeric,
+  p_schema_version text
+) returns uuid
 ```
 
-Return:
+Return value:
 
 ```text
 manifest_id uuid
 ```
 
-Semantics:
+Caller:
 
 ```text
-validate/insert → register manifest → commit
-same artifact identity → return existing manifest_id
-new checksum → new artifact lineage
-failure → rollback
+archive campaign/worker
 ```
 
-The campaign/worker computes the team-set hash. PostgreSQL does not invent or recompute that hash.
+The function is metadata-registration only. S3 artifact creation and verification remain outside PostgreSQL.
+
+## Transaction / idempotency semantics
+
+The deployed function enforces:
+
+```text
+p_date_end >= p_date_start
+p_row_count >= 0
+```
+
+then registers the manifest in `internal.archive_catalog`.
+
+The existing database uniqueness boundary is:
+
+```text
+(country_id,
+ competition_id,
+ season,
+ dataset_type,
+ provider,
+ schema_version,
+ date_start,
+ date_end,
+ team_set_hash,
+ checksum)
+```
+
+On the same identity the function returns the existing `manifest_id`; a changed checksum represents a distinct artifact lineage.
 
 ## Retention / eligibility boundary
 
-Archive artifact creation is admitted when:
+Archive artifact creation is source/project-aligned to the following prerequisites:
 
 ```text
 ARCHIVE_ONLY
@@ -59,38 +86,47 @@ AND dataset_type is source-defined archivable
 AND target is not immutable / never-delete
 ```
 
-The archive artifact is created before any later hot-data deletion/partition retirement. Hot retention/deletion remains a separate policy and is not implemented by `archive_season()`.
+This is an **archive-admission prerequisite**, not a hot-data deletion rule.
 
 P0 first-wave exclusions:
 
 ```text
-prediction_baselines  → never archive/delete by season
-audit_log             → immutable
-canonical replay/audit source → preserved
-prediction_read_models → separate rebuildable lifecycle
-worker_jobs           → separate operational retention lifecycle
+prediction_baselines      → never archive/delete by season
+audit_log                 → immutable
+canonical replay/audit source → preserve
+prediction_read_models    → separate rebuildable lifecycle
+worker_jobs               → separate operational retention lifecycle
 ```
+
+Later hot partition deletion/retirement remains a separate retention policy and is not implemented by `archive_season()`.
 
 ## Artifact identity
 
-Canonical artifact identity is:
+Canonical artifact identity is the exact database uniqueness tuple above. `manifest_id` is the generated lineage identifier and is not part of identity.
+
+The architecture additionally requires `team_set_hash`; the live deployment now contains and enforces it.
+
+## S3 + campaign execution boundary
 
 ```text
-country_id
-+ competition_id
-+ season
-+ dataset_type
-+ provider
-+ schema_version
-+ date_start
-+ date_end
-+ team_set_hash
-+ checksum
+Historical Campaign / Archive Worker
+        ↓
+produce + verify S3 season artifact
+        ↓
+internal.archive_season(...)
+        ↓
+internal.archive_catalog
+        ├─ object_uri
+        ├─ checksum
+        ├─ completeness_score
+        └─ lineage fields
 ```
 
-The database uniqueness boundary is the existing `archive_catalog_artifact_identity_key` using exactly those columns. `manifest_id` is the generated artifact/lineage identifier, not part of identity.
+PostgreSQL does not upload the archive object and does not call providers or Redis.
 
-## Durable dispatch boundary
+## Scheduler boundary
+
+The project contract remains:
 
 ```text
 03:00 archive_scheduler
@@ -102,23 +138,56 @@ archive campaign/worker
 S3 artifact
     ↓
 internal.archive_season()
-    ↓
-internal.archive_catalog
 ```
 
-No `archive_queue` is created by this authorization. No reuse of `backfill_queue` or direct `worker_jobs` shortcut is authorized by inference.
+No `archive_queue` is introduced. No `backfill_queue` reuse or direct `worker_jobs` shortcut is inferred by this authorization.
 
-## Implementation constraints
+## Security boundary
 
-- Private `internal` schema only.
-- Prefer `SECURITY INVOKER`.
-- No provider or Redis calls from PostgreSQL.
-- No bulk S3 transfer from PostgreSQL; S3 transfer remains campaign/worker responsibility.
-- No immutable prediction-truth mutation.
-- No new archive lifecycle state.
-- No scheduler/Cron creation in this migration.
-- No deletion/partition retirement in this function.
+The live function is:
 
-## Gate
+```text
+SECURITY INVOKER
+anon EXECUTE          = false
+authenticated EXECUTE = false
+```
 
-This authorization permits the function migration for the **metadata-registration boundary** only. It does not authorize `archive_scheduler` or Cron until the function is deployed, verified, and integrated with the campaign/worker runtime.
+It remains private in the `internal` schema and is not a browser/public mutation surface.
+
+## Non-goals
+
+This authorization does not implement:
+
+- `archive_scheduler`
+- pg_cron schedule
+- hot partition deletion
+- new retention columns/states
+- new queue types
+- immutable prediction truth mutation
+- provider or Redis access from PostgreSQL
+
+## Verification gate
+
+Before declaring the Archive execution boundary complete:
+
+1. Verify the exact live function signature.
+2. Verify private schema/security/grants.
+3. Verify the artifact identity UNIQUE constraint.
+4. Run a positive transactional registration test.
+5. Run a duplicate registration/idempotency test.
+6. Run invalid date-range and negative row-count rollback tests.
+7. Confirm campaign/worker owns S3 object creation.
+8. Only after this passes, implement and verify `archive_scheduler`, then its 03:00 Cron runtime gate.
+
+## Status
+
+```text
+Archive metadata foundation        ✅
+archive_season signature           ✅ LIVE
+artifact DB identity               ✅ LIVE
+S3 + campaign execution boundary  ✅ PROJECT-ALIGNED
+archive admission prerequisites   ✅ PROJECT-ALIGNED
+
+archive_scheduler                  ⛔ downstream gate
+Cron                               ⛔ downstream runtime gate
+```

@@ -44,7 +44,7 @@ jobs:
           set -euo pipefail
           docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
 
-      - name: Diagnose PostgreSQL from archive worker container
+      - name: Diagnose PostgreSQL and authenticate from archive worker container
         shell: bash
         run: |
           set -euo pipefail
@@ -52,17 +52,7 @@ jobs:
             --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"PostgreSQL host: {h}"); print(f"PostgreSQL port: {port}"); infos=socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("PostgreSQL DNS: OK"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]; s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP: OK"); s.close()'
-
-      - name: Verify PostgreSQL authentication from archive worker container
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run --rm --network host \
-            --entrypoint python \
-            -e SUPABASE_DB_URL \
-            zahrly-archive-worker:e2e \
-            -c 'import os,psycopg; c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=10); print("PostgreSQL authentication: OK"); c.close()'
+            -c 'import os,socket,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"PostgreSQL host: {h}"); print(f"PostgreSQL port: {port}"); socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("PostgreSQL DNS: OK"); s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP: OK"); s.close(); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=10); print("PostgreSQL authentication: OK"); c.close()'
 
       - name: Diagnose AWS S3 from archive worker container
         shell: bash
@@ -72,7 +62,7 @@ jobs:
             --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket,boto3; from urllib.parse import urlparse; region=os.environ["S3_REGION"]; endpoint=os.environ.get("S3_ENDPOINT_URL") or f"https://s3.{region}.amazonaws.com"; p=urlparse(endpoint); print(f"S3 endpoint: {endpoint}"); print(f"S3 host: {p.hostname}"); infos=socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM); print("S3 DNS: OK"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]; s3=boto3.client("s3",region_name=region,endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); s3.head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
+            -c 'import os,socket,boto3; from urllib.parse import urlparse; region=os.environ["S3_REGION"]; endpoint=os.environ.get("S3_ENDPOINT_URL","").strip() or f"https://s3.{region}.amazonaws.com"; p=urlparse(endpoint); print(f"S3 endpoint host: {p.hostname}"); socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM); print("S3 DNS: OK"); kwargs=dict(service_name="s3",region_name=region,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); custom=os.environ.get("S3_ENDPOINT_URL","").strip(); kwargs["endpoint_url"]=custom if custom else None; s3=boto3.client(**kwargs); s3.head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
 
       - name: Run archive worker against test campaign
         shell: bash
@@ -99,7 +89,7 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          data = json.loads(Path("archive_result.json").read_text())
+          data = json.loads(Path("archive_result.json").read_text().splitlines()[-1])
           if data.get("status") != "SUCCEEDED":
               raise SystemExit(f"archive worker did not succeed: {data}")
           print("Archive worker result: SUCCEEDED")

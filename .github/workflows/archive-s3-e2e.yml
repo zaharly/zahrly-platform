@@ -24,13 +24,10 @@ jobs:
       ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
       SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
       # GitHub-hosted runners require an IPv4-reachable Supabase endpoint.
-      # The direct db.<project>.supabase.co endpoint may be IPv6-only.
       SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
       SUPABASE_POOLER_PORT: "5432"
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-      # This is the real AWS S3 endpoint for the bucket shown in the AWS console.
-      # Keep it in the workflow so an empty/mismatched S3_ENDPOINT_URL secret
-      # cannot silently select the wrong endpoint.
+      # Canonical AWS endpoint for zahrly-community-storage.
       S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
       S3_REGION: eu-north-1
       S3_BUCKET: zahrly-community-storage
@@ -142,7 +139,6 @@ jobs:
           PY
 
       - name: Build archive worker image
-        shell: bash
         run: docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
 
       - name: Validate PostgreSQL authentication in container
@@ -179,7 +175,7 @@ jobs:
 
           docker run --rm --network host --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
-            zahrly-archive-worker:e2e <<'PY'
+            zahrly-archive-worker:e2e - <<'PY'
           import os
           import boto3
           from botocore.exceptions import ClientError, EndpointConnectionError
@@ -212,8 +208,7 @@ jobs:
                   "S3 bucket access FAILED: "
                   f"HTTP={status} code={code} request_id={request_id}. "
                   f"The bucket {bucket!r} must exist in region {region!r}, "
-                  "and the GitHub AWS credentials must belong to an account with "
-                  "s3:ListBucket and s3:GetBucketLocation permission on that bucket."
+                  "and the GitHub AWS credentials must have bucket/object access."
               )
           PY
 

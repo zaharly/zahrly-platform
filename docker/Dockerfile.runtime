@@ -7,4 +7,6 @@ WORKDIR /app
 
 COPY workers /app/workers
 
+RUN pip install --no-cache-dir -r /app/workers/archive_worker/requirements.txt
+
 CMD ["python", "-m", "workers.provider_gateway.worker"]

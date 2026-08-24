@@ -9,6 +9,9 @@ on:
         default: 74a52118-bffd-4438-9ddd-757928e094d4
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   archive-s3-e2e:
     runs-on: ubuntu-latest
@@ -24,9 +27,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Validate required secrets and defaults
+      - name: Validate secrets and normalize defaults
         shell: bash
         run: |
           set -euo pipefail
@@ -34,40 +37,87 @@ jobs:
             test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
           done
           if [ -z "${S3_PREFIX:-}" ]; then
-            echo "S3_PREFIX secret is not set; using safe default: zahrly/archive"
+            echo "S3_PREFIX secret is empty; using zahrly/archive"
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
           fi
 
-      - name: Build archive worker image
+      - name: Validate PostgreSQL URL and DNS on runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import socket
+          from urllib.parse import urlparse
+
+          raw = os.environ["SUPABASE_DB_URL"].strip()
+          p = urlparse(raw)
+          if p.scheme not in {"postgres", "postgresql"}:
+              raise SystemExit(f"SUPABASE_DB_URL must use postgres:// or postgresql://, got scheme={p.scheme!r}")
+          if not p.hostname:
+              raise SystemExit("SUPABASE_DB_URL has no hostname")
+          port = p.port or 5432
+          print(f"PostgreSQL host: {p.hostname}")
+          print(f"PostgreSQL port: {port}")
+          try:
+              addresses = socket.getaddrinfo(p.hostname, port, type=socket.SOCK_STREAM)
+          except socket.gaierror as exc:
+              raise SystemExit(f"PostgreSQL DNS FAILED for {p.hostname}: {exc}")
+          print("PostgreSQL DNS: OK")
+          print(f"resolved_addresses={len(addresses)}")
+          for family, _, _, _, sockaddr in addresses:
+              try:
+                  with socket.socket(family, socket.SOCK_STREAM) as s:
+                      s.settimeout(10)
+                      s.connect(sockaddr)
+                  print("PostgreSQL TCP: OK")
+                  break
+              except OSError as exc:
+                  print(f"TCP attempt failed for {sockaddr[0]}: {exc}")
+          else:
+              raise SystemExit("PostgreSQL TCP FAILED for all resolved addresses")
+          PY
+
+      - name: Validate PostgreSQL from archive worker container
         shell: bash
         run: |
           set -euo pipefail
           docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
-
-      - name: Diagnose PostgreSQL and authenticate from archive worker container
-        shell: bash
-        run: |
-          set -euo pipefail
           docker run --rm --network host \
             --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"PostgreSQL host: {h}"); print(f"PostgreSQL port: {port}"); socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("PostgreSQL DNS: OK"); s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP: OK"); s.close(); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=10); print("PostgreSQL authentication: OK"); c.close()'
+            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
 
-      - name: Diagnose AWS S3 from archive worker container
+      - name: Validate S3 connectivity
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          import os
+          import socket
+          from urllib.parse import urlparse
+          region = os.environ["S3_REGION"].strip()
+          custom = os.environ.get("S3_ENDPOINT_URL", "").strip()
+          endpoint = custom or f"https://s3.{region}.amazonaws.com"
+          p = urlparse(endpoint)
+          if p.scheme not in {"http", "https"} or not p.hostname:
+              raise SystemExit(f"Invalid S3 endpoint: {endpoint!r}")
+          print(f"S3 endpoint: {endpoint}")
+          socket.getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
+          print("S3 DNS: OK")
+          PY
           docker run --rm --network host \
             --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket,boto3; from urllib.parse import urlparse; region=os.environ["S3_REGION"]; endpoint=os.environ.get("S3_ENDPOINT_URL","").strip() or f"https://s3.{region}.amazonaws.com"; p=urlparse(endpoint); print(f"S3 endpoint host: {p.hostname}"); socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM); print("S3 DNS: OK"); kwargs=dict(service_name="s3",region_name=region,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); custom=os.environ.get("S3_ENDPOINT_URL","").strip(); kwargs["endpoint_url"]=custom if custom else None; s3=boto3.client(**kwargs); s3.head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
+            -c 'import os,boto3; region=os.environ["S3_REGION"]; custom=os.environ.get("S3_ENDPOINT_URL","").strip(); kwargs=dict(service_name="s3",region_name=region,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); kwargs["endpoint_url"]=custom if custom else None; boto3.client(**kwargs).head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
 
-      - name: Run archive worker against test campaign
+      - name: Run archive worker
         shell: bash
         run: |
           set -euo pipefail
+          set +e
           docker run --rm --network host \
             --entrypoint python \
             -e ARCHIVE_CAMPAIGN_ID \
@@ -79,7 +129,13 @@ jobs:
             -e S3_ACCESS_KEY_ID \
             -e S3_SECRET_ACCESS_KEY \
             zahrly-archive-worker:e2e \
-            -m workers.archive_worker.worker | tee archive_result.json
+            -m workers.archive_worker.worker 2>&1 | tee archive_result.json
+          status=${PIPESTATUS[0]}
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "archive worker exited with status $status"
+            exit "$status"
+          fi
 
       - name: Verify archive result
         shell: bash
@@ -89,8 +145,11 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
-          data = json.loads(Path("archive_result.json").read_text().splitlines()[-1])
-          if data.get("status") != "SUCCEEDED":
+          lines = [line.strip() for line in Path("archive_result.json").read_text().splitlines() if line.strip().startswith("{")]
+          if not lines:
+              raise SystemExit("archive worker produced no JSON result")
+          data = json.loads(lines[-1])
+          if data.get("processed") is not True or data.get("status") != "SUCCEEDED":
               raise SystemExit(f"archive worker did not succeed: {data}")
           print("Archive worker result: SUCCEEDED")
           print(f"campaign_id={data.get('campaign_id')}")
@@ -98,3 +157,11 @@ jobs:
           print(f"checksum={data.get('checksum')}")
           print(f"manifest_id={data.get('manifest_id')}")
           PY
+
+      - name: Upload archive E2E result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: archive-s3-e2e-${{ github.run_id }}
+          path: archive_result.json
+          if-no-files-found: ignore

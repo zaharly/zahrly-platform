@@ -1,32 +1,32 @@
 # ZAHRLY — P0 Group 10 Archive Execution Implementation Authorization v1.0
 
 **Date:** 24 August 2026  
-**Status:** Implementation Authorized — execution contract reconciled; live verification partial  
-**Scope:** `internal.archive_season()` + archive worker/campaign execution boundary; `archive_scheduler`/Cron remain downstream
+**Status:** Implementation Authorized — Live parity reconciled  
+**Scope:** Archive metadata + campaign execution + scheduler runtime gate
 
-## 1. Reconciled execution contract
+## 1. Authorization Result
 
-The latest project sources and live Supabase state reconcile the Archive execution inputs as follows.
+The Archive execution inputs are now reconciled against the latest project decisions and the live Supabase implementation. No new archive queue or alternate archive transport is introduced.
 
-### Storage / ownership
+## 2. Storage / Ownership
 
 ```text
-Historical/Archive Campaign
+Historical / Archive Campaign
         ↓
-worker-side artifact creation + verification
+Worker-side artifact creation + verification
         ↓
-AWS/S3-compatible season archive
+AWS/S3-compatible archive storage
         ↓
-internal.archive_season()
+internal.archive_season(...)
         ↓
 internal.archive_catalog
 ```
 
-The Platform Stack assigns Archive to S3-compatible object storage, Workers to long-running queue/execution/persistence work, and Supabase Postgres to source-of-truth metadata. fileciteturn109file0L14-L33
+The Platform Stack assigns Workers to long-running execution/persistence, S3-compatible object storage to archive artifacts, and Supabase Postgres to authoritative metadata/manifest state. fileciteturn109file0L14-L33
 
-## 2. Exact live `internal.archive_season()` signature
+## 3. Exact Live `internal.archive_season()` Contract
 
-The live deployed function is authoritative:
+Verified live signature:
 
 ```sql
 internal.archive_season(
@@ -46,120 +46,195 @@ internal.archive_season(
 ) returns uuid
 ```
 
-Return: `manifest_id`.
+Return value: `manifest_id`.
 
-Caller: archive campaign/worker, not Cron directly.
+Caller boundary: Archive Campaign/Worker, not browser/player access.
 
-Security boundary verified in live state: `SECURITY INVOKER`; only `postgres` has `EXECUTE` currently.
+Live function behavior validates:
 
-## 3. Eligibility / retention decision
+```text
+end >= start
+row_count >= 0
+campaign exists for the exact scope
+campaign scope_state = ARCHIVE_ONLY
+completeness score exists
+completeness policy version exists
+applicable canonical completeness threshold exists
+completeness >= threshold
+```
 
-Archive creation is explicitly separated from later hot-data retention/deletion. The current Project decision is:
+It then registers the manifest idempotently in `internal.archive_catalog`, finalizes the archive campaign, and completes the linked worker job when present.
+
+## 4. Eligibility / Retention Contract
+
+Source-backed archive creation rule:
 
 ```text
 ARCHIVE_ONLY
-AND required historical scope is complete
+AND required historical scope complete
 AND canonical completeness policy passes
 AND dataset is source-defined archivable
 AND target is not immutable / never-delete
 ```
 
-Dataset-specific archive boundaries:
-
-- `odds_snapshots`: archive at `ARCHIVE_ONLY` / season completion after completeness.
-- `provider_snapshots`: archive payloads while DB metadata remains authoritative.
-- `evaluation_metrics`: archive after final required evaluation completion.
-- `prediction_baselines`: never archive/delete by season.
-- `prediction_read_models`: separate rebuildable lifecycle.
-- `worker_jobs`: separate operational retention lifecycle.
-
-No universal `30/90/365 day` archive-creation cutoff is introduced. Hot-data deletion/partition retirement remains a separate downstream retention policy. fileciteturn111file0L24-L146
-
-## 4. Archive artifact identity
-
-The live schema now implements the exact uniqueness boundary:
+Current P0 archive scheduler selects:
 
 ```text
-country_id
-competition_id
-season
-dataset_type
-provider
-schema_version
-date_start
-date_end
-team_set_hash
-checksum
+odds_snapshots
+provider_snapshots
+evaluation_metrics
 ```
 
-with the unique constraint/index:
+The hot-data retention/deletion lifecycle remains separate from archive creation.
+
+Protected exclusions:
+
+```text
+prediction_baselines
+canonical historical source required for audit/model replay
+audit lineage
+```
+
+The project does not introduce a universal `30/90/365 day` archive-creation cutoff. fileciteturn111file0L127-L158
+
+## 5. Archive Artifact Identity / DDL Reconciliation
+
+The latest project decision requires `team_set_hash` in archive identity. Live parity is verified:
+
+```text
+internal.archive_catalog.team_set_hash
+    text NOT NULL
+```
+
+Live unique constraint:
 
 ```text
 archive_catalog_artifact_identity_key
+UNIQUE (
+  country_id,
+  competition_id,
+  season,
+  dataset_type,
+  provider,
+  schema_version,
+  date_start,
+  date_end,
+  team_set_hash,
+  checksum
+)
 ```
 
-`manifest_id` is the resulting lineage identifier, not part of artifact identity.
-
-Duplicate identity returns the existing `manifest_id`. A changed checksum represents a distinct artifact lineage. This is directly implemented in the live `archive_season()` function.
-
-The latest project archive decision also requires `team_set_hash` as part of manifest identity. fileciteturn118file5L605-L680
-
-## 5. Durable dispatch / campaign contract
+The logical artifact identity is therefore:
 
 ```text
-archive_scheduler
+country_id
++ competition_id
++ season
++ dataset_type
++ provider
++ schema_version
++ date range
++ team_set_hash
++ checksum
+```
+
+`manifest_id` is the resulting lineage identifier and is not part of the identity. A duplicate identity returns the existing manifest id; a different checksum represents a distinct artifact lineage. The latest project reconciliation explicitly requires this `team_set_hash` and uniqueness boundary. fileciteturn111file0L20-L89
+
+## 6. Durable Dispatch / Campaign Contract
+
+The live execution path is now verified:
+
+```text
+archive_scheduler()
         ↓
-short archive-control dispatch
+internal.dispatch_archive_campaign(campaign_id)
+        ↓
+internal.worker_jobs
         ↓
 Archive Campaign / Worker
         ↓
 S3 artifact
         ↓
-internal.archive_season()
+internal.archive_season(...)
         ↓
 internal.archive_catalog
 ```
 
-The Campaign/Worker is the long-running execution owner. PostgreSQL remains the metadata-registration boundary.
-
-No `archive_queue` is created or inferred. No reuse of `backfill_queue` and no direct `worker_jobs` shortcut is authorized by inference. The project explicitly separates Archive creation from later hot-data retention. fileciteturn118file0L104-L152
-
-## 6. Verification status
-
-Verified live on 24 August 2026:
+`dispatch_archive_campaign(p_campaign_id uuid)` creates/reuses a `worker_jobs` record with idempotency key:
 
 ```text
-✅ exact deployed function signature
-✅ SECURITY INVOKER
-✅ anon EXECUTE absent
-✅ authenticated EXECUTE absent
+archive-campaign:<campaign_id>
+```
+
+No `archive_queue` is created. No `backfill_queue` reuse is required.
+
+## 7. Security Boundary
+
+Verified live:
+
+```text
+archive_scheduler()            SECURITY INVOKER
+archive_season(...)             SECURITY INVOKER
+dispatch_archive_campaign(...)  SECURITY INVOKER
+```
+
+`anon` and `authenticated` do not have `EXECUTE` on these internal functions. Archive mutation remains inside the private/internal execution boundary.
+
+## 8. Scheduler / Cron
+
+Verified live:
+
+```text
+cron job: archive-scheduler
+schedule: 0 3 * * *
+command: select internal.archive_scheduler();
+active: true
+```
+
+This matches the documented daily 03:00 archive scheduler target. fileciteturn109file2L247-L261
+
+## 9. Remaining Gate
+
+The implementation authorization is satisfied. Remaining work is runtime/functional verification only:
+
+```text
+✅ team_set_hash DDL reconciliation
 ✅ archive artifact UNIQUE identity
-✅ invalid date range rejects
-✅ negative row_count rejects
+✅ archive_season() live signature/body
+✅ campaign → worker_jobs dispatch
+✅ scheduler → dispatch boundary
+✅ 03:00 Cron installed
+
+⏳ positive end-to-end archive registration with a real canonical campaign
+⏳ duplicate/idempotency archive registration
+⏳ rollback/failure verification
+⏳ successful pg_cron runtime evidence
 ```
 
-Not yet verified live because the canonical reference tables currently contain no rows suitable for a realistic archive fixture, and we will not fabricate production data just to make the test pass:
+No production fixture or fake season should be fabricated solely to manufacture a successful archive run.
+
+## 10. Non-Regression Rules
+
+This authorization does not change:
+
+- `fixtures.status` or fixture lifecycle;
+- Historical Bootstrap semantics;
+- 7-Day Rolling production;
+- immutable prediction baselines;
+- provider/Redis boundaries;
+- the canonical queue set;
+- archive artifact identity/uniqueness without a new explicit decision.
+
+## 11. Final State
 
 ```text
-⏳ positive manifest registration
-⏳ duplicate/idempotency registration
-⏳ rollback with a canonical valid fixture
+Archive Metadata Foundation       ✅
+Archive Execution Authorization  ✅
+Archive Function                 ✅ live
+Archive Campaign Dispatch         ✅ live
+Archive Scheduler                 ✅ live
+Cron                             ✅ installed
+
+Runtime / E2E verification        ⏳
+Group 10 final archive gate       ⏳
 ```
-
-These tests must be run once a real canonical country/competition/season dataset is available.
-
-## 7. Non-goals
-
-This authorization does not yet implement:
-
-- `archive_scheduler` function body;
-- pg_cron schedule/runtime;
-- hot partition deletion/retirement;
-- new retention columns/states;
-- new queue types;
-- provider/Redis access from PostgreSQL;
-- immutable prediction truth mutation.
-
-## 8. Downstream gate
-
-The Archive execution contract is now reconciled and implementation-authorized. The remaining work is implementation/verification of the Campaign/Worker and the short scheduler control operation, followed by the documented `03:00` Cron runtime gate.

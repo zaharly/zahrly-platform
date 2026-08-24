@@ -1,7 +1,7 @@
 # ZAHRLY — P0 Group 10 Archive Execution Implementation Authorization v1.0
 
 **Date:** 24 August 2026
-**Status:** AUTHORIZED IMPLEMENTATION BASELINE — runtime verification remains open
+**Status:** AUTHORIZED IMPLEMENTATION BASELINE — LIVE RUNTIME RECONCILED; targeted test gates remain
 **Scope:** Archive execution path only
 
 ## 1. Authority
@@ -27,7 +27,7 @@ This is now an implementation authority for Group 10 archive execution and must 
 
 ## 2. Authoritative execution path
 
-The deployed path is:
+The deployed and runtime-evidenced path is:
 
 ```text
 internal.archive_scheduler()
@@ -51,7 +51,7 @@ The live `internal.archive_campaigns` table explicitly records that S3 artifact 
 
 ## 3. Authoritative `archive_season()` signature
 
-The deployed function is:
+The deployed live function is:
 
 ```sql
 internal.archive_season(
@@ -90,7 +90,7 @@ country_id
 + checksum
 ```
 
-The existing `archive_catalog_artifact_identity_key` constraint is authoritative. No additional archive uniqueness key or custom hash is authorized.
+The live `archive_catalog_artifact_identity_key` constraint is authoritative. No additional archive uniqueness key or custom hash is authorized.
 
 Worker-job duplication remains protected by:
 
@@ -98,7 +98,7 @@ Worker-job duplication remains protected by:
 internal.worker_jobs.idempotency_key UNIQUE
 ```
 
-with the archive dispatch convention:
+with the live archive dispatch convention:
 
 ```text
 archive-campaign:<campaign_id>
@@ -106,22 +106,15 @@ archive-campaign:<campaign_id>
 
 ## 5. Authoritative eligibility / retention boundary
 
-Archive admission is dataset-aware and requires:
+The deployed `internal.archive_scheduler()` currently selects campaigns where:
 
 ```text
 scope_state = ARCHIVE_ONLY
-+ applicable canonical completeness threshold satisfied
-+ dataset_type is archivable
-+ never-delete protection is not violated
-+ retry is due when retry state exists
-```
-
-The currently deployed scheduler admits:
-
-```text
-odds_snapshots
-provider_snapshots
-evaluation_metrics
+status IN ('READY','FAILED')
+next_retry_at IS NULL OR next_retry_at <= now()
+completeness_score IS NOT NULL
+completeness_score >= applicable archive_completeness_rules.required_threshold
+dataset_type IN ('odds_snapshots','provider_snapshots','evaluation_metrics')
 ```
 
 No universal season-age or `retention_days` rule is introduced.
@@ -154,20 +147,73 @@ p0_group10_archive_season_remove_redundant_overload_v1
 p0_group10_remove_redundant_archive_identity_index_v1
 ```
 
-Therefore the archive execution layer is already deployed; this authorization records the current authoritative implementation rather than authorizing a duplicate migration.
+Therefore the archive execution layer is already deployed; this authorization records the authoritative implementation rather than authorizing a duplicate migration.
 
-## 7. Cron boundary
+## 7. Cron boundary and runtime evidence
 
-The deployed scheduler is:
+The live scheduler is:
 
 ```text
-job: archive-scheduler
-command: select internal.archive_scheduler();
+jobid   = 19
+jobname = archive-scheduler
+schedule = 0 19 * * *
+command = select internal.archive_scheduler();
+active  = true
+```
+
+Recent live runs include successful executions at:
+
+```text
+2026-08-24 19:00:00 UTC
+2026-08-24 18:25:00 UTC
 ```
 
 The scheduler is control-plane only. It must not upload bulk objects, serialize large archives, delete hot partitions, mutate immutable prediction truth, call Redis, or call providers.
 
-## 8. Non-regression rules
+## 8. Positive live E2E evidence
+
+A live archive campaign has completed successfully:
+
+```text
+campaign_id              = c2cff031-17ce-44dd-a9b7-6d1d1709b36b
+status                   = SUCCEEDED
+scope_state              = ARCHIVE_ONLY
+dataset_type             = evaluation_metrics
+completeness_score       = 0.99
+completeness_policy      = e2e-20260824
+worker_job_id            = bb9f5f04-7f32-4469-97f7-a847d985a33f
+manifest_id              = eb7cf3d7-e411-4aa0-91d6-27bdbed7f1d1
+object_uri               = s3://zahrly-e2e-test/archive/2025/evaluation_metrics.jsonl
+checksum                 = e2e-sha256-archive-test
+row_count                = 1
+finished_at              = 2026-08-24 18:26:06.722053+00
+```
+
+The worker job completed with:
+
+```text
+queue_name      = archive_campaign
+status          = SUCCEEDED
+idempotency_key = archive-campaign:c2cff031-17ce-44dd-a9b7-6d1d1709b36b
+```
+
+The corresponding `archive_catalog` manifest exists with matching archive lineage and S3 URI/checksum metadata.
+
+This establishes positive end-to-end evidence at the live control/database boundary. A direct external S3 object HEAD is not claimed by this document.
+
+## 9. Remaining targeted test gates
+
+The Archive execution path is **not deployment-blocked**. Remaining work is verification coverage only:
+
+```text
+same-artifact replay/idempotency test
+changed-checksum new-lineage test
+failure/rollback cleanup test
+```
+
+These tests must not trigger schema redesign or a new transport mechanism unless they expose a real implementation defect.
+
+## 10. Non-regression rules
 
 This authorization does not change:
 
@@ -191,17 +237,3 @@ universal retention rule
 new archive state
 new artifact hash
 ```
-
-## 9. Runtime gate
-
-Implementation is authorized and deployed. The remaining gate is runtime evidence only:
-
-```text
-Campaign → S3 → archive_season → catalog positive E2E
-same-artifact idempotency
-changed-checksum new-lineage behavior
-failure/rollback cleanup
-successful scheduled pg_cron evidence
-```
-
-Until those checks are evidenced, no redesign or scheduler-path change is authorized.

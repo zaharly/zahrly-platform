@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Historical archive worker with S3-compatible object verification."""
+"""Historical archive worker with S3 object verification."""
 from __future__ import annotations
 
 import hashlib
@@ -12,21 +12,34 @@ from datetime import datetime, timezone
 
 import boto3
 import psycopg
+from botocore.config import Config
 from psycopg.rows import dict_row
 
 
-def env(name: str) -> str:
+STAGE = "INIT"
+
+
+def env(name: str, required: bool = True, default: str = "") -> str:
     value = os.environ.get(name, "").strip()
-    if not value:
+    if required and not value:
         raise RuntimeError(f"missing required environment variable: {name}")
-    return value
+    return value or default
+
+
+def set_stage(name: str) -> None:
+    global STAGE
+    STAGE = name
+    print(f"ARCHIVE_STAGE={name}", flush=True)
 
 
 def connect():
-    return psycopg.connect(env("SUPABASE_DB_URL"), row_factory=dict_row)
+    set_stage("DB_CONNECT")
+    url = env("SUPABASE_DB_URL")
+    return psycopg.connect(url, row_factory=dict_row, connect_timeout=15)
 
 
 def claim_campaign(conn):
+    set_stage("CAMPAIGN_CLAIM")
     campaign_id = env("ARCHIVE_CAMPAIGN_ID")
     with conn.transaction():
         with conn.cursor() as cur:
@@ -57,6 +70,7 @@ def claim_campaign(conn):
 
 
 def build_artifact(campaign: dict) -> tuple[bytes, int]:
+    set_stage("BUILD_ARTIFACT")
     if campaign["provider"] != "e2e-provider":
         raise RuntimeError(f"unsupported archive provider for E2E materializer: {campaign['provider']}")
     rows = [
@@ -80,20 +94,35 @@ def build_artifact(campaign: dict) -> tuple[bytes, int]:
 
 
 def upload_and_verify(payload: bytes, campaign: dict) -> tuple[str, str]:
+    set_stage("S3_CLIENT")
     bucket = env("S3_BUCKET")
-    client = boto3.client(
-        "s3", endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,
-        region_name=os.environ.get("S3_REGION", "us-east-1"),
-        aws_access_key_id=env("S3_ACCESS_KEY_ID"),
-        aws_secret_access_key=env("S3_SECRET_ACCESS_KEY"),
-    )
-    prefix = os.environ.get("S3_PREFIX", "zahrly/archive").strip("/")
+    region = env("S3_REGION")
+    endpoint = os.environ.get("S3_ENDPOINT_URL", "").strip() or None
+
+    client_kwargs = {
+        "service_name": "s3",
+        "region_name": region,
+        "aws_access_key_id": env("S3_ACCESS_KEY_ID"),
+        "aws_secret_access_key": env("S3_SECRET_ACCESS_KEY"),
+        "config": Config(retries={"max_attempts": 5, "mode": "standard"}),
+    }
+    if endpoint:
+        client_kwargs["endpoint_url"] = endpoint
+
+    client = boto3.client(**client_kwargs)
+    prefix = env("S3_PREFIX", required=False, default="zahrly/archive").strip("/")
     key = f"{prefix}/{campaign['dataset_type']}/season={campaign['season']}/campaign={campaign['campaign_id']}.json"
     digest = hashlib.sha256(payload).hexdigest()
+
+    set_stage("S3_PUT")
     client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType="application/json")
+
+    set_stage("S3_HEAD")
     head = client.head_object(Bucket=bucket, Key=key)
     if int(head.get("ContentLength", -1)) != len(payload):
         raise RuntimeError("S3 object length verification failed")
+
+    set_stage("S3_GET")
     body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
     if hashlib.sha256(body).hexdigest() != digest:
         raise RuntimeError("S3 object checksum verification failed")
@@ -101,6 +130,7 @@ def upload_and_verify(payload: bytes, campaign: dict) -> tuple[str, str]:
 
 
 def finalize(conn, campaign: dict, object_uri: str, checksum: str, row_count: int):
+    set_stage("FINALIZE_DB")
     manifest_id = uuid.uuid4()
     with conn.transaction():
         with conn.cursor() as cur:
@@ -130,10 +160,14 @@ def finalize(conn, campaign: dict, object_uri: str, checksum: str, row_count: in
 
 def fail(conn, campaign: dict, exc: Exception):
     message = str(exc)[:2000]
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute("""update internal.archive_campaigns set status='FAILED', error_code='ARCHIVE_WORKER_FAILED', error_message=%s, finished_at=now(), updated_at=now() where campaign_id=%s""", (message,campaign["campaign_id"]))
-            cur.execute("""update internal.worker_jobs set status='FAILED', finished_at=now(), lease_expires_at=null, error_code='ARCHIVE_WORKER_FAILED', error_message=%s where job_id=%s""", (message,campaign["worker_job_id"]))
+    if conn and campaign:
+        try:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("""update internal.archive_campaigns set status='FAILED', error_code='ARCHIVE_WORKER_FAILED', error_message=%s, finished_at=now(), updated_at=now() where campaign_id=%s""", (message,campaign["campaign_id"]))
+                    cur.execute("""update internal.worker_jobs set status='FAILED', finished_at=now(), lease_expires_at=null, error_code='ARCHIVE_WORKER_FAILED', error_message=%s where job_id=%s""", (message,campaign["worker_job_id"]))
+        except Exception as persist_exc:
+            print(f"ARCHIVE_FAILURE_PERSISTENCE_ERROR={persist_exc}", file=sys.stderr, flush=True)
 
 
 def main() -> int:
@@ -143,21 +177,21 @@ def main() -> int:
         conn = connect()
         campaign = claim_campaign(conn)
         if not campaign:
-            print(json.dumps({"processed": False, "reason": "campaign_not_queued"}))
+            print(json.dumps({"processed": False, "reason": "campaign_not_queued"}), flush=True)
             return 0
         payload, row_count = build_artifact(campaign)
         object_uri, checksum = upload_and_verify(payload, campaign)
         manifest_id = finalize(conn, campaign, object_uri, checksum, row_count)
-        print(json.dumps({"processed": True, "campaign_id": str(campaign["campaign_id"]), "status": "SUCCEEDED", "object_uri": object_uri, "checksum": checksum, "row_count": row_count, "manifest_id": manifest_id}, separators=(",", ":")))
+        set_stage("SUCCEEDED")
+        print(json.dumps({"processed": True, "campaign_id": str(campaign["campaign_id"]), "status": "SUCCEEDED", "object_uri": object_uri, "checksum": checksum, "row_count": row_count, "manifest_id": manifest_id}, separators=(",", ":")), flush=True)
         return 0
     except Exception as exc:
-        if conn and campaign:
-            try: fail(conn, campaign, exc)
-            except Exception as finalize_exc: print(f"archive worker failure persistence failed: {finalize_exc}", file=sys.stderr)
-        print(f"archive worker failed: {exc}", file=sys.stderr)
+        fail(conn, campaign, exc)
+        print(f"archive worker failed at stage {STAGE}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         return 1
     finally:
-        if conn: conn.close()
+        if conn:
+            conn.close()
 
 
 if __name__ == "__main__":

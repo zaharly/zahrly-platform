@@ -36,9 +36,10 @@ jobs:
           if [ -z "${S3_PREFIX:-}" ]; then
             echo "S3_PREFIX secret is not set; using safe default: zahrly/archive"
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
+            export S3_PREFIX=zahrly/archive
           fi
 
-      - name: Diagnose Supabase database hostname
+      - name: Diagnose Supabase database hostname on runner
         shell: bash
         run: |
           set -euo pipefail
@@ -47,24 +48,19 @@ jobs:
           from urllib.parse import urlparse
           import socket
 
-          raw = os.environ["SUPABASE_DB_URL"]
-          parsed = urlparse(raw)
+          parsed = urlparse(os.environ["SUPABASE_DB_URL"])
           host = parsed.hostname
           port = parsed.port or 5432
-
           if not host:
               raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
-
           print(f"Supabase DB host: {host}")
           print(f"Supabase DB port: {port}")
-          print("Resolving hostname...")
           try:
               infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
-              raise SystemExit(f"Supabase DB hostname cannot be resolved: {host} ({exc})")
-          addresses = sorted({item[4][0] for item in infos})
-          print("Resolved addresses:")
-          for address in addresses:
+              raise SystemExit(f"Runner DNS FAILED: {host} ({exc})")
+          print("Runner DNS OK:")
+          for address in sorted({item[4][0] for item in infos}):
               print(f"- {address}")
           PY
 
@@ -73,6 +69,34 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t zahrly-archive-worker:e2e .
+
+      - name: Diagnose Supabase database hostname inside archive worker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -e SUPABASE_DB_URL \
+            zahrly-archive-worker:e2e \
+            python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          import socket
+
+          parsed = urlparse(os.environ["SUPABASE_DB_URL"])
+          host = parsed.hostname
+          port = parsed.port or 5432
+          if not host:
+              raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
+          print(f"Container DB host: {host}")
+          print(f"Container DB port: {port}")
+          try:
+              infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+          except socket.gaierror as exc:
+              raise SystemExit(f"Container DNS FAILED: {host} ({exc})")
+          print("Container DNS OK:")
+          for address in sorted({item[4][0] for item in infos}):
+              print(f"- {address}")
+          PY
 
       - name: Run archive worker against test campaign
         shell: bash

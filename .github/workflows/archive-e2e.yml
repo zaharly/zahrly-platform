@@ -39,6 +39,7 @@ jobs:
             test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
           done
           docker run --rm \
+            -e ARCHIVE_CAMPAIGN_ID \
             -e SUPABASE_DB_URL \
             -e S3_ENDPOINT_URL \
             -e S3_REGION \
@@ -61,9 +62,7 @@ jobs:
         run: |
           set -euo pipefail
           python - <<'PY'
-          import json
-          import os
-          import boto3
+          import json, os, boto3, hashlib
           import psycopg
           from psycopg.rows import dict_row
 
@@ -91,16 +90,13 @@ jobs:
           assert row['row_count'] == row['catalog_row_count'], row
           assert row['manifest_id'] == result['manifest_id'], row
 
-          client = boto3.client(
-              's3', endpoint_url=os.environ.get('S3_ENDPOINT_URL') or None,
+          client = boto3.client('s3', endpoint_url=os.environ.get('S3_ENDPOINT_URL') or None,
               region_name=os.environ.get('S3_REGION') or 'us-east-1',
               aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'],
               aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY'])
-          uri = row['object_uri'][5:]
-          bucket, key = uri.split('/', 1)
+          bucket, key = row['object_uri'][5:].split('/', 1)
           head = client.head_object(Bucket=bucket, Key=key)
           body = client.get_object(Bucket=bucket, Key=key)['Body'].read()
-          import hashlib
           assert len(body) == head['ContentLength'], (len(body), head)
           assert hashlib.sha256(body).hexdigest() == row['checksum'], row
           print('archive S3 E2E: PASS')

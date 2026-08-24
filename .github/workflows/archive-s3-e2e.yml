@@ -1,4 +1,4 @@
-name: archive-s3-e2e
+name: Zahrly Archive S3 E2E
 
 on:
   workflow_dispatch:
@@ -12,11 +12,18 @@ on:
 permissions:
   contents: read
 
+# Prevent two manually-triggered archive tests from claiming the same campaign.
+concurrency:
+  group: zahrly-archive-s3-e2e-${{ inputs.campaign_id }}
+  cancel-in-progress: true
+
 jobs:
   archive-s3-e2e:
+    name: archive-s3-e2-e
     runs-on: ubuntu-latest
     env:
       ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
+      SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
       S3_REGION: ${{ secrets.S3_REGION }}
@@ -29,40 +36,82 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Validate secrets and normalize defaults
+      - name: Validate secrets and normalize configuration
         shell: bash
         run: |
           set -euo pipefail
           for v in SUPABASE_DB_URL S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
             test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
           done
+
           if [ -z "${S3_PREFIX:-}" ]; then
             echo "S3_PREFIX secret is empty; using zahrly/archive"
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
           fi
 
-      - name: Validate PostgreSQL URL and DNS on runner
+          python - <<'PY'
+          import os
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+
+          raw = os.environ["SUPABASE_DB_URL"].strip()
+          p = urlsplit(raw)
+          if p.scheme not in {"postgres", "postgresql"}:
+              raise SystemExit(f"SUPABASE_DB_URL must use postgres:// or postgresql://, got {p.scheme!r}")
+          if not p.hostname:
+              raise SystemExit("SUPABASE_DB_URL has no hostname")
+          if p.password is None:
+              raise SystemExit("SUPABASE_DB_URL has no password")
+
+          host = p.hostname.lower().rstrip(".")
+          project_ref = os.environ["SUPABASE_PROJECT_REF"]
+
+          # The failing runs used a Supavisor pooler hostname that did not resolve
+          # on the GitHub runner. Use the project's canonical PostgreSQL endpoint
+          # for this E2E worker. The DB password remains the GitHub secret value.
+          if host.endswith(".pooler.supabase.com"):
+              host = f"db.{project_ref}.supabase.co"
+              user = "postgres"
+              port = 5432
+              print("Detected Supabase pooler URL; using canonical project DB endpoint")
+          else:
+              user = unquote(p.username or "postgres")
+              port = p.port or 5432
+
+          password = quote(unquote(p.password), safe="")
+          user = quote(user, safe="")
+          netloc = f"{user}:{password}@{host}:{port}"
+          query = p.query
+          if "sslmode=" not in query:
+              query = f"{query}&sslmode=require" if query else "sslmode=require"
+
+          normalized = urlunsplit(("postgresql", netloc, p.path or "/postgres", query, ""))
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
+              f.write(f"SUPABASE_DB_URL={normalized}\n")
+          print(f"PostgreSQL host selected: {host}")
+          print(f"PostgreSQL port selected: {port}")
+          print(f"PostgreSQL database: {(p.path or '/postgres').lstrip('/') or 'postgres'}")
+          PY
+
+      - name: Validate PostgreSQL DNS and TCP on runner
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import os
           import socket
-          from urllib.parse import urlparse
+          from urllib.parse import urlsplit
 
-          raw = os.environ["SUPABASE_DB_URL"].strip()
-          p = urlparse(raw)
-          if p.scheme not in {"postgres", "postgresql"}:
-              raise SystemExit(f"SUPABASE_DB_URL must use postgres:// or postgresql://, got scheme={p.scheme!r}")
-          if not p.hostname:
-              raise SystemExit("SUPABASE_DB_URL has no hostname")
+          p = urlsplit(os.environ["SUPABASE_DB_URL"])
+          host = p.hostname
           port = p.port or 5432
-          print(f"PostgreSQL host: {p.hostname}")
+          print(f"PostgreSQL host: {host}")
           print(f"PostgreSQL port: {port}")
+
           try:
-              addresses = socket.getaddrinfo(p.hostname, port, type=socket.SOCK_STREAM)
+              addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
-              raise SystemExit(f"PostgreSQL DNS FAILED for {p.hostname}: {exc}")
+              raise SystemExit(f"PostgreSQL DNS FAILED for {host}: {exc}")
+
           print("PostgreSQL DNS: OK")
           print(f"resolved_addresses={len(addresses)}")
           for family, _, _, _, sockaddr in addresses:
@@ -78,11 +127,14 @@ jobs:
               raise SystemExit("PostgreSQL TCP FAILED for all resolved addresses")
           PY
 
+      - name: Build archive worker image
+        shell: bash
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
+
       - name: Validate PostgreSQL from archive worker container
         shell: bash
         run: |
           set -euo pipefail
-          docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
           docker run --rm --network host \
             --entrypoint python \
             -e SUPABASE_DB_URL \
@@ -97,6 +149,7 @@ jobs:
           import os
           import socket
           from urllib.parse import urlparse
+
           region = os.environ["S3_REGION"].strip()
           custom = os.environ.get("S3_ENDPOINT_URL", "").strip()
           endpoint = custom or f"https://s3.{region}.amazonaws.com"
@@ -104,9 +157,13 @@ jobs:
           if p.scheme not in {"http", "https"} or not p.hostname:
               raise SystemExit(f"Invalid S3 endpoint: {endpoint!r}")
           print(f"S3 endpoint: {endpoint}")
-          socket.getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
+          try:
+              socket.getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
+          except socket.gaierror as exc:
+              raise SystemExit(f"S3 DNS FAILED for {p.hostname}: {exc}")
           print("S3 DNS: OK")
           PY
+
           docker run --rm --network host \
             --entrypoint python \
             -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
@@ -145,6 +202,7 @@ jobs:
           python - <<'PY'
           import json
           from pathlib import Path
+
           lines = [line.strip() for line in Path("archive_result.json").read_text().splitlines() if line.strip().startswith("{")]
           if not lines:
               raise SystemExit("archive worker produced no JSON result")

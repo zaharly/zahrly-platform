@@ -3,39 +3,22 @@
 **Date:** 24 August 2026  
 **Status:** LIVE RUNTIME RECONCILED — deployment blockers cleared; targeted verification tests remain
 
-## 1. Current-state authority
-
 The Archive Layer is deployed and active in the live Supabase project `qosvqlwkexrhswcuakib`.
 
-```text
-internal.archive_catalog
-internal.archive_completeness_rules
-internal.archive_campaigns
-internal.worker_jobs
-internal.archive_season(...)
-internal.dispatch_archive_campaign(...)
-internal.archive_scheduler()
-pg_cron archive-scheduler
-```
-
-## 2. Migration provenance
-
-Live migration history contains the Archive implementation sequence:
+## Live state
 
 ```text
-p0_group10_archive_layer_ddl_foundation_v1
-p0_group10_archive_team_set_hash_reconciliation_v1
-p0_group10_archive_season_registration_v1
-p0_group10_archive_campaign_dispatch_contract_v1
-p0_group10_archive_season_campaign_finalize_v1
-p0_group10_archive_scheduler_cron_v1
-p0_group10_archive_identity_team_set_hash_v1
-p0_group10_archive_season_registration_v1
-p0_group10_archive_season_remove_redundant_overload_v1
-p0_group10_remove_redundant_archive_identity_index_v1
+internal.archive_catalog              DEPLOYED
+internal.archive_completeness_rules   DEPLOYED
+internal.archive_campaigns            DEPLOYED
+internal.worker_jobs                  DEPLOYED
+internal.archive_season(...)          DEPLOYED
+internal.dispatch_archive_campaign    DEPLOYED
+internal.archive_scheduler()          DEPLOYED
+pg_cron archive-scheduler             ACTIVE
 ```
 
-## 3. Live execution contract
+## Authoritative execution path
 
 ```text
 archive_scheduler()
@@ -49,7 +32,7 @@ archive_scheduler()
 
 No `archive_queue` exists or is required.
 
-## 4. Live `archive_season()` signature
+## Live `archive_season()` signature
 
 ```sql
 internal.archive_season(
@@ -69,9 +52,9 @@ internal.archive_season(
 ) returns uuid
 ```
 
-`SECURITY INVOKER`; manifest registration/idempotent replay at the DB boundary; S3 object creation remains Campaign/Worker-owned.
+`SECURITY INVOKER`; DB-side manifest registration/idempotent replay; S3 object creation remains Campaign/Worker-owned.
 
-## 5. Live artifact identity
+## Live artifact identity
 
 ```text
 country_id + competition_id + season + dataset_type + provider
@@ -86,11 +69,9 @@ Worker job identity:
 archive-campaign:<campaign_id>
 ```
 
-backed by the unique `worker_jobs.idempotency_key` constraint.
+backed by unique `worker_jobs.idempotency_key`.
 
-## 6. Live eligibility
-
-The deployed scheduler executes this effective predicate:
+## Live scheduler predicate
 
 ```text
 scope_state = ARCHIVE_ONLY
@@ -101,9 +82,9 @@ completeness_score >= dataset policy threshold
 dataset_type IN ('odds_snapshots','provider_snapshots','evaluation_metrics')
 ```
 
-No universal season-age or `retention_days` rule exists in the scheduler.
+No universal season-age or `retention_days` rule is used by the scheduler.
 
-## 7. Live Cron evidence
+## Live Cron evidence
 
 ```text
 jobid    = 19
@@ -113,38 +94,33 @@ command  = select internal.archive_scheduler();
 active   = true
 ```
 
-Successful live executions were observed at:
+Successful runs observed:
 
 ```text
 2026-08-24 19:00:00 UTC
 2026-08-24 18:25:00 UTC
 ```
 
-## 8. Positive E2E evidence
-
-Live campaign:
+## Positive live E2E evidence
 
 ```text
-campaign_id              = c2cff031-17ce-44dd-a9b7-6d1d1709b36b
-status                   = SUCCEEDED
-scope_state              = ARCHIVE_ONLY
-dataset_type             = evaluation_metrics
-completeness_score       = 0.99
-worker_job_id            = bb9f5f04-7f32-4469-97f7-a847d985a33f
-worker_queue             = archive_campaign
-worker_status            = SUCCEEDED
-manifest_id              = eb7cf3d7-e411-4aa0-91d6-27bdbed7f1d1
-object_uri               = s3://zahrly-e2e-test/archive/2025/evaluation_metrics.jsonl
-checksum                 = e2e-sha256-archive-test
-row_count                = 1
-finished_at              = 2026-08-24 18:26:06.722053+00
+campaign_id       = c2cff031-17ce-44dd-a9b7-6d1d1709b36b
+status            = SUCCEEDED
+scope_state       = ARCHIVE_ONLY
+dataset_type      = evaluation_metrics
+completeness      = 0.99
+worker_job_id     = bb9f5f04-7f32-4469-97f7-a847d985a33f
+worker_queue      = archive_campaign
+manifest_id       = eb7cf3d7-e411-4aa0-91d6-27bdbed7f1d1
+object_uri        = s3://zahrly-e2e-test/archive/2025/evaluation_metrics.jsonl
+checksum          = e2e-sha256-archive-test
+row_count         = 1
+finished_at       = 2026-08-24 18:26:06.722053+00
 ```
 
-Matching `archive_catalog` lineage exists for the same manifest, URI, checksum, row count, completeness, season, scope dates, team-set hash, and schema version.
+Matching `archive_catalog` lineage exists. This proves the live control/database-bound E2E path; it does not claim an external S3 HEAD check.
 
-This proves a positive live control/database-bound E2E path. It does not claim an external S3 HEAD verification.
-
-## 9. Final classification
+## Final classification
 
 ```text
 Archive Layer              DEPLOYED
@@ -159,8 +135,8 @@ Changed-checksum lineage  TEST GATE
 Failure/rollback cleanup   TEST GATE
 ```
 
-The remaining items are verification coverage, not deployment blockers.
+Remaining items are verification coverage, not deployment blockers.
 
-## 10. Non-regression
+## Non-regression
 
-This document changes project-state classification only. It does not authorize schema redesign, a new queue, a universal retention rule, or changes to Historical Bootstrap, 7-Day Rolling, prediction truth, `prediction_baselines`, `rolling_fixture_dispatch`, `queue_recovery`, or `provider_health`.
+This is a documentation/state-reconciliation change only. It does not authorize schema redesign, a new queue, a universal retention rule, or changes to Historical Bootstrap, 7-Day Rolling, prediction truth, `prediction_baselines`, `rolling_fixture_dispatch`, `queue_recovery`, or `provider_health`.

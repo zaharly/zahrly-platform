@@ -4,11 +4,23 @@
 **Status:** Implementation Authorized — Live parity reconciled  
 **Scope:** Archive metadata + campaign execution + scheduler runtime gate
 
-## Authorization Result
+The live Supabase state now matches the latest project execution decision for the archive execution layer.
 
-The Archive execution inputs are reconciled against the latest project decisions and live Supabase state. No new archive queue or alternate archive transport is introduced.
+### Verified
 
-## Verified function contract
+```text
+team_set_hash text NOT NULL                    ✅
+archive_catalog_artifact_identity_key UNIQUE   ✅
+internal.archive_season(...) signature         ✅
+archive_scheduler()                            ✅
+internal.dispatch_archive_campaign(uuid)      ✅
+worker_jobs idempotency                        ✅
+S3/object-storage artifact ownership          ✅ contract
+anon/authenticated EXECUTE                    ❌ absent
+archive-scheduler cron 0 3 * * *              ✅ active
+```
+
+The live `archive_season` signature is:
 
 ```sql
 internal.archive_season(
@@ -28,80 +40,34 @@ internal.archive_season(
 ) returns uuid
 ```
 
-The live function is SECURITY INVOKER, returns the canonical `manifest_id`, validates the archive campaign and completeness policy, registers the archive manifest idempotently, and finalizes the campaign/worker job.
-
-## Eligibility / retention
-
-Archive creation is gated by:
+Artifact identity is:
 
 ```text
-ARCHIVE_ONLY
-AND required historical scope complete
-AND canonical completeness policy passes
-AND dataset is source-defined archivable
-AND target is not immutable / never-delete
+country_id + competition_id + season + dataset_type + provider
++ schema_version + date_start + date_end + team_set_hash + checksum
 ```
 
-Current P0 archive scheduler targets `odds_snapshots`, `provider_snapshots`, and `evaluation_metrics`. Hot-data retention/deletion remains separate. `prediction_baselines` and canonical audit/replay source remain protected.
+with existing live unique constraint `archive_catalog_artifact_identity_key`. fileciteturn111file0L20-L89
 
-## Artifact identity / DDL reconciliation
+Archive creation is gated by `ARCHIVE_ONLY`, completed historical scope, canonical completeness, archivable dataset type, and never-delete protection. Hot-data retention/deletion is separate. fileciteturn111file1L199-L215
 
-Live verification confirms:
-
-```text
-internal.archive_catalog.team_set_hash = text NOT NULL
-
-archive_catalog_artifact_identity_key
-UNIQUE (
-  country_id,
-  competition_id,
-  season,
-  dataset_type,
-  provider,
-  schema_version,
-  date_start,
-  date_end,
-  team_set_hash,
-  checksum
-)
-```
-
-Duplicate identity returns the existing `manifest_id`; a changed checksum is distinct artifact lineage. fileciteturn111file0L20-L89
-
-## Durable campaign dispatch
+The live durable dispatch path is:
 
 ```text
 archive_scheduler()
-  ↓
-internal.dispatch_archive_campaign(campaign_id)
-  ↓
-internal.worker_jobs
-  ↓
-Archive Campaign / Worker
-  ↓
-S3 artifact
-  ↓
-internal.archive_season(...)
-  ↓
-internal.archive_catalog
+  → dispatch_archive_campaign(campaign_id)
+  → worker_jobs
+  → Archive Campaign / Worker
+  → S3 artifact
+  → archive_season()
+  → archive_catalog
 ```
 
-`dispatch_archive_campaign()` uses worker-job idempotency key `archive-campaign:<campaign_id>`. No `archive_queue` is introduced.
+No `archive_queue` is introduced.
 
-## Runtime / security parity
+### Remaining Gate
 
-Verified live:
-
-```text
-archive_scheduler()             SECURITY INVOKER
-archive_season(...)              SECURITY INVOKER
-dispatch_archive_campaign(...)  SECURITY INVOKER
-anon EXECUTE                     absent
-authenticated EXECUTE            absent
-archive-scheduler                0 3 * * * / active
-```
-
-## Remaining verification gate
+Only functional/runtime evidence remains:
 
 ```text
 positive canonical campaign registration
@@ -110,8 +76,4 @@ rollback/failure verification
 successful pg_cron runtime evidence
 ```
 
-No artificial production fixture should be created merely to manufacture a successful archive run.
-
-## Non-regression
-
-No change to fixture lifecycle, Historical Bootstrap, 7-Day Rolling, provider/Redis boundaries, immutable prediction truth, or canonical queues is authorized by this artifact.
+No fake production fixture should be created solely to manufacture success.

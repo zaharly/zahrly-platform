@@ -11,23 +11,14 @@ This decision reconciles the latest Group 10 architecture decisions with the cur
 The authoritative execution storage decision is:
 
 ```text
-Archive artifact creation/storage
-    = AWS S3
-
-Archive execution owner
-    = Archive Campaign / Archive Worker
-
-PostgreSQL
-    = control state + manifest/lineage registration
+Archive artifact creation/storage = AWS S3
+Archive execution owner          = Archive Campaign / Archive Worker
+PostgreSQL                       = control state + manifest/lineage registration
 ```
 
-S3 is the durable archive-artifact store. Campaign/Archive Worker owns serialization/upload and retrieval/processing of the archive artifact. PostgreSQL must not perform bulk archive transfer.
-
-This is now an implementation authority for Group 10 archive execution and must not be replaced by an `archive_queue`, direct Cron-to-S3 path, or provider/Redis call from PostgreSQL.
+No `archive_queue`, direct Cron-to-S3 path, provider call, or Redis call from PostgreSQL is authorized.
 
 ## 2. Authoritative execution path
-
-The deployed and runtime-evidenced path is:
 
 ```text
 internal.archive_scheduler()
@@ -45,13 +36,9 @@ internal.archive_season(...)
 internal.archive_catalog
 ```
 
-No `archive_queue` is introduced.
-
-The live `internal.archive_campaigns` table explicitly records that S3 artifact creation is owned by the archive worker/campaign and that PostgreSQL stores control state and manifest lineage.
+The live `internal.archive_campaigns` table explicitly records Campaign/Worker ownership of S3 artifact creation and PostgreSQL ownership of control/lineage state.
 
 ## 3. Authoritative `archive_season()` signature
-
-The deployed live function is:
 
 ```sql
 internal.archive_season(
@@ -71,68 +58,57 @@ internal.archive_season(
 ) returns uuid
 ```
 
-It is `SECURITY INVOKER` and performs DB-side manifest registration/idempotent replay. It does not create the S3 object.
+Live state: `SECURITY INVOKER`. The function registers the manifest/idempotent DB lineage and does not create the S3 object.
 
 ## 4. Authoritative archive-artifact identity
 
-The live database uniqueness boundary is:
+The live database constraint is:
 
 ```text
-country_id
-+ competition_id
-+ season
-+ dataset_type
-+ provider
-+ schema_version
-+ date_start
-+ date_end
-+ team_set_hash
-+ checksum
+UNIQUE (
+  country_id,
+  competition_id,
+  season,
+  dataset_type,
+  provider,
+  schema_version,
+  date_start,
+  date_end,
+  team_set_hash,
+  checksum
+)
 ```
 
-The live `archive_catalog_artifact_identity_key` constraint is authoritative. No additional archive uniqueness key or custom hash is authorized.
-
-Worker-job duplication remains protected by:
+Constraint name:
 
 ```text
-internal.worker_jobs.idempotency_key UNIQUE
+archive_catalog_artifact_identity_key
 ```
 
-with the live archive dispatch convention:
+Worker-job duplication is protected by `internal.worker_jobs.idempotency_key UNIQUE`, with:
 
 ```text
 archive-campaign:<campaign_id>
 ```
 
-## 5. Authoritative eligibility / retention boundary
+## 5. Authoritative live eligibility
 
-The deployed `internal.archive_scheduler()` currently selects campaigns where:
+`internal.archive_scheduler()` currently selects:
 
 ```text
 scope_state = ARCHIVE_ONLY
 status IN ('READY','FAILED')
 next_retry_at IS NULL OR next_retry_at <= now()
 completeness_score IS NOT NULL
-completeness_score >= applicable archive_completeness_rules.required_threshold
+completeness_score >= archive_completeness_rules.required_threshold
 dataset_type IN ('odds_snapshots','provider_snapshots','evaluation_metrics')
 ```
 
-No universal season-age or `retention_days` rule is introduced.
-
-Hot-table deletion/partition removal is a separate retention lifecycle and is not part of archive artifact creation.
-
-Protected data remains protected, including:
-
-```text
-prediction_baselines
-audit source
-model-replay source
-canonical historical source required for reconstruction
-```
+There is no universal season-age or `retention_days` rule. Hot-table deletion/partition removal remains a separate retention lifecycle.
 
 ## 6. Deployment provenance
 
-The live migration history contains the archive implementation sequence:
+The live migration history contains the Archive implementation sequence:
 
 ```text
 p0_group10_archive_layer_ddl_foundation_v1
@@ -147,32 +123,28 @@ p0_group10_archive_season_remove_redundant_overload_v1
 p0_group10_remove_redundant_archive_identity_index_v1
 ```
 
-Therefore the archive execution layer is already deployed; this authorization records the authoritative implementation rather than authorizing a duplicate migration.
+The Archive execution layer is therefore deployed and authoritative. No duplicate migration is required.
 
-## 7. Cron boundary and runtime evidence
-
-The live scheduler is:
+## 7. Live Cron evidence
 
 ```text
-jobid   = 19
-jobname = archive-scheduler
+jobid    = 19
+jobname  = archive-scheduler
 schedule = 0 19 * * *
-command = select internal.archive_scheduler();
-active  = true
+command  = select internal.archive_scheduler();
+active   = true
 ```
 
-Recent live runs include successful executions at:
+Recent successful runs were observed at:
 
 ```text
 2026-08-24 19:00:00 UTC
 2026-08-24 18:25:00 UTC
 ```
 
-The scheduler is control-plane only. It must not upload bulk objects, serialize large archives, delete hot partitions, mutate immutable prediction truth, call Redis, or call providers.
-
 ## 8. Positive live E2E evidence
 
-A live archive campaign has completed successfully:
+A live campaign completed successfully:
 
 ```text
 campaign_id              = c2cff031-17ce-44dd-a9b7-6d1d1709b36b
@@ -189,7 +161,7 @@ row_count                = 1
 finished_at              = 2026-08-24 18:26:06.722053+00
 ```
 
-The worker job completed with:
+The corresponding worker job completed successfully with:
 
 ```text
 queue_name      = archive_campaign
@@ -197,11 +169,11 @@ status          = SUCCEEDED
 idempotency_key = archive-campaign:c2cff031-17ce-44dd-a9b7-6d1d1709b36b
 ```
 
-The corresponding `archive_catalog` manifest exists with matching archive lineage and S3 URI/checksum metadata.
+The corresponding `archive_catalog` manifest exists with matching lineage and S3 URI/checksum metadata.
 
-This establishes positive end-to-end evidence at the live control/database boundary. A direct external S3 object HEAD is not claimed by this document.
+This is positive control/database-boundary E2E evidence. It does not claim a direct external S3 HEAD check.
 
-## 9. Remaining targeted test gates
+## 9. Remaining verification gates
 
 The Archive execution path is **not deployment-blocked**. Remaining work is verification coverage only:
 
@@ -211,9 +183,9 @@ changed-checksum new-lineage test
 failure/rollback cleanup test
 ```
 
-These tests must not trigger schema redesign or a new transport mechanism unless they expose a real implementation defect.
+These tests must not trigger schema redesign or a new transport mechanism unless a real defect is found.
 
-## 10. Non-regression rules
+## 10. Non-regression
 
 This authorization does not change:
 
@@ -223,12 +195,12 @@ Historical Bootstrap
 rolling_fixture_dispatch
 queue_recovery
 provider_health
-existing canonical queue set
 prediction truth
 prediction_baselines
+existing canonical queue set
 ```
 
-It does not authorize creation of:
+It does not authorize:
 
 ```text
 archive_queue

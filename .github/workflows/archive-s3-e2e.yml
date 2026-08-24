@@ -12,18 +12,22 @@ on:
 permissions:
   contents: read
 
-# Prevent two manually-triggered archive tests from claiming the same campaign.
 concurrency:
   group: zahrly-archive-s3-e2e-${{ inputs.campaign_id }}
   cancel-in-progress: true
 
 jobs:
   archive-s3-e2e:
-    name: archive-s3-e2-e
+    name: archive-s3-e2e
     runs-on: ubuntu-latest
     env:
       ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
       SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
+      # GitHub-hosted runners are IPv4-only. Supabase direct DB endpoints are
+      # IPv6-only unless the project has the IPv4 add-on, so the E2E job uses
+      # Supavisor session mode (IPv4, port 5432).
+      SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
+      SUPABASE_POOLER_PORT: "5432"
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
       S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
       S3_REGION: ${{ secrets.S3_REGION }}
@@ -64,35 +68,46 @@ jobs:
 
           host = p.hostname.lower().rstrip(".")
           project_ref = os.environ["SUPABASE_PROJECT_REF"]
-
-          # The failing runs used a Supavisor pooler hostname that did not resolve
-          # on the GitHub runner. Use the project's canonical PostgreSQL endpoint
-          # for this E2E worker. The DB password remains the GitHub secret value.
-          if host.endswith(".pooler.supabase.com"):
-              host = f"db.{project_ref}.supabase.co"
-              user = "postgres"
-              port = 5432
-              print("Detected Supabase pooler URL; using canonical project DB endpoint")
-          else:
-              user = unquote(p.username or "postgres")
-              port = p.port or 5432
-
+          pooler_host = os.environ["SUPABASE_POOLER_HOST"]
+          pooler_port = int(os.environ["SUPABASE_POOLER_PORT"])
           password = quote(unquote(p.password), safe="")
-          user = quote(user, safe="")
-          netloc = f"{user}:{password}@{host}:{port}"
+          user = unquote(p.username or "postgres")
+
+          if host.endswith(".pooler.supabase.com"):
+              # Keep a valid pooler URL as-is, but repair the common case where
+              # the Supavisor username was supplied as just "postgres".
+              selected_host = host
+              selected_port = p.port or pooler_port
+              if "." not in user:
+                  user = f"postgres.{project_ref}"
+              print("Using Supabase Supavisor pooler URL from secret")
+          elif host == f"db.{project_ref}.supabase.co":
+              # Direct Supabase is IPv6 on projects without the IPv4 add-on.
+              # GitHub-hosted runners do not provide IPv6 routing, so convert
+              # the secret's direct URL to the project's IPv4 session pooler.
+              selected_host = pooler_host
+              selected_port = pooler_port
+              user = f"postgres.{project_ref}" if user == "postgres" else user
+              print("Detected Supabase direct IPv6 URL; switching E2E to IPv4 session pooler")
+          else:
+              raise SystemExit(
+                  f"Unsupported SUPABASE_DB_URL host {host!r}. Use the Supabase Session Pooler URL "
+                  f"or the project's direct URL db.{project_ref}.supabase.co."
+              )
+
+          netloc = f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}"
           query = p.query
           if "sslmode=" not in query:
               query = f"{query}&sslmode=require" if query else "sslmode=require"
-
           normalized = urlunsplit(("postgresql", netloc, p.path or "/postgres", query, ""))
+
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as f:
               f.write(f"SUPABASE_DB_URL={normalized}\n")
-          print(f"PostgreSQL host selected: {host}")
-          print(f"PostgreSQL port selected: {port}")
+          print(f"PostgreSQL endpoint selected: {selected_host}:{selected_port}")
           print(f"PostgreSQL database: {(p.path or '/postgres').lstrip('/') or 'postgres'}")
           PY
 
-      - name: Validate PostgreSQL DNS and TCP on runner
+      - name: Validate PostgreSQL IPv4 DNS and TCP on runner
         shell: bash
         run: |
           set -euo pipefail
@@ -108,23 +123,26 @@ jobs:
           print(f"PostgreSQL port: {port}")
 
           try:
-              addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+              addresses = socket.getaddrinfo(host, port, family=socket.AF_INET, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
-              raise SystemExit(f"PostgreSQL DNS FAILED for {host}: {exc}")
+              raise SystemExit(f"PostgreSQL IPv4 DNS FAILED for {host}: {exc}")
 
-          print("PostgreSQL DNS: OK")
-          print(f"resolved_addresses={len(addresses)}")
+          if not addresses:
+              raise SystemExit(f"PostgreSQL IPv4 DNS returned no A record for {host}")
+          print("PostgreSQL IPv4 DNS: OK")
+          print(f"resolved_ipv4_addresses={len(addresses)}")
+
           for family, _, _, _, sockaddr in addresses:
               try:
                   with socket.socket(family, socket.SOCK_STREAM) as s:
-                      s.settimeout(10)
+                      s.settimeout(15)
                       s.connect(sockaddr)
-                  print("PostgreSQL TCP: OK")
+                  print(f"PostgreSQL IPv4 TCP: OK ({sockaddr[0]}:{sockaddr[1]})")
                   break
               except OSError as exc:
-                  print(f"TCP attempt failed for {sockaddr[0]}: {exc}")
+                  print(f"TCP attempt failed for {sockaddr[0]}:{sockaddr[1]}: {exc}")
           else:
-              raise SystemExit("PostgreSQL TCP FAILED for all resolved addresses")
+              raise SystemExit("PostgreSQL IPv4 TCP FAILED for all resolved addresses")
           PY
 
       - name: Build archive worker image
@@ -139,7 +157,7 @@ jobs:
             --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
+            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); print(f"Container PostgreSQL port: {p.port or 5432}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
 
       - name: Validate S3 connectivity
         shell: bash
@@ -158,10 +176,10 @@ jobs:
               raise SystemExit(f"Invalid S3 endpoint: {endpoint!r}")
           print(f"S3 endpoint: {endpoint}")
           try:
-              socket.getaddrinfo(p.hostname, p.port or 443, type=socket.SOCK_STREAM)
+              socket.getaddrinfo(p.hostname, p.port or 443, family=socket.AF_INET, type=socket.SOCK_STREAM)
           except socket.gaierror as exc:
-              raise SystemExit(f"S3 DNS FAILED for {p.hostname}: {exc}")
-          print("S3 DNS: OK")
+              raise SystemExit(f"S3 IPv4 DNS FAILED for {p.hostname}: {exc}")
+          print("S3 IPv4 DNS: OK")
           PY
 
           docker run --rm --network host \

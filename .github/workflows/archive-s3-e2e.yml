@@ -38,34 +38,13 @@ jobs:
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
           fi
 
-      - name: Diagnose Supabase database hostname on runner
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import os
-          from urllib.parse import urlparse
-          import socket
-          parsed = urlparse(os.environ["SUPABASE_DB_URL"])
-          host = parsed.hostname
-          port = parsed.port or 5432
-          if not host:
-              raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
-          print(f"Supabase DB host: {host}")
-          print(f"Supabase DB port: {port}")
-          infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-          print("Runner DNS OK:")
-          for address in sorted({item[4][0] for item in infos}):
-              print(f"- {address}")
-          PY
-
       - name: Build archive worker image
         shell: bash
         run: |
           set -euo pipefail
           docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
 
-      - name: Diagnose Supabase database hostname inside archive worker container
+      - name: Diagnose PostgreSQL from archive worker container
         shell: bash
         run: |
           set -euo pipefail
@@ -73,9 +52,9 @@ jobs:
             --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"Container DB host: {h}"); print(f"Container DB port: {port}"); infos=socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("Container DNS OK:"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]'
+            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"PostgreSQL host: {h}"); print(f"PostgreSQL port: {port}"); infos=socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("PostgreSQL DNS: OK"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]; s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP: OK"); s.close()'
 
-      - name: Test PostgreSQL TCP connectivity inside archive worker container
+      - name: Verify PostgreSQL authentication from archive worker container
         shell: bash
         run: |
           set -euo pipefail
@@ -83,7 +62,17 @@ jobs:
             --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"Testing TCP {h}:{port}"); s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP connection: OK"); s.close()'
+            -c 'import os,psycopg; c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=10); print("PostgreSQL authentication: OK"); c.close()'
+
+      - name: Diagnose AWS S3 from archive worker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            --entrypoint python \
+            -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
+            zahrly-archive-worker:e2e \
+            -c 'import os,socket,boto3; from urllib.parse import urlparse; region=os.environ["S3_REGION"]; endpoint=os.environ.get("S3_ENDPOINT_URL") or f"https://s3.{region}.amazonaws.com"; p=urlparse(endpoint); print(f"S3 endpoint: {endpoint}"); print(f"S3 host: {p.hostname}"); infos=socket.getaddrinfo(p.hostname,p.port or 443,type=socket.SOCK_STREAM); print("S3 DNS: OK"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]; s3=boto3.client("s3",region_name=region,endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"]); s3.head_bucket(Bucket=os.environ["S3_BUCKET"]); print("S3 bucket access: OK")'
 
       - name: Run archive worker against test campaign
         shell: bash

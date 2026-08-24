@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker run --rm \
+          docker run --rm --network host \
             -e ARCHIVE_CAMPAIGN_ID \
             -e SUPABASE_DB_URL \
             -e S3_ENDPOINT_URL \

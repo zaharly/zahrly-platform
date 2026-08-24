@@ -36,7 +36,6 @@ jobs:
           if [ -z "${S3_PREFIX:-}" ]; then
             echo "S3_PREFIX secret is not set; using safe default: zahrly/archive"
             echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
-            export S3_PREFIX=zahrly/archive
           fi
 
       - name: Diagnose Supabase database hostname on runner
@@ -47,7 +46,6 @@ jobs:
           import os
           from urllib.parse import urlparse
           import socket
-
           parsed = urlparse(os.environ["SUPABASE_DB_URL"])
           host = parsed.hostname
           port = parsed.port or 5432
@@ -55,10 +53,7 @@ jobs:
               raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
           print(f"Supabase DB host: {host}")
           print(f"Supabase DB port: {port}")
-          try:
-              infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-          except socket.gaierror as exc:
-              raise SystemExit(f"Runner DNS FAILED: {host} ({exc})")
+          infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
           print("Runner DNS OK:")
           for address in sorted({item[4][0] for item in infos}):
               print(f"- {address}")
@@ -68,41 +63,34 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker build -t zahrly-archive-worker:e2e .
+          docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
 
       - name: Diagnose Supabase database hostname inside archive worker container
         shell: bash
         run: |
           set -euo pipefail
           docker run --rm --network host \
+            --entrypoint python \
             -e SUPABASE_DB_URL \
             zahrly-archive-worker:e2e \
-            python - <<'PY'
-          import os
-          from urllib.parse import urlparse
-          import socket
+            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"Container DB host: {h}"); print(f"Container DB port: {port}"); infos=socket.getaddrinfo(h,port,type=socket.SOCK_STREAM); print("Container DNS OK:"); [print(f"- {a}") for a in sorted({x[4][0] for x in infos})]'
 
-          parsed = urlparse(os.environ["SUPABASE_DB_URL"])
-          host = parsed.hostname
-          port = parsed.port or 5432
-          if not host:
-              raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
-          print(f"Container DB host: {host}")
-          print(f"Container DB port: {port}")
-          try:
-              infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-          except socket.gaierror as exc:
-              raise SystemExit(f"Container DNS FAILED: {host} ({exc})")
-          print("Container DNS OK:")
-          for address in sorted({item[4][0] for item in infos}):
-              print(f"- {address}")
-          PY
+      - name: Test PostgreSQL TCP connectivity inside archive worker container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            --entrypoint python \
+            -e SUPABASE_DB_URL \
+            zahrly-archive-worker:e2e \
+            -c 'import os,socket; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); h=p.hostname; port=p.port or 5432; print(f"Testing TCP {h}:{port}"); s=socket.create_connection((h,port),timeout=10); print("PostgreSQL TCP connection: OK"); s.close()'
 
       - name: Run archive worker against test campaign
         shell: bash
         run: |
           set -euo pipefail
           docker run --rm --network host \
+            --entrypoint python \
             -e ARCHIVE_CAMPAIGN_ID \
             -e SUPABASE_DB_URL \
             -e S3_ENDPOINT_URL \
@@ -112,7 +100,7 @@ jobs:
             -e S3_ACCESS_KEY_ID \
             -e S3_SECRET_ACCESS_KEY \
             zahrly-archive-worker:e2e \
-            python -m workers.archive_worker.worker | tee archive_result.json
+            -m workers.archive_worker.worker | tee archive_result.json
 
       - name: Verify archive result
         shell: bash

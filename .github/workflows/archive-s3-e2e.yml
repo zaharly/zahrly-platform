@@ -1,0 +1,109 @@
+name: archive-s3-e2e
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign_id:
+        description: Archive campaign ID to test
+        required: true
+        default: 74a52118-bffd-4438-9ddd-757928e094d4
+        type: string
+
+jobs:
+  archive-s3-e2e:
+    runs-on: ubuntu-latest
+    env:
+      ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+      S3_REGION: ${{ secrets.S3_REGION }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_PREFIX: ${{ secrets.S3_PREFIX }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required secrets and defaults
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SUPABASE_DB_URL S3_BUCKET S3_REGION S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
+          done
+          if [ -z "${S3_PREFIX:-}" ]; then
+            echo "S3_PREFIX secret is not set; using safe default: zahrly/archive"
+            echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
+          fi
+
+      - name: Diagnose Supabase database hostname
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlparse
+          import socket
+
+          raw = os.environ["SUPABASE_DB_URL"]
+          parsed = urlparse(raw)
+          host = parsed.hostname
+          port = parsed.port or 5432
+
+          if not host:
+              raise SystemExit("SUPABASE_DB_URL does not contain a valid hostname")
+
+          print(f"Supabase DB host: {host}")
+          print(f"Supabase DB port: {port}")
+          print("Resolving hostname...")
+          try:
+              infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+          except socket.gaierror as exc:
+              raise SystemExit(f"Supabase DB hostname cannot be resolved: {host} ({exc})")
+          addresses = sorted({item[4][0] for item in infos})
+          print("Resolved addresses:")
+          for address in addresses:
+              print(f"- {address}")
+          PY
+
+      - name: Build archive worker image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build -t zahrly-archive-worker:e2e .
+
+      - name: Run archive worker against test campaign
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e ARCHIVE_CAMPAIGN_ID \
+            -e SUPABASE_DB_URL \
+            -e S3_ENDPOINT_URL \
+            -e S3_REGION \
+            -e S3_BUCKET \
+            -e S3_PREFIX \
+            -e S3_ACCESS_KEY_ID \
+            -e S3_SECRET_ACCESS_KEY \
+            zahrly-archive-worker:e2e \
+            python -m workers.archive_worker.worker | tee archive_result.json
+
+      - name: Verify archive result
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s archive_result.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path("archive_result.json").read_text())
+          if data.get("status") != "SUCCEEDED":
+              raise SystemExit(f"archive worker did not succeed: {data}")
+          print("Archive worker result: SUCCEEDED")
+          print(f"campaign_id={data.get('campaign_id')}")
+          print(f"object_uri={data.get('object_uri')}")
+          print(f"checksum={data.get('checksum')}")
+          print(f"manifest_id={data.get('manifest_id')}")
+          PY

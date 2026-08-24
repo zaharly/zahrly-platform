@@ -1,0 +1,174 @@
+name: Zahrly Archive S3 E2E v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      campaign_id:
+        description: Archive campaign ID to test
+        required: true
+        default: 74a52118-bffd-4438-9ddd-757928e094d4
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zahrly-archive-s3-e2e-${{ inputs.campaign_id }}
+  cancel-in-progress: true
+
+jobs:
+  archive-s3-e2e:
+    name: archive-s3-e2e-v2
+    runs-on: ubuntu-latest
+    env:
+      ARCHIVE_CAMPAIGN_ID: ${{ inputs.campaign_id }}
+      SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
+      SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
+      SUPABASE_POOLER_PORT: "5432"
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
+      S3_REGION: eu-north-1
+      S3_BUCKET: zahrly-community-storage
+      S3_PREFIX: ${{ secrets.S3_PREFIX }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SUPABASE_DB_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
+          done
+          test "$S3_BUCKET" = "zahrly-community-storage"
+          test "$S3_REGION" = "eu-north-1"
+          if [ -z "${S3_PREFIX:-}" ]; then
+            echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
+          fi
+
+          python - <<'PY'
+          import os
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+          raw=os.environ["SUPABASE_DB_URL"].strip()
+          p=urlsplit(raw)
+          if p.scheme not in {"postgres","postgresql"} or not p.hostname or p.password is None:
+              raise SystemExit("SUPABASE_DB_URL is invalid or has no password")
+          host=p.hostname.lower().rstrip(".")
+          ref=os.environ["SUPABASE_PROJECT_REF"]
+          user=unquote(p.username or "postgres")
+          password=quote(unquote(p.password),safe="")
+          if host.endswith(".pooler.supabase.com"):
+              dbhost=host; dbport=p.port or 5432
+              if "." not in user: user=f"postgres.{ref}"
+          elif host == f"db.{ref}.supabase.co":
+              dbhost=os.environ["SUPABASE_POOLER_HOST"]; dbport=int(os.environ["SUPABASE_POOLER_PORT"])
+              if user == "postgres": user=f"postgres.{ref}"
+          else:
+              raise SystemExit(f"Unsupported Supabase DB host: {host}")
+          query=p.query or "sslmode=require"
+          if "sslmode=" not in query: query += "&sslmode=require"
+          normalized=urlunsplit(("postgresql",f"{quote(user,safe='')}:{password}@{dbhost}:{dbport}",p.path or "/postgres",query,""))
+          with open(os.environ["GITHUB_ENV"],"a") as f: f.write(f"SUPABASE_DB_URL={normalized}\n")
+          print(f"PostgreSQL endpoint: {dbhost}:{dbport}")
+          PY
+
+      - name: Validate PostgreSQL IPv4 TCP
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os,socket
+          from urllib.parse import urlsplit
+          p=urlsplit(os.environ["SUPABASE_DB_URL"])
+          addresses=socket.getaddrinfo(p.hostname,p.port or 5432,family=socket.AF_INET,type=socket.SOCK_STREAM)
+          if not addresses: raise SystemExit("PostgreSQL IPv4 DNS returned no address")
+          for family,_,_,_,addr in addresses:
+              try:
+                  with socket.socket(family,socket.SOCK_STREAM) as s:
+                      s.settimeout(15); s.connect(addr)
+                  print(f"PostgreSQL IPv4 TCP: OK ({addr[0]}:{addr[1]})"); break
+              except OSError as e: print(f"TCP failed for {addr}: {e}")
+          else: raise SystemExit("PostgreSQL IPv4 TCP FAILED")
+          PY
+
+      - name: Build archive worker image
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-archive-worker:e2e .
+
+      - name: Validate PostgreSQL authentication in container
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network host --entrypoint python \
+            -e SUPABASE_DB_URL zahrly-archive-worker:e2e \
+            -c 'import os,psycopg; from urllib.parse import urlparse; p=urlparse(os.environ["SUPABASE_DB_URL"]); print(f"Container PostgreSQL host: {p.hostname}"); c=psycopg.connect(os.environ["SUPABASE_DB_URL"],connect_timeout=15); print("PostgreSQL authentication: OK"); c.close()'
+
+      - name: Validate S3 bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import socket,os
+          from urllib.parse import urlparse
+          p=urlparse(os.environ["S3_ENDPOINT_URL"])
+          socket.getaddrinfo(p.hostname,p.port or 443,family=socket.AF_INET,type=socket.SOCK_STREAM)
+          print(f"S3 IPv4 DNS: OK ({p.hostname})")
+          print(f"S3 region: {os.environ['S3_REGION']}")
+          print(f"S3 bucket: {os.environ['S3_BUCKET']}")
+          PY
+          docker run --rm --network host --entrypoint python \
+            -e S3_ENDPOINT_URL -e S3_REGION -e S3_BUCKET -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
+            zahrly-archive-worker:e2e -c '
+          import os,boto3
+          from botocore.exceptions import ClientError
+          c=boto3.client("s3",region_name=os.environ["S3_REGION"],endpoint_url=os.environ["S3_ENDPOINT_URL"],aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"])
+          try:
+              r=c.head_bucket(Bucket=os.environ["S3_BUCKET"])
+              print(f"S3 bucket access: OK ({r[\"ResponseMetadata\"][\"HTTPStatusCode\"]})")
+          except ClientError as e:
+              er=e.response.get("Error",{}); md=e.response.get("ResponseMetadata",{})
+              raise SystemExit(f"S3 bucket access FAILED: HTTP={md.get('HTTPStatusCode')} code={er.get('Code')} request_id={md.get('RequestId')}. Check that the GitHub AWS access key belongs to the account owning zahrly-community-storage and has bucket/object permissions.")
+          '
+
+      - name: Run archive worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          docker run --rm --network host --entrypoint python \
+            -e ARCHIVE_CAMPAIGN_ID -e SUPABASE_DB_URL -e S3_ENDPOINT_URL -e S3_REGION \
+            -e S3_BUCKET -e S3_PREFIX -e S3_ACCESS_KEY_ID -e S3_SECRET_ACCESS_KEY \
+            zahrly-archive-worker:e2e -m workers.archive_worker.worker 2>&1 | tee archive_result.json
+          status=${PIPESTATUS[0]}
+          set -e
+          [ "$status" -eq 0 ] || exit "$status"
+
+      - name: Verify archive result
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s archive_result.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          lines=[x.strip() for x in Path("archive_result.json").read_text().splitlines() if x.strip().startswith("{")]
+          if not lines: raise SystemExit("No JSON result produced")
+          data=json.loads(lines[-1])
+          if data.get("processed") is not True or data.get("status") != "SUCCEEDED":
+              raise SystemExit(f"Archive worker did not succeed: {data}")
+          print("Archive worker result: SUCCEEDED")
+          print(f"object_uri={data.get('object_uri')}")
+          print(f"checksum={data.get('checksum')}")
+          print(f"manifest_id={data.get('manifest_id')}")
+          PY
+
+      - name: Upload E2E result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: archive-s3-e2e-${{ github.run_id }}
+          path: archive_result.json
+          if-no-files-found: ignore

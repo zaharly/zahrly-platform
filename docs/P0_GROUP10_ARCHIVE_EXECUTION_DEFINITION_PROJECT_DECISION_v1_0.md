@@ -1,61 +1,77 @@
-# ZAHRLY — P0 Group 10 Archive Execution Definition Project Decision v1.0
+# ZAHRLY — P0 Group 10 Archive Execution Definition / Project Decision v1.1
 
 **Date:** 24 August 2026  
-**Status:** Project Decision — **Implementation Remains Gated**  
-**Scope:** `internal.archive_season(...)` contract, execution path, retention/eligibility ownership, archive-artifact identity, and deployment order
+**Status:** Project Decision — **Implementation Gate Defined / Execution Inputs Still Required**  
+**Scope:** Archive execution layer only
 
 ## 1. Purpose
 
-This decision defines the authority model for the four remaining Archive execution gaps. It does not invent values that are absent from the authoritative project sources.
+This decision defines the final governance gate between the deployed Archive metadata foundation and the executable Archive layer. It defines the authority model for the four remaining execution inputs without inventing missing business behavior.
 
-The deployed metadata foundation remains authoritative:
+## 2. Current Authoritative State
+
+Already deployed and verified:
 
 ```text
 internal.archive_catalog
 internal.archive_completeness_rules
 idx_archive_catalog_lookup
+internal.worker_jobs.idempotency_key UNIQUE
 ```
 
-The execution layer remains separate from metadata/lineage.
-
-## 2. Authority Matrix
-
-| Area | Authoritative source required | Current state |
-|---|---|---|
-| `archive_season()` signature | live `pg_proc`, approved migration, or approved worker contract | ⛔ missing |
-| Execution path | approved worker/execution contract | ⛔ missing |
-| Retention / eligibility | dataset-specific approved policy source | ⛔ missing |
-| Archive artifact identity | approved lineage/idempotency contract | ⛔ missing |
-| Metadata foundation | approved Group 10 DDL derivation + live migration | ✅ resolved |
-| Security/grants | approved implementation migration + live verification | ⏸ gated with execution layer |
-
-## 3. `archive_season()` Contract Authority
-
-The architecture currently names:
+Not deployed:
 
 ```text
 internal.archive_season(...)
+archive worker implementation
+archive-specific queue
+archive scheduler
+archive Cron
 ```
 
-as an admin/worker operation for writing archive manifests and metadata, but does not provide an executable parameter/return signature.
+The Architecture names `internal.archive_season(...)` as an admin/worker operation for writing archive manifests/metadata, but does not provide an executable parameter/return signature. The canonical queue set does not define `archive_queue`. fileciteturn271file0L1-L13
 
-Therefore no default parameters, return type, or invocation convention is selected by inference.
+## 3. Authority Matrix
 
-The function may be implemented only after one authoritative source defines:
+| Required input | Authoritative source | Current state |
+|---|---|---|
+| `archive_season()` signature | live `pg_proc`, approved migration, approved worker contract, or approved implementation spec | ⛔ missing |
+| scheduler → worker execution path | approved worker/execution contract | ⛔ missing |
+| dataset-specific retention / eligibility | approved policy source | ⛔ missing |
+| archive artifact identity / uniqueness | approved lineage/idempotency contract | ⛔ missing |
+| metadata foundation | approved DDL derivation + live migration | ✅ resolved |
+| security/grants | implementation migration + live verification | ⏸ gated with execution |
+
+## 4. Decision A — `archive_season()` Contract
+
+The implementation must not infer parameters, return types, caller conventions, error semantics, or transaction boundaries from the function name alone.
+
+Accepted authority:
 
 ```text
-signature
-return/result semantics
-caller identity
-error semantics
-transaction boundary
+approved migration
+OR approved worker/execution contract
+OR approved implementation specification
+OR live deployed definition
 ```
 
-## 4. Execution Path Authority
+**Current decision:** `BLOCKED / AUTHORITY REQUIRED`
 
-The canonical queue set does not contain `archive_queue`.
+## 5. Decision B — Execution Path
 
-Therefore no path is selected by inference among:
+The exact durable-work path must be explicit:
+
+```text
+scheduler/control plane
+        ↓
+approved queue/job mechanism
+        ↓
+archive worker
+        ↓
+archive artifact + catalog metadata
+```
+
+The project does not authorize by inference:
 
 ```text
 scheduler → archive_queue
@@ -64,70 +80,66 @@ scheduler → worker_jobs directly
 scheduler → another existing queue
 ```
 
-The authoritative execution source must explicitly identify:
+The authoritative source must identify the discovery owner, durable work item owner, worker consumer, and inherited retry/lease/DLQ semantics.
 
-```text
-who discovers archive work
-who creates the durable work item
-which worker consumes it
-how retry/lease/DLQ semantics are inherited
-```
+**Current decision:** `BLOCKED / AUTHORITY REQUIRED`
 
-Until that exists, scheduler-to-worker execution remains blocked.
+## 6. Decision C — Retention / Eligibility
 
-## 5. Retention / Eligibility Authority
-
-Retention and eligibility are dataset-aware. Completeness is a prerequisite but is not itself a retention decision.
-
-No universal rule is authorized by inference, including:
-
-```text
-season age cutoff
-kickoff age cutoff
-retention_days
-archive_after
-current_season - N
-```
-
-The authoritative policy must identify for each archivable dataset type:
+The rule must be dataset-specific and identify:
 
 ```text
 candidate scope
 completeness prerequisite
-retention/eligibility owner
-never-delete exclusions
+policy owner
+never-archive / never-delete exclusions
 final archival trigger
 ```
 
-Until then, no scheduler SQL may contain a temporal archive predicate.
+No universal rule is authorized by inference, including:
 
-## 6. Archive Artifact Identity / Idempotency Authority
+```text
+retention_days = X
+season < current_season - N
+kickoff older than X
+archive_after = X
+```
 
-Existing infrastructure provides:
+Completeness remains a prerequisite and is not itself a temporal retention decision.
+
+**Current decision:** `BLOCKED / POLICY AUTHORITY REQUIRED`
+
+## 7. Decision D — Archive Artifact Identity
+
+Existing infrastructure:
 
 ```text
 internal.worker_jobs.idempotency_key UNIQUE
 ```
 
-This is a worker-job deduplication mechanism only.
+This protects worker-job duplication only. It does not automatically define archive-artifact identity.
 
-It does not define archive-artifact identity.
+The authoritative artifact contract must define:
 
-The authoritative artifact contract must define the logical identity and deduplication boundary, for example by explicitly specifying which lineage dimensions participate in uniqueness. No hash or uniqueness constraint is inferred here.
+```text
+logical identity
+uniqueness boundary
+deduplication/replay behavior
+relation to worker_jobs.idempotency_key
+```
 
-The implementation must preserve the distinction:
+The implementation must preserve:
 
 ```text
 worker-job idempotency
-≠
-archive-artifact identity
-≠
-provider-request idempotency
-≠
-prediction-job idempotency
+≠ archive-artifact identity
+≠ provider-request idempotency
+≠ prediction-job idempotency
 ```
 
-## 7. Explicit Exclusions
+**Current decision:** `BLOCKED / AUTHORITY REQUIRED`
+
+## 8. Explicit Exclusions
 
 This decision does not authorize:
 
@@ -135,7 +147,7 @@ This decision does not authorize:
 archive_queue
 archive_scheduler
 pg_cron
-new archive state
+new archive lifecycle state
 universal retention rule
 new archive hash
 partition deletion
@@ -147,9 +159,9 @@ provider calls from PostgreSQL
 Redis calls from PostgreSQL
 ```
 
-## 8. Deployment Order
+## 9. Deployment Order
 
-Once the four authority inputs become source-exact, deployment must proceed in this order:
+Once all four authority inputs become source-exact:
 
 ```text
 1. Execution Definition approval
@@ -173,33 +185,27 @@ Once the four authority inputs become source-exact, deployment must proceed in t
 10. Cron runtime verification
 ```
 
-The existing metadata foundation is not repeated or redesigned in this sequence.
+The deployed metadata foundation is not redesigned in this sequence.
 
-## 9. Implementation Gate
-
-Implementation is authorized only when all of the following are authoritative:
+## 10. Final Gate
 
 ```text
-✅ exact function signature
-✅ execution path
-✅ dataset-specific retention/eligibility policy
-✅ archive-artifact identity
-✅ final security/grant contract
+Archive metadata foundation     ✅ DEPLOYED
+Execution-definition gate       ✅ DEFINED
+
+Function signature              ⛔
+Execution path                  ⛔
+Retention/eligibility            ⛔
+Artifact identity               ⛔
+
+Function implementation         ⛔
+Worker                           ⛔
+Scheduler                        ⛔
+Cron                             ⛔
 ```
 
-Current status:
+This document defines the implementation gate; it does not supply the four missing values. Those values must arrive through one of the accepted authoritative sources above.
 
-```text
-Metadata foundation          ✅
-Execution definition         ⛔ pending authoritative inputs
-Function migration           ⛔
-Worker integration           ⛔
-Scheduler                    ⛔
-Cron                         ⛔
-```
+## 11. Non-Regression Rule
 
-## 10. Non-Regression Rule
-
-This decision must not cause a second Archive schema, queue, or lifecycle state to appear merely to support implementation convenience.
-
-The project remains on the existing architecture and deployment path.
+No second Archive schema, queue, lifecycle state, retention convention, or idempotency formula may be introduced merely to make implementation convenient. The project remains aligned with the existing architecture and deployment path.

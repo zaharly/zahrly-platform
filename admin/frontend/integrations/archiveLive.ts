@@ -1,3 +1,5 @@
+import { supabase } from '../lib/supabase'
+
 export interface ArchiveCampaignLive {
   campaign_id: string
   country_id: string | null
@@ -39,13 +41,20 @@ export interface ArchiveCampaignOptions { countries: ArchiveCampaignCountryOptio
 export interface BackfillSeasonJobResult { job_id: string; country_id: string | null; competition_id: string | null; season: number; dataset_type: string; status: string; priority: number }
 export interface ProviderSeasonTriggerResult { accepted: true; season: number; workflow: string }
 
+async function getAccessToken() {
+  const { data: { session } } = await supabase.auth.getSession()
+  const token = session?.access_token?.trim()
+  if (!token) throw new Error('Admin authentication required. Please sign in again.')
+  return token
+}
+
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
-  const url = import.meta.env.VITE_SUPABASE_URL?.trim()
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
-  if (!url || !anonKey) throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY')
-  const response = await fetch(`${url.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
+  if (!anonKey) throw new Error('Missing VITE_SUPABASE_ANON_KEY')
+  const accessToken = await getAccessToken()
+  const response = await fetch(`${supabase.supabaseUrl.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
     method: 'POST',
-    headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}`, 'Content-Type': 'application/json' },
+    headers: { apikey: anonKey, Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
   if (!response.ok) {
@@ -62,11 +71,10 @@ export async function queueBackfillSeason(competitionId: string, season: number,
 }
 
 export async function triggerProviderSeason(season: number): Promise<ProviderSeasonTriggerResult> {
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
-  if (!anonKey) throw new Error('Missing VITE_SUPABASE_ANON_KEY')
+  const accessToken = await getAccessToken()
   const response = await fetch('/api/provider-season', {
     method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: `Bearer ${anonKey}` },
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${accessToken}` },
     credentials: 'include',
     body: JSON.stringify({ season }),
   })

@@ -67,3 +67,5 @@ export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
 
   return response.json() as Promise<ArchiveLiveSnapshot>
 }
+
+// Vercel deployment marker: rebuild after configuring Supabase client environment variables.

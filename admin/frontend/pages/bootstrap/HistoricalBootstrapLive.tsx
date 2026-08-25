@@ -1,335 +1,206 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Database, Play, RefreshCw, Send } from 'lucide-react'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
 import { ProgressBar } from '../../components/status/ProgressBar'
-import { DataTable } from '../../components/tables/DataTable'
-import { DetailDrawer } from '../../components/drawers/DetailDrawer'
 import { Button } from '../../lib/shadcn/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../lib/shadcn/select'
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../lib/shadcn/dialog'
 import { toast } from '../../lib/shadcn/sonner'
-import type { ColumnDef } from '@tanstack/react-table'
-import { RefreshCw, ExternalLink, Database, Plus, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import {
-  fetchArchiveCampaignOptions,
-  fetchArchiveLive,
-  queueBackfillSeason,
-  type ArchiveCampaignLive,
-  type ArchiveCampaignOptions,
-  type ArchiveSeasonLive,
+  fetchHistoricalBootstrapSnapshot,
+  prepareHistoricalSeason,
+  startHistoricalCampaign,
+  triggerProviderSeason,
+  type HistoricalBootstrapSnapshot,
+  type HistoricalSeasonProgress,
 } from '../../integrations/archiveLive'
 
-const seasonColumns: ColumnDef<ArchiveSeasonLive, any>[] = [
-  { accessorKey: 'season', header: 'Season' },
-  { accessorKey: 'campaigns', header: 'Campaigns' },
-  { accessorKey: 'succeeded', header: 'Succeeded' },
-  { accessorKey: 'active', header: 'Active' },
-  { accessorKey: 'failed', header: 'Failed' },
-  { accessorKey: 'avg_completeness', header: 'Avg completeness', cell: ({ getValue }) => <ProgressBar value={Number(getValue()) * 100} size="sm" /> },
-]
+const PRIMARY_SEASON = 2008
+const CAMPAIGN_START = 2008
+const CAMPAIGN_END = 2026
 
-const campaignColumns: ColumnDef<ArchiveCampaignLive, any>[] = [
-  { accessorKey: 'season', header: 'Season' },
-  { accessorKey: 'dataset_type', header: 'Dataset' },
-  { accessorKey: 'provider', header: 'Provider' },
-  { accessorKey: 'scope_state', header: 'Scope' },
-  { accessorKey: 'status', header: 'Campaign', cell: ({ getValue }) => <StatusBadge status={String(getValue())} /> },
-  { accessorKey: 'worker_status', header: 'Worker', cell: ({ getValue }) => <StatusBadge status={String(getValue() ?? '—')} dense /> },
-  { accessorKey: 'completeness_score', header: 'Completeness', cell: ({ getValue }) => <ProgressBar value={Number(getValue() ?? 0) * 100} size="sm" /> },
-  { accessorKey: 'row_count', header: 'Rows', cell: ({ getValue }) => Number(getValue() ?? 0).toLocaleString() },
-  { accessorKey: 'manifest_id', header: 'Manifest' },
-]
+const displaySeason = (season: number) => `${season}/${season + 1}`
+
+function dedupeSeasons(rows: HistoricalSeasonProgress[]) {
+  const bySeason = new Map<number, HistoricalSeasonProgress>()
+  for (const row of rows) {
+    const season = Number(row.season)
+    if (!Number.isInteger(season)) continue
+    const previous = bySeason.get(season)
+    if (!previous) {
+      bySeason.set(season, { ...row, season })
+      continue
+    }
+    bySeason.set(season, {
+      ...previous,
+      ...row,
+      season,
+      supported_leagues: Math.max(previous.supported_leagues ?? 0, row.supported_leagues ?? 0),
+      provider_leagues: Math.max(previous.provider_leagues ?? 0, row.provider_leagues ?? 0),
+      backfill_jobs: Math.max(previous.backfill_jobs ?? 0, row.backfill_jobs ?? 0),
+      backfill_succeeded: Math.max(previous.backfill_succeeded ?? 0, row.backfill_succeeded ?? 0),
+      backfill_active: Math.max(previous.backfill_active ?? 0, row.backfill_active ?? 0),
+      backfill_failed: Math.max(previous.backfill_failed ?? 0, row.backfill_failed ?? 0),
+      backfill_progress: Math.max(previous.backfill_progress ?? 0, row.backfill_progress ?? 0),
+      archive_campaigns: Math.max(previous.archive_campaigns ?? 0, row.archive_campaigns ?? 0),
+      archive_succeeded: Math.max(previous.archive_succeeded ?? 0, row.archive_succeeded ?? 0),
+      archive_completeness: Math.max(previous.archive_completeness ?? 0, row.archive_completeness ?? 0),
+      ready_for_archive: Boolean(previous.ready_for_archive || row.ready_for_archive),
+    })
+  }
+  return [...bySeason.values()].sort((a, b) => a.season - b.season)
+}
 
 export default function HistoricalBootstrapLive() {
-  const [data, setData] = useState<{ campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] } | null>(null)
-  const [options, setOptions] = useState<ArchiveCampaignOptions | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const [snapshot, setSnapshot] = useState<HistoricalBootstrapSnapshot | null>(null)
   const [loading, setLoading] = useState(true)
-  const [optionsLoading, setOptionsLoading] = useState(true)
-  const [selected, setSelected] = useState<ArchiveCampaignLive | null>(null)
-  const [createOpen, setCreateOpen] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [discovering, setDiscovering] = useState(false)
+  const [preparing, setPreparing] = useState(false)
+
+  const seasons = useMemo(() => dedupeSeasons(snapshot?.seasons ?? []), [snapshot?.seasons])
+  const primary = seasons.find((row) => row.season === PRIMARY_SEASON) ?? null
+  const campaign = snapshot?.campaign && 'campaign_id' in snapshot.campaign ? snapshot.campaign : null
 
   async function load() {
     setLoading(true)
-    setError(null)
     try {
-      setData(await fetchArchiveLive())
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to load live archive data')
+      setSnapshot(await fetchHistoricalBootstrapSnapshot())
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to load historical control plane')
     } finally {
       setLoading(false)
     }
   }
 
-  async function loadOptions() {
-    setOptionsLoading(true)
+  useEffect(() => { void load() }, [])
+
+  async function ensureCampaign() {
+    if (campaign) return
+    setStarting(true)
     try {
-      setOptions(await fetchArchiveCampaignOptions())
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Unable to load archive request options')
+      await startHistoricalCampaign(CAMPAIGN_START, CAMPAIGN_END)
+      toast.success(`Historical campaign ${CAMPAIGN_START}–${CAMPAIGN_END} is ready`)
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to start historical campaign')
     } finally {
-      setOptionsLoading(false)
+      setStarting(false)
     }
   }
 
-  useEffect(() => {
-    void load()
-    void loadOptions()
-  }, [])
+  async function discover2008() {
+    setDiscovering(true)
+    try {
+      await ensureCampaign()
+      await triggerProviderSeason(PRIMARY_SEASON)
+      toast.success(`Season ${displaySeason(PRIMARY_SEASON)} discovery requested`)
+      window.setTimeout(() => void load(), 1500)
+      window.setTimeout(() => void load(), 5000)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to request season discovery')
+    } finally {
+      setDiscovering(false)
+    }
+  }
 
-  const stats = useMemo(() => {
-    const campaigns = data?.campaigns ?? []
-    const total = campaigns.length
-    const succeeded = campaigns.filter((c) => c.status === 'SUCCEEDED').length
-    const active = campaigns.filter((c) => ['READY', 'QUEUED', 'RUNNING'].includes(c.status)).length
-    const avg = campaigns.length ? campaigns.reduce((sum, c) => sum + Number(c.completeness_score ?? 0), 0) / campaigns.length : 0
-    return { total, succeeded, active, avg }
-  }, [data])
+  async function prepare2008() {
+    setPreparing(true)
+    try {
+      const result = await prepareHistoricalSeason(PRIMARY_SEASON, 100)
+      toast.success(`Season ${displaySeason(PRIMARY_SEASON)} prepared`, {
+        description: `${result.jobs_total} backfill job${result.jobs_total === 1 ? '' : 's'} in the canonical queue`,
+      })
+      await load()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Unable to prepare historical season')
+    } finally {
+      setPreparing(false)
+    }
+  }
 
   return (
     <div className="flex flex-col gap-density-xl">
       <PageHeader
         title="Historical Bootstrap"
-        description="Live historical season backfill path backed by Supabase. One season is queued at a time through the project’s backfill control plane."
-        tag={<StatusBadge status={loading || optionsLoading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
-        actions={
-          <div className="flex items-center gap-density-sm">
-            <Button onClick={() => setCreateOpen(true)} disabled={optionsLoading}>
-              <Plus className="h-4 w-4" /> Queue season
-            </Button>
-            <Button variant="outline" onClick={() => { void load(); void loadOptions() }} disabled={loading || optionsLoading}>
-              <RefreshCw className="h-4 w-4" /> Refresh
-            </Button>
-          </div>
-        }
+        description="Single historical control plane. Season identity is the numeric year; 2008/2009 is presentation only."
+        tag={<StatusBadge status={loading ? 'LOADING' : campaign?.status ?? 'PLANNED'} />}
+        actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>}
       />
 
-      {error && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
-
-      <div className="grid grid-cols-2 gap-density-md lg:grid-cols-4">
-        <Stat label="Archive campaigns" value={stats.total.toLocaleString()} />
-        <Stat label="Succeeded" value={stats.succeeded.toLocaleString()} />
-        <Stat label="Active" value={stats.active.toLocaleString()} />
-        <Stat label="Avg completeness" value={`${(stats.avg * 100).toFixed(1)}%`} />
-      </div>
-
-      <ReadinessPanel options={options} />
-
-      <section>
-        <div className="mb-density-md flex items-center gap-density-sm"><Database className="h-4 w-4" /><h2 className="text-base font-semibold">Real season state</h2></div>
-        <DataTable columns={seasonColumns} data={data?.seasons ?? []} searchPlaceholder="Search seasons…" pageSize={12} />
-      </section>
-
-      <section>
-        <h2 className="mb-density-md text-base font-semibold">Real archive campaigns</h2>
-        <DataTable columns={campaignColumns} data={data?.campaigns ?? []} searchPlaceholder="Search campaigns…" pageSize={12} onRowClick={setSelected} />
-      </section>
-
-      <DetailDrawer
-        open={!!selected}
-        onOpenChange={(open) => !open && setSelected(null)}
-        title={selected ? `Season ${selected.season} · ${selected.dataset_type}` : ''}
-        description={selected?.campaign_id}
-      >
-        {selected && (
-          <div className="flex flex-col gap-density-md text-sm">
-            <Row label="Campaign status" value={<StatusBadge status={selected.status} />} />
-            <Row label="Worker status" value={<StatusBadge status={String(selected.worker_status ?? '—')} />} />
-            <Row label="Scope" value={selected.scope_state} />
-            <Row label="Provider" value={selected.provider} />
-            <Row label="Completeness" value={`${(Number(selected.completeness_score ?? 0) * 100).toFixed(2)}%`} />
-            <Row label="Rows" value={Number(selected.row_count ?? 0).toLocaleString()} />
-            <Row label="Manifest" value={<span className="font-mono text-xs break-all">{selected.manifest_id ?? '—'}</span>} />
-            <Row label="Object URI" value={<span className="font-mono text-xs break-all">{selected.object_uri ?? '—'}</span>} />
-            <Row label="Checksum" value={<span className="font-mono text-xs break-all">{selected.checksum ?? '—'}</span>} />
-            <Row label="Queue" value={selected.queue_name ?? '—'} />
-            <Row label="Attempts" value={String(selected.worker_attempts ?? selected.attempts ?? 0)} />
-            <Row label="Created" value={new Date(selected.created_at).toLocaleString()} />
-            {selected.object_uri && <a className="inline-flex items-center gap-1 text-sm font-medium hover:underline" href={selected.object_uri} target="_blank" rel="noreferrer">Open object <ExternalLink className="h-3.5 w-3.5" /></a>}
-          </div>
-        )}
-      </DetailDrawer>
-
-      <SeasonBackfillDialog open={createOpen} onOpenChange={setCreateOpen} options={options} onQueued={() => { void load(); void loadOptions() }} />
-    </div>
-  )
-}
-
-function ReadinessPanel({ options }: { options: ArchiveCampaignOptions | null }) {
-  const registered = options?.registered_seasons ?? []
-  const activeCompetitions = options?.competitions ?? []
-  const rules = options?.rules ?? []
-  const supportedSeasons = registered.filter((s) => s.provider === 'api-football' && s.status === 'SUPPORTED')
-  const ready = supportedSeasons.length > 0 && activeCompetitions.length > 0 && rules.length > 0
-
-  return (
-    <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-      <div className="flex items-start justify-between gap-density-md">
-        <div>
-          <h2 className="text-base font-semibold">Historical backfill readiness</h2>
-          <p className="mt-1 text-sm text-muted-foreground">Only provider-backed seasons marked SUPPORTED can be queued. Backend-only lineage and completeness fields are never entered here.</p>
-        </div>
-        <StatusBadge status={ready ? 'READY' : 'BLOCKED'} />
-      </div>
-
-      <div className="mt-density-md grid grid-cols-1 gap-density-sm md:grid-cols-3">
-        <ReadinessItem ok={activeCompetitions.length > 0} label="Active competitions" value={String(activeCompetitions.length)} />
-        <ReadinessItem ok={supportedSeasons.length > 0} label="Supported seasons" value={String(supportedSeasons.length)} />
-        <ReadinessItem ok={rules.length > 0} label="Configured datasets" value={String(rules.length)} />
-      </div>
-
-      {!ready && (
-        <div className="mt-density-md flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
-          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="flex flex-col gap-density-lg lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <div className="font-medium text-foreground">Season queueing is blocked until prerequisites exist.</div>
-            <div className="mt-1">The selected season must already be registered by the provider layer as SUPPORTED. The dashboard will not invent provider, dates, team scope, schema or completeness metadata.</div>
+            <div className="flex items-center gap-2"><Database className="h-5 w-5" /><h2 className="text-base font-semibold">Historical campaign</h2></div>
+            <p className="mt-1 text-sm text-muted-foreground">One campaign owns the historical range and is reused by every season preparation request.</p>
+            <div className="mt-density-lg grid grid-cols-2 gap-density-md md:grid-cols-4">
+              <Metric label="Campaign" value={campaign?.status ?? 'Not started'} />
+              <Metric label="Range" value={campaign ? `${campaign.target_start_season}–${campaign.target_end_season}` : `${CAMPAIGN_START}–${CAMPAIGN_END}`} />
+              <Metric label="Requests" value={String(campaign?.requests_used ?? 0)} />
+              <Metric label="Completeness" value={`${(Number(campaign?.completeness_score ?? 0) * 100).toFixed(1)}%`} />
+            </div>
           </div>
+          <Button onClick={() => void ensureCampaign()} disabled={starting || !!campaign}>
+            {campaign ? <><CheckCircle2 className="h-4 w-4" /> Campaign ready</> : <><Play className="h-4 w-4" /> Start campaign</>}
+          </Button>
         </div>
-      )}
-    </section>
-  )
-}
+      </section>
 
-function ReadinessItem({ ok, label, value }: { ok: boolean; label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-md border border-border/60 p-density-md">
-      <div>
-        <div className="text-xs uppercase text-muted-foreground">{label}</div>
-        <div className="mt-1 text-lg font-semibold">{value}</div>
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="flex items-start justify-between gap-density-md">
+          <div>
+            <div className="flex items-center gap-2"><h2 className="text-base font-semibold">Season {displaySeason(PRIMARY_SEASON)}</h2><StatusBadge status={primary?.gate_state ?? 'BLOCKED'} dense /></div>
+            <p className="mt-1 text-sm text-muted-foreground">All 2008 operational steps are handled here. No competition, dataset, date, or schema is entered manually.</p>
+          </div>
+          <div className="text-right text-xs text-muted-foreground">Canonical season key: <span className="font-mono font-semibold text-foreground">{PRIMARY_SEASON}</span></div>
+        </div>
+
+        <div className="mt-density-lg grid grid-cols-1 gap-density-md md:grid-cols-2 xl:grid-cols-4">
+          <StageCard step="1" title="Campaign" value={campaign ? campaign.status : 'PLANNED'} ready={!!campaign} />
+          <StageCard step="2" title="Provider discovery" value={primary ? `${primary.supported_leagues}/${primary.provider_leagues} competitions` : 'Waiting'} ready={Number(primary?.provider_leagues ?? 0) > 0} />
+          <StageCard step="3" title="Backfill jobs" value={primary ? `${primary.backfill_succeeded}/${primary.backfill_jobs} succeeded` : 'Not prepared'} ready={Number(primary?.backfill_jobs ?? 0) > 0} />
+          <StageCard step="4" title="Pre-archive gate" value={primary?.gate_state ?? 'BLOCKED'} ready={Boolean(primary?.ready_for_archive)} />
+        </div>
+
+        <div className="mt-density-lg flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => void discover2008()} disabled={discovering || loading}>
+            <Send className="h-4 w-4" /> {discovering ? 'Requesting…' : 'Discover 2008'}
+          </Button>
+          <Button onClick={() => void prepare2008()} disabled={preparing || discovering || Number(primary?.provider_leagues ?? 0) === 0}>
+            <Database className="h-4 w-4" /> {preparing ? 'Preparing…' : 'Prepare 2008'}
+          </Button>
+        </div>
+
+        {!primary && <Notice icon={<AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />} title="2008 is not discovered yet." text="Run provider discovery first. The database creates the canonical season state; the UI never creates a second 2008 record." />}
+        {primary?.ready_for_archive && <Notice icon={<CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />} title="2008 passed the pre-archive gate." text="Archive creation is now permitted by the database guard. This page never creates archive objects itself." success />}
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="mb-density-md flex items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Historical seasons</h2><p className="mt-1 text-sm text-muted-foreground">One row per numeric season. Provider registrations are unique server-side and deduplicated defensively here.</p></div><div className="text-xs text-muted-foreground">{seasons.length} unique seasons</div></div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="px-3 py-2">Season</th><th className="px-3 py-2">Provider</th><th className="px-3 py-2">Backfill</th><th className="px-3 py-2">Gate</th><th className="px-3 py-2">Archive</th></tr></thead>
+            <tbody>
+              {seasons.map((row) => <tr key={row.season} className="border-b last:border-0"><td className="px-3 py-3 font-medium">{displaySeason(row.season)}</td><td className="px-3 py-3">{row.supported_leagues}/{row.provider_leagues}</td><td className="px-3 py-3"><div className="min-w-44"><ProgressBar value={Math.max(0, Math.min(100, Number(row.backfill_progress ?? 0)))} size="sm" /></div><div className="mt-1 text-xs text-muted-foreground">{row.backfill_succeeded}/{row.backfill_jobs} succeeded · {row.backfill_active} active · {row.backfill_failed} failed</div></td><td className="px-3 py-3"><StatusBadge status={row.gate_state} dense /></td><td className="px-3 py-3">{row.archive_succeeded}/{row.archive_campaigns}</td></tr>)}
+              {!seasons.length && <tr><td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">No historical seasons available yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 gap-density-lg lg:grid-cols-2">
+        <QueueCard title="Backfill queue" rows={snapshot?.tranche_queue ?? []} />
+        <QueueCard title="Archive output" rows={snapshot?.archive_output ?? []} />
       </div>
-      {ok ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
     </div>
   )
 }
 
-function SeasonBackfillDialog({ open, onOpenChange, options, onQueued }: {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  options: ArchiveCampaignOptions | null
-  onQueued: () => void
-}) {
-  const [competitionId, setCompetitionId] = useState('')
-  const [seasonKey, setSeasonKey] = useState('')
-  const [datasetType, setDatasetType] = useState('')
-  const [submitting, setSubmitting] = useState(false)
+function Metric({ label, value }: { label: string; value: string }) { return <div><div className="text-xs uppercase text-muted-foreground">{label}</div><div className="mt-1 font-semibold">{value}</div></div> }
 
-  const registeredSeasons = options?.registered_seasons ?? []
-  const competitions = options?.competitions ?? []
-  const rules = options?.rules ?? []
-  const supportedSeasons = registeredSeasons.filter((s) => s.provider === 'api-football' && s.status === 'SUPPORTED')
-  const seasonsForCompetition = useMemo(
-    () => supportedSeasons.filter((s) => !competitionId || s.competition_id === competitionId),
-    [supportedSeasons, competitionId],
-  )
-  const selectedRegistration = seasonsForCompetition.find((s) => `${s.competition_id}:${s.season}` === seasonKey)
-  const canRequest = !!competitionId && !!selectedRegistration && !!datasetType && !submitting
+function StageCard({ step, title, value, ready }: { step: string; title: string; value: string; ready: boolean }) { return <div className="rounded-md border border-border/60 p-density-md"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold uppercase text-muted-foreground">Step {step}</span>{ready ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4 text-muted-foreground" />}</div><div className="mt-2 text-sm font-medium">{title}</div><div className="mt-1 text-xs text-muted-foreground">{value}</div></div> }
 
-  useEffect(() => {
-    if (!open) {
-      setCompetitionId('')
-      setSeasonKey('')
-      setDatasetType('')
-      setSubmitting(false)
-    }
-  }, [open])
+function Notice({ icon, title, text, success = false }: { icon: React.ReactNode; title: string; text: string; success?: boolean }) { return <div className={`mt-density-lg flex items-start gap-2 rounded-lg border p-density-md text-sm ${success ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5'}`}>{icon}<div><div className="font-medium text-foreground">{title}</div><div className="mt-1 text-muted-foreground">{text}</div></div></div> }
 
-  useEffect(() => {
-    if (!competitionId) {
-      setSeasonKey('')
-      return
-    }
-    const validSeason = seasonsForCompetition.some((s) => `${s.competition_id}:${s.season}` === seasonKey)
-    if (!validSeason) setSeasonKey(seasonsForCompetition[0] ? `${seasonsForCompetition[0].competition_id}:${seasonsForCompetition[0].season}` : '')
-  }, [competitionId, seasonKey, seasonsForCompetition])
-
-  useEffect(() => {
-    if (!datasetType && rules[0]) setDatasetType(rules[0].dataset_type)
-  }, [datasetType, rules])
-
-  const competitionName = competitions.find((c) => c.id === competitionId)?.name ?? '—'
-
-  async function submit() {
-    if (!selectedRegistration || !competitionId || !datasetType) return
-    setSubmitting(true)
-    try {
-      const result = await queueBackfillSeason(competitionId, selectedRegistration.season, datasetType)
-      toast.success(`Season ${result.season} queued`, { description: `Job ${result.job_id}` })
-      onOpenChange(false)
-      onQueued()
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Unable to queue season')
-    } finally {
-      setSubmitting(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Queue historical season</DialogTitle>
-          <DialogDescription>
-            Select one real provider-backed season. The request enters the existing backfill control plane; no technical campaign metadata is manually supplied.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="grid grid-cols-1 gap-density-md md:grid-cols-2">
-          <Field label="Competition">
-            <Select value={competitionId} onValueChange={setCompetitionId} disabled={competitions.length === 0}>
-              <SelectTrigger><SelectValue placeholder="Select competition" /></SelectTrigger>
-              <SelectContent>{competitions.map((competition) => <SelectItem key={competition.id} value={competition.id}>{competition.name}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-
-          <Field label="Season">
-            <Select value={seasonKey} onValueChange={setSeasonKey} disabled={seasonsForCompetition.length === 0}>
-              <SelectTrigger><SelectValue placeholder="Select supported season" /></SelectTrigger>
-              <SelectContent>{seasonsForCompetition.map((season) => <SelectItem key={`${season.competition_id}:${season.season}`} value={`${season.competition_id}:${season.season}`}>{season.season}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-
-          <div className="md:col-span-2">
-            <Field label="Dataset">
-              <Select value={datasetType} onValueChange={setDatasetType} disabled={rules.length === 0}>
-                <SelectTrigger><SelectValue placeholder="Select dataset" /></SelectTrigger>
-                <SelectContent>{rules.map((rule) => <SelectItem key={`${rule.dataset_type}:${rule.policy_version}`} value={rule.dataset_type}>{rule.dataset_type}</SelectItem>)}</SelectContent>
-              </Select>
-            </Field>
-          </div>
-        </div>
-
-        <div className="rounded-lg border border-border/60 bg-muted/20 p-density-md text-sm">
-          <div className="font-medium">Request scope</div>
-          <div className="mt-1 text-muted-foreground">{competitionName} · {selectedRegistration?.season ?? '—'} · {datasetType || '—'}</div>
-        </div>
-
-        {!selectedRegistration && (
-          <div className="flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
-            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <div>No SUPPORTED API-Football season is registered for this competition yet. The request cannot be queued safely.</div>
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>Close</Button>
-          <Button onClick={() => { void submit() }} disabled={!canRequest}>
-            {submitting ? 'Queueing…' : 'Queue season'}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-function Stat({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><div className="text-xs font-medium uppercase text-muted-foreground">{label}</div><div className="mt-1 text-2xl font-semibold">{value}</div></div>
-}
-
-function Row({ label, value }: { label: string; value: ReactNode }) {
-  return <div className="flex flex-col gap-1 border-b border-border/60 pb-density-sm"><span className="text-xs uppercase text-muted-foreground">{label}</span><span>{value}</span></div>
-}
-
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return <div className="flex flex-col gap-1.5"><label className="text-sm font-medium">{label}</label>{children}</div>
+function QueueCard({ title, rows }: { title: string; rows: Array<Record<string, unknown>> }) {
+  return <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="text-base font-semibold">{title}</h2><div className="mt-4 space-y-2">{rows.slice(0, 8).map((row, i) => <div key={String(row.job_id ?? row.manifest_id ?? i)} className="rounded-md border border-border/60 p-3 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{String(row.dataset_type ?? 'record')}</span><StatusBadge status={String(row.status ?? '—')} dense /></div><div className="mt-1 text-muted-foreground">Season {String(row.season ?? '—')} · Requests {String(row.requests_used ?? '—')}</div></div>)}{!rows.length && <div className="py-6 text-center text-sm text-muted-foreground">No records.</div>}</div></section>
 }

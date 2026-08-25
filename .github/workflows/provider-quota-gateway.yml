@@ -1,3 +1,4 @@
+# Production season discovery trigger: keep this workflow on every provider-control-plane deployment.
 name: provider-worker-ci
 
 on:

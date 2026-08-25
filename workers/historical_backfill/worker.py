@@ -11,7 +11,6 @@ import json
 import os
 import socket
 import sys
-import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -44,10 +43,7 @@ def persist_fixture(fixture: dict[str, object]) -> dict[str, object]:
         url.rstrip("/"),
         data=body,
         method="POST",
-        headers={
-            "content-type": "application/json",
-            "x-provider-gateway-secret": secret,
-        },
+        headers={"content-type": "application/json", "x-provider-gateway-secret": secret},
     )
     with urlopen(request, timeout=60) as response:
         result = json.load(response)
@@ -63,7 +59,7 @@ def claim_job(conn):
             cur.execute(
                 """
                 select b.*, c.provider_ids->>'api_football' as provider_league_id,
-                       c.canonical_name as competition_name
+                       c.canonical_name as competition_name, w.job_id as worker_job_id
                   from internal.backfill_jobs b
                   join public.competitions c on c.id = b.league_id
                   join internal.worker_jobs w
@@ -82,33 +78,16 @@ def claim_job(conn):
             if not job:
                 return None
 
-            worker_job_id = uuid.UUID(str(job["job_id"])) if False else None
-            cur.execute(
-                """
-                select w.job_id
-                  from internal.worker_jobs w
-                 where w.idempotency_key = %s
-                """,
-                (f"backfill:{job['job_id']}",),
-            )
-            worker_row = cur.fetchone()
-            if not worker_row:
-                raise RuntimeError(f"worker job missing for backfill job {job['job_id']}")
-            worker_job_id = worker_row["job_id"]
-
             cur.execute(
                 """
                 update internal.worker_jobs
-                   set status='RUNNING',
-                       worker_id=%s,
-                       attempts=attempts+1,
+                   set status='RUNNING', worker_id=%s, attempts=attempts+1,
                        started_at=coalesce(started_at, now()),
                        lease_expires_at=now() + interval '30 minutes',
-                       error_code=null,
-                       error_message=null
+                       error_code=null, error_message=null
                  where job_id=%s and status='QUEUED'
                 """,
-                (worker_id, worker_job_id),
+                (worker_id, job["worker_job_id"]),
             )
             if cur.rowcount != 1:
                 return None
@@ -116,15 +95,11 @@ def claim_job(conn):
             cur.execute(
                 """
                 update internal.backfill_jobs
-                   set status='RUNNING',
-                       updated_at=now(),
-                       next_retry_at=null
+                   set status='RUNNING', updated_at=now(), next_retry_at=null
                  where job_id=%s
                 """,
                 (job["job_id"],),
             )
-
-            job["worker_job_id"] = worker_job_id
             return job
 
 
@@ -134,9 +109,7 @@ def update_progress(conn, job: dict[str, object], progress: int, requests_used: 
             cur.execute(
                 """
                 update internal.backfill_jobs
-                   set progress=%s,
-                       requests_used=%s,
-                       updated_at=now()
+                   set progress=%s, requests_used=%s, updated_at=now()
                  where job_id=%s
                 """,
                 (progress, requests_used, job["job_id"]),
@@ -148,27 +121,14 @@ def mark_succeeded(conn, job: dict[str, object], row_count: int, provider_league
         with conn.cursor() as cur:
             cur.execute(
                 """
-                update public.provider_capabilities
-                   set status='SUPPORTED', checked_at=now(), updated_at=now()
-                 where provider='api-football'
-                   and competition=%s
-                   and season=%s
-                   and endpoint='fixtures'
+                insert into public.provider_capabilities
+                  (provider, competition, season, endpoint, market, status, checked_at, created_at, updated_at)
+                values ('api-football', %s, %s, 'fixtures', null, 'SUPPORTED', now(), now(), now())
+                on conflict (provider, competition, season, endpoint, market)
+                do update set status='SUPPORTED', checked_at=now(), updated_at=now()
                 """,
                 (job["league_id"], job["season"]),
             )
-            if cur.rowcount == 0:
-                cur.execute(
-                    """
-                    insert into public.provider_capabilities
-                      (provider, competition, season, endpoint, market, status, checked_at, created_at, updated_at)
-                    values ('api-football', %s, %s, 'fixtures', null, 'SUPPORTED', now(), now(), now())
-                    on conflict (provider, competition, season, endpoint, market)
-                    do update set status='SUPPORTED', checked_at=now(), updated_at=now()
-                    """,
-                    (job["league_id"], job["season"]),
-                )
-
             cur.execute(
                 """
                 update internal.backfill_jobs
@@ -186,7 +146,6 @@ def mark_succeeded(conn, job: dict[str, object], row_count: int, provider_league
                 """,
                 (job["worker_job_id"],),
             )
-
     return {
         "job_id": str(job["job_id"]),
         "worker_job_id": str(job["worker_job_id"]),
@@ -206,9 +165,7 @@ def mark_failed(conn, job: dict[str, object], exc: Exception):
             cur.execute(
                 """
                 update internal.backfill_jobs
-                   set status='FAILED',
-                       next_retry_at=now() + interval '5 minutes',
-                       updated_at=now()
+                   set status='FAILED', next_retry_at=now() + interval '5 minutes', updated_at=now()
                  where job_id=%s
                 """,
                 (job["job_id"],),
@@ -229,7 +186,6 @@ def run_one(conn):
     job = claim_job(conn)
     if not job:
         return {"processed": False, "reason": "no_queued_historical_job"}
-
     try:
         provider_league_id_raw = job.get("provider_league_id")
         if not provider_league_id_raw:
@@ -248,8 +204,7 @@ def run_one(conn):
             progress = 20 if not fixtures else 20 + int((persisted / len(fixtures)) * 75)
             update_progress(conn, job, min(progress, 95), 1)
 
-        result = mark_succeeded(conn, job, persisted, provider_league_id)
-        return {"processed": True, **result}
+        return {"processed": True, **mark_succeeded(conn, job, persisted, provider_league_id)}
     except Exception as exc:
         error = mark_failed(conn, job, exc)
         return {
@@ -268,9 +223,15 @@ def main() -> int:
     conn = None
     try:
         conn = connect()
-        result = run_one(conn)
-        print(json.dumps(result, separators=(",", ":")), flush=True)
-        return 0 if result.get("status") != "FAILED" else 1
+        batch_size = max(1, min(int(os.environ.get("BATCH_SIZE", "10")), 100))
+        results = []
+        for _ in range(batch_size):
+            result = run_one(conn)
+            results.append(result)
+            if result.get("processed") is not True:
+                break
+        print(json.dumps({"processed": [r for r in results if r.get("processed")], "idle": not any(r.get("processed") for r in results)}, separators=(",", ":")), flush=True)
+        return 0 if not any(r.get("status") == "FAILED" for r in results) else 1
     except (HTTPError, URLError) as exc:
         print(f"historical backfill provider boundary failed: {exc}", file=sys.stderr, flush=True)
         return 1

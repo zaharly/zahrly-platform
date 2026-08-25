@@ -52,3 +52,5 @@ module.exports = async function handler(req, res) {
 
   return json(res, 202, { accepted: true, season, workflow: 'provider-worker-ci' })
 }
+
+// Deployment trigger: keep server-side season dispatch on the production build.

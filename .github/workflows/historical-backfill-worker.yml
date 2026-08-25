@@ -1,0 +1,49 @@
+name: historical-backfill-worker
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+env:
+  PROVIDER_FIXTURE_PERSISTENCE_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-fixture-persistence
+
+jobs:
+  historical-backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build runtime image
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-historical-backfill:ci .
+
+      - name: Process queued historical backfill jobs
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          SUPABASE_DB_URL="$(printf '%s' "${SUPABASE_DB_URL}" | tr -d '\r\n')"
+          API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
+          PROVIDER_GATEWAY_SECRET="$(printf '%s' "${PROVIDER_GATEWAY_SECRET}" | tr -d '\r\n')"
+          export SUPABASE_DB_URL API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET PROVIDER_FIXTURE_PERSISTENCE_URL
+          test -n "${SUPABASE_DB_URL}"
+          test -n "${API_FOOTBALL_KEY}"
+          test -n "${PROVIDER_GATEWAY_SECRET}"
+
+          docker run --rm \
+            -e SUPABASE_DB_URL \
+            -e API_FOOTBALL_KEY \
+            -e PROVIDER_GATEWAY_SECRET \
+            -e PROVIDER_FIXTURE_PERSISTENCE_URL \
+            -e BATCH_SIZE=10 \
+            zahrly-historical-backfill:ci \
+            python -m workers.historical_backfill.worker > historical_backfill.json
+
+          cat historical_backfill.json

@@ -11,13 +11,16 @@ export interface LiveCountry {
   enabled_league_count: number
   backfill_job_count: number
   archive_manifest_count: number
+  archive_completeness: number
 }
 
 export interface LiveSeasonState {
   season: number
   status: string
+  provider_status: string
   endpoints: string[]
   checked_at: string | null
+  blocked_reason: string | null
   backfill: {
     total: number
     queued: number
@@ -25,10 +28,18 @@ export interface LiveSeasonState {
     succeeded: number
     failed: number
     progress: number
+    requests_used?: number
   }
   archive: {
     manifest_count: number
     completeness: number
+  }
+  campaigns?: {
+    total: number
+    queued: number
+    running: number
+    succeeded: number
+    failed: number
   }
 }
 
@@ -48,6 +59,7 @@ export interface LiveCompetition {
     succeeded: number
     failed: number
     progress: number
+    requests_used?: number
   }
   archive: {
     manifest_count: number
@@ -70,10 +82,27 @@ export interface ProviderCatalogLive {
   }>
   backfill_jobs: unknown[]
   archive: unknown[]
+  audit?: unknown[]
 }
 
 export async function fetchProviderCatalogLive(): Promise<ProviderCatalogLive> {
   const { data, error } = await supabase.rpc('admin_data_control_catalog')
   if (error) throw error
-  return (data ?? { countries: [], competitions: [], provider_capabilities: [], backfill_jobs: [], archive: [] }) as ProviderCatalogLive
+  return (data ?? { countries: [], competitions: [], provider_capabilities: [], backfill_jobs: [], archive: [], audit: [] }) as ProviderCatalogLive
+}
+
+export async function setDataControl(
+  scopeType: 'country' | 'competition',
+  scopeId: string,
+  state: 'ENABLED' | 'PAUSED' | 'DISABLED' | 'ARCHIVED',
+  reason?: string,
+) {
+  const { data, error } = await supabase.rpc('admin_set_data_control', {
+    p_scope_type: scopeType,
+    p_scope_id: scopeId,
+    p_state: state,
+    p_reason: reason ?? null,
+  })
+  if (error) throw error
+  return data
 }

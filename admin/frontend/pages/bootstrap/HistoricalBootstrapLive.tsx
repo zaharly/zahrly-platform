@@ -5,19 +5,17 @@ import { ProgressBar } from '../../components/status/ProgressBar'
 import { DataTable } from '../../components/tables/DataTable'
 import { DetailDrawer } from '../../components/drawers/DetailDrawer'
 import { Button } from '../../lib/shadcn/button'
-import { Input } from '../../lib/shadcn/input'
-import { Label } from '../../lib/shadcn/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../lib/shadcn/select'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../../lib/shadcn/dialog'
 import { toast } from '../../lib/shadcn/sonner'
 import type { ColumnDef } from '@tanstack/react-table'
-import { RefreshCw, ExternalLink, Database, Plus } from 'lucide-react'
+import { RefreshCw, ExternalLink, Database, Plus, AlertTriangle, CheckCircle2 } from 'lucide-react'
 import {
-  createArchiveCampaign,
   fetchArchiveCampaignOptions,
   fetchArchiveLive,
   type ArchiveCampaignLive,
   type ArchiveCampaignOptions,
+  type ArchiveRegisteredSeasonOption,
   type ArchiveSeasonLive,
 } from '../../integrations/archiveLive'
 
@@ -44,13 +42,12 @@ const campaignColumns: ColumnDef<ArchiveCampaignLive, any>[] = [
 
 export default function HistoricalBootstrapLive() {
   const [data, setData] = useState<{ campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] } | null>(null)
+  const [options, setOptions] = useState<ArchiveCampaignOptions | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [optionsLoading, setOptionsLoading] = useState(true)
   const [selected, setSelected] = useState<ArchiveCampaignLive | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
-  const [options, setOptions] = useState<ArchiveCampaignOptions | null>(null)
-  const [optionsLoading, setOptionsLoading] = useState(false)
-  const [creating, setCreating] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -64,20 +61,21 @@ export default function HistoricalBootstrapLive() {
     }
   }
 
-  async function openCreate() {
-    setCreateOpen(true)
-    if (options) return
+  async function loadOptions() {
     setOptionsLoading(true)
     try {
       setOptions(await fetchArchiveCampaignOptions())
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Unable to load archive campaign options')
+      toast.error(e instanceof Error ? e.message : 'Unable to load archive request options')
     } finally {
       setOptionsLoading(false)
     }
   }
 
-  useEffect(() => { void load() }, [])
+  useEffect(() => {
+    void load()
+    void loadOptions()
+  }, [])
 
   const stats = useMemo(() => {
     const campaigns = data?.campaigns ?? []
@@ -88,16 +86,24 @@ export default function HistoricalBootstrapLive() {
     return { total, succeeded, active, avg }
   }, [data])
 
+  const registeredSeasonCount = options?.registered_seasons.length ?? 0
+  const activeCompetitionCount = options?.competitions.length ?? 0
+  const requestReady = registeredSeasonCount > 0 && activeCompetitionCount > 0 && (options?.rules.length ?? 0) > 0
+
   return (
     <div className="flex flex-col gap-density-xl">
       <PageHeader
         title="Historical Bootstrap"
         description="Live archive operating path backed by internal.archive_campaigns, internal.worker_jobs, and internal.archive_catalog. Historical data is displayed from Supabase, not mock fixtures."
-        tag={<StatusBadge status={loading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
+        tag={<StatusBadge status={loading || optionsLoading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
         actions={
           <div className="flex items-center gap-density-sm">
-            <Button onClick={() => void openCreate()}><Plus className="h-4 w-4" /> Add campaign</Button>
-            <Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>
+            <Button onClick={() => setCreateOpen(true)} disabled={!requestReady}>
+              <Plus className="h-4 w-4" /> Add archive request
+            </Button>
+            <Button variant="outline" onClick={() => { void load(); void loadOptions() }} disabled={loading || optionsLoading}>
+              <RefreshCw className="h-4 w-4" /> Refresh
+            </Button>
           </div>
         }
       />
@@ -110,6 +116,8 @@ export default function HistoricalBootstrapLive() {
         <Stat label="Active" value={stats.active.toLocaleString()} />
         <Stat label="Avg completeness" value={`${(stats.avg * 100).toFixed(1)}%`} />
       </div>
+
+      <ReadinessPanel options={options} />
 
       <section>
         <div className="mb-density-md flex items-center gap-density-sm"><Database className="h-4 w-4" /><h2 className="text-base font-semibold">Real season state</h2></div>
@@ -146,204 +154,149 @@ export default function HistoricalBootstrapLive() {
         )}
       </DetailDrawer>
 
-      <CreateCampaignDialog
-        open={createOpen}
-        options={options}
-        loading={optionsLoading}
-        creating={creating}
-        onOpenChange={setCreateOpen}
-        onCreate={async (input) => {
-          setCreating(true)
-          try {
-            const created = await createArchiveCampaign(input)
-            toast.success(`Archive campaign queued · ${created.campaign_id}`)
-            setCreateOpen(false)
-            await load()
-          } catch (e) {
-            toast.error(e instanceof Error ? e.message : 'Unable to create archive campaign')
-          } finally {
-            setCreating(false)
-          }
-        }}
-      />
+      <ArchiveRequestDialog open={createOpen} onOpenChange={setCreateOpen} options={options} />
     </div>
   )
 }
 
-function CreateCampaignDialog({
-  open,
-  options,
-  loading,
-  creating,
-  onOpenChange,
-  onCreate,
-}: {
-  open: boolean
-  options: ArchiveCampaignOptions | null
-  loading: boolean
-  creating: boolean
-  onOpenChange: (open: boolean) => void
-  onCreate: (input: {
-    country_id: string
-    competition_id: string
-    season: number
-    dataset_type: string
-    provider: string
-    date_start: string
-    date_end: string
-    team_set_hash: string
-    schema_version: string
-    completeness_score: number
-    completeness_policy_version: string
-    auto_queue: boolean
-  }) => Promise<void>
-}) {
-  const firstRule = options?.rules[0]
-  const [countryId, setCountryId] = useState('')
-  const [competitionId, setCompetitionId] = useState('')
-  const [season, setSeason] = useState('2026')
-  const [datasetType, setDatasetType] = useState('')
-  const [provider, setProvider] = useState('e2e-provider')
-  const [dateStart, setDateStart] = useState('')
-  const [dateEnd, setDateEnd] = useState('')
-  const [teamSetHash, setTeamSetHash] = useState('')
-  const [schemaVersion, setSchemaVersion] = useState('e2e-schema-v1')
-  const [completenessPct, setCompletenessPct] = useState('99')
-
-  useEffect(() => {
-    if (!options) return
-    if (!countryId && options.countries[0]) setCountryId(options.countries[0].id)
-    if (!datasetType && firstRule) setDatasetType(firstRule.dataset_type)
-  }, [options, countryId, datasetType, firstRule])
-
-  useEffect(() => {
-    if (!countryId) return
-    if (!options?.competitions.some((c) => c.id === competitionId && c.country_id === countryId)) {
-      setCompetitionId(options?.competitions.find((c) => c.country_id === countryId)?.id ?? '')
-    }
-  }, [countryId, competitionId, options])
-
-  const rulesForDataset = options?.rules.filter((rule) => rule.dataset_type === datasetType) ?? []
-  const rule = rulesForDataset[0]
-  const competitions = options?.competitions.filter((c) => c.country_id === countryId) ?? []
-  const completenessValue = Number(completenessPct) / 100
-  const valid = Boolean(
-    countryId && competitionId && season && datasetType && provider && dateStart && dateEnd && teamSetHash.trim() && schemaVersion.trim()
-      && completenessValue >= Number(rule?.required_threshold ?? 1),
-  )
-
-  function reset() {
-    setCountryId('')
-    setCompetitionId('')
-    setSeason('2026')
-    setDatasetType('')
-    setProvider('e2e-provider')
-    setDateStart('')
-    setDateEnd('')
-    setTeamSetHash('')
-    setSchemaVersion('e2e-schema-v1')
-    setCompletenessPct('99')
-  }
+function ReadinessPanel({ options }: { options: ArchiveCampaignOptions | null }) {
+  const registered = options?.registered_seasons ?? []
+  const activeCompetitions = options?.competitions ?? []
+  const rules = options?.rules ?? []
+  const ready = registered.length > 0 && activeCompetitions.length > 0 && rules.length > 0
 
   return (
-    <Dialog open={open} onOpenChange={(value) => { onOpenChange(value); if (!value) reset() }}>
-      <DialogContent className="max-w-3xl">
+    <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+      <div className="flex items-start justify-between gap-density-md">
+        <div>
+          <h2 className="text-base font-semibold">Archive request readiness</h2>
+          <p className="mt-1 text-sm text-muted-foreground">The dashboard no longer asks for provider or lineage internals. Those values must come from the project’s provider-backed season registration path.</p>
+        </div>
+        <StatusBadge status={ready ? 'READY' : 'BLOCKED'} />
+      </div>
+
+      <div className="mt-density-md grid grid-cols-1 gap-density-sm md:grid-cols-3">
+        <ReadinessItem ok={activeCompetitions.length > 0} label="Active competitions" value={String(activeCompetitions.length)} />
+        <ReadinessItem ok={registered.length > 0} label="Provider-backed seasons" value={String(registered.length)} />
+        <ReadinessItem ok={rules.length > 0} label="Configured archive datasets" value={String(rules.length)} />
+      </div>
+
+      {!ready && (
+        <div className="mt-density-md flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <div className="font-medium text-foreground">Add archive request is intentionally blocked.</div>
+            <div className="mt-1">A real provider-backed season must exist before the system can derive the provider, season dates, team scope, schema and completeness metadata required by the archive campaign contract.</div>
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ReadinessItem({ ok, label, value }: { ok: boolean; label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-border/60 p-density-md">
+      <div>
+        <div className="text-xs uppercase text-muted-foreground">{label}</div>
+        <div className="mt-1 text-lg font-semibold">{value}</div>
+      </div>
+      {ok ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}
+    </div>
+  )
+}
+
+function ArchiveRequestDialog({ open, onOpenChange, options }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  options: ArchiveCampaignOptions | null
+}) {
+  const [competitionId, setCompetitionId] = useState('')
+  const [seasonKey, setSeasonKey] = useState('')
+  const [datasetType, setDatasetType] = useState('')
+
+  const registeredSeasons = options?.registered_seasons ?? []
+  const competitions = options?.competitions ?? []
+  const rules = options?.rules ?? []
+  const seasonsForCompetition = registeredSeasons.filter((s) => !competitionId || s.competition_id === competitionId)
+  const selectedRegistration = seasonsForCompetition.find((s) => `${s.competition_id}:${s.season}` === seasonKey)
+  const canRequest = Boolean(competitionId && selectedRegistration && datasetType && false)
+
+  useEffect(() => {
+    if (!open) {
+      setCompetitionId('')
+      setSeasonKey('')
+      setDatasetType('')
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (!competitionId) return
+    const validSeason = seasonsForCompetition.some((s) => `${s.competition_id}:${s.season}` === seasonKey)
+    if (!validSeason) setSeasonKey(seasonsForCompetition[0] ? `${seasonsForCompetition[0].competition_id}:${seasonsForCompetition[0].season}` : '')
+  }, [competitionId, seasonKey, seasonsForCompetition])
+
+  useEffect(() => {
+    if (!datasetType && rules[0]) setDatasetType(rules[0].dataset_type)
+  }, [datasetType, rules])
+
+  const competitionName = competitions.find((c) => c.id === competitionId)?.name ?? '—'
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Add historical archive campaign</DialogTitle>
+          <DialogTitle>Add archive request</DialogTitle>
           <DialogDescription>
-            Creates a real ARCHIVE_ONLY campaign in Supabase and immediately calls the project’s official dispatch_archive_campaign transition. No mock job is created.
+            Choose the business scope only. Provider, dates, team scope, schema and completeness are derived by the backend from the registered provider season; they are not user inputs.
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid grid-cols-1 gap-density-md md:grid-cols-2">
-          <Field label="Country">
-            <Select value={countryId} onValueChange={setCountryId} disabled={loading || creating}>
-              <SelectTrigger><SelectValue placeholder={loading ? 'Loading countries…' : 'Select country'} /></SelectTrigger>
-              <SelectContent>{options?.countries.map((country) => <SelectItem key={country.id} value={country.id}>{country.name} ({country.code})</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-
           <Field label="Competition">
-            <Select value={competitionId} onValueChange={setCompetitionId} disabled={loading || creating || !countryId}>
+            <Select value={competitionId} onValueChange={setCompetitionId} disabled={competitions.length === 0}>
               <SelectTrigger><SelectValue placeholder="Select competition" /></SelectTrigger>
               <SelectContent>{competitions.map((competition) => <SelectItem key={competition.id} value={competition.id}>{competition.name}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
 
-          <Field label="Season" hint="The worker archives this exact season scope.">
-            <Input type="number" min="1900" max="2100" value={season} onChange={(e) => setSeason(e.target.value)} disabled={creating} />
-          </Field>
-
-          <Field label="Dataset type">
-            <Select value={datasetType} onValueChange={setDatasetType} disabled={loading || creating}>
-              <SelectTrigger><SelectValue placeholder="Select configured dataset" /></SelectTrigger>
-              <SelectContent>{options?.rules.map((ruleOption) => <SelectItem key={`${ruleOption.dataset_type}:${ruleOption.policy_version}`} value={ruleOption.dataset_type}>{ruleOption.dataset_type}</SelectItem>)}</SelectContent>
+          <Field label="Season">
+            <Select value={seasonKey} onValueChange={setSeasonKey} disabled={seasonsForCompetition.length === 0}>
+              <SelectTrigger><SelectValue placeholder="Select registered season" /></SelectTrigger>
+              <SelectContent>{seasonsForCompetition.map((season) => <SelectItem key={`${season.competition_id}:${season.season}`} value={`${season.competition_id}:${season.season}`}>{season.season}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
 
-          <Field label="Provider" hint="The current archive worker materializer supports e2e-provider only until the real provider adapter is implemented.">
-            <Input value={provider} onChange={(e) => setProvider(e.target.value)} disabled={creating} />
-          </Field>
-
-          <Field label="Schema version">
-            <Input value={schemaVersion} onChange={(e) => setSchemaVersion(e.target.value)} disabled={creating} />
-          </Field>
-
-          <Field label="Date start">
-            <Input type="datetime-local" value={dateStart} onChange={(e) => setDateStart(e.target.value)} disabled={creating} />
-          </Field>
-
-          <Field label="Date end">
-            <Input type="datetime-local" value={dateEnd} onChange={(e) => setDateEnd(e.target.value)} disabled={creating} />
-          </Field>
-
-          <Field label="Team set hash" hint="Required artifact identity field. Do not invent a hash; use the project's actual team-set identity for the scope.">
-            <Input value={teamSetHash} onChange={(e) => setTeamSetHash(e.target.value)} disabled={creating} placeholder="e.g. team-set-hash-v1" />
-          </Field>
-
-          <Field label="Completeness score (%)" hint={rule ? `Required threshold: ${(Number(rule.required_threshold) * 100).toFixed(1)}% · Policy: ${rule.policy_version}` : 'No configured policy'}>
-            <Input type="number" min="0" max="100" step="0.01" value={completenessPct} onChange={(e) => setCompletenessPct(e.target.value)} disabled={creating} />
-          </Field>
+          <div className="md:col-span-2">
+            <Field label="Dataset">
+              <Select value={datasetType} onValueChange={setDatasetType} disabled={rules.length === 0}>
+                <SelectTrigger><SelectValue placeholder="Select archive dataset" /></SelectTrigger>
+                <SelectContent>{rules.map((rule) => <SelectItem key={`${rule.dataset_type}:${rule.policy_version}`} value={rule.dataset_type}>{rule.dataset_type}</SelectItem>)}</SelectContent>
+              </Select>
+            </Field>
+          </div>
         </div>
 
-        <div className="rounded-lg border border-border bg-muted/20 p-density-md text-sm text-muted-foreground">
-          <strong className="text-foreground">Execution:</strong> Create campaign → ARCHIVE_ONLY + READY → official dispatch → archive_campaign worker queue. The dashboard does not perform any manual state transition.
+        <div className="rounded-lg border border-border/60 bg-muted/20 p-density-md text-sm">
+          <div className="font-medium">Selected scope</div>
+          <div className="mt-1 text-muted-foreground">{competitionName} · {selectedRegistration?.season ?? '—'} · {datasetType || '—'}</div>
         </div>
+
+        {!selectedRegistration && (
+          <div className="flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <div>No provider-backed season is registered for the selected competition yet. The request cannot be created safely.</div>
+          </div>
+        )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={creating}>Cancel</Button>
-          <Button
-            disabled={!valid || creating || loading}
-            onClick={() => onCreate({
-              country_id: countryId,
-              competition_id: competitionId,
-              season: Number(season),
-              dataset_type: datasetType,
-              provider,
-              date_start: new Date(dateStart).toISOString(),
-              date_end: new Date(dateEnd).toISOString(),
-              team_set_hash: teamSetHash.trim(),
-              schema_version: schemaVersion.trim(),
-              completeness_score: completenessValue,
-              completeness_policy_version: rule?.policy_version ?? '',
-              auto_queue: true,
-            })}
-          >
-            {creating ? 'Creating & queueing…' : 'Create & queue campaign'}
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
+          <Button disabled={!canRequest} title="Waiting for the provider-backed campaign creation contract to be implemented">
+            Create archive request
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1.5">
-      <Label>{label}</Label>
-      {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
   )
 }
 
@@ -353,4 +306,8 @@ function Stat({ label, value }: { label: string; value: string }) {
 
 function Row({ label, value }: { label: string; value: ReactNode }) {
   return <div className="flex flex-col gap-1 border-b border-border/60 pb-density-sm"><span className="text-xs uppercase text-muted-foreground">{label}</span><span>{value}</span></div>
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return <div className="flex flex-col gap-1.5"><label className="text-sm font-medium">{label}</label>{children}</div>
 }

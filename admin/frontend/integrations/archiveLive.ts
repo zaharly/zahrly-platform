@@ -42,6 +42,43 @@ export interface ArchiveSeasonLive {
 
 export interface ArchiveLiveSnapshot { campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] }
 
+export interface ArchiveCampaignCountryOption {
+  id: string
+  code: string
+  name: string
+  status: string
+}
+
+export interface ArchiveCampaignCompetitionOption {
+  id: string
+  country_id: string | null
+  name: string
+  status: string
+}
+
+export interface ArchiveCampaignRuleOption {
+  dataset_type: string
+  policy_version: string
+  required_threshold: number
+}
+
+export interface ArchiveRegisteredSeasonOption {
+  provider: string
+  competition_id: string | null
+  season: number | null
+  endpoint: string
+  market: string | null
+  status: string
+  checked_at: string | null
+}
+
+export interface ArchiveCampaignOptions {
+  countries: ArchiveCampaignCountryOption[]
+  competitions: ArchiveCampaignCompetitionOption[]
+  rules: ArchiveCampaignRuleOption[]
+  registered_seasons: ArchiveRegisteredSeasonOption[]
+}
+
 export interface HistoricalCampaignLive {
   campaign_id: string
   target_start_season: number
@@ -118,6 +155,31 @@ async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
     throw new Error(`Historical RPC ${name} failed (${response.status}): ${detail}`)
   }
   return response.json() as Promise<T>
+}
+
+/** Live archive execution state: campaigns plus season aggregates. */
+export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
+  return rpc<ArchiveLiveSnapshot>('admin_archive_snapshot', {})
+}
+
+/** Canonical archive selectors and registered provider seasons. */
+export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> {
+  return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {})
+}
+
+/** Queue one provider-backed historical season for the requested dataset. */
+export async function queueBackfillSeason(
+  competitionId: string,
+  season: number,
+  datasetType = 'evaluation_metrics',
+  priority = 100,
+): Promise<Record<string, unknown>> {
+  return rpc<Record<string, unknown>>('admin_queue_backfill_season', {
+    p_competition_id: competitionId,
+    p_season: season,
+    p_dataset_type: datasetType,
+    p_priority: priority,
+  })
 }
 
 export async function fetchHistoricalBootstrapSnapshot(): Promise<HistoricalBootstrapSnapshot> {

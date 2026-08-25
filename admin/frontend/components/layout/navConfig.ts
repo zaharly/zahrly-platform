@@ -26,30 +26,24 @@ const NOT_IMPLEMENTED = 'Locked — backend contract is not implemented yet.'
 
 export const NAV_GROUPS: NavGroup[] = [
   {
-    id: 'command-center',
-    label: 'Command Center',
-    items: [
+    id: 'command-center', label: 'Command Center', items: [
       { label: 'Dashboard', path: '/', icon: LayoutDashboard },
       { label: 'Incidents', path: '/incidents', icon: Siren, badgeKey: 'incidents', locked: true, lockReason: NOT_IMPLEMENTED },
     ],
   },
   {
-    id: 'data-coverage',
-    label: 'Data & Coverage',
-    items: [
-      { label: 'Historical Bootstrap', path: '/bootstrap', icon: History, locked: true, lockReason: 'Locked — historical season import/validation is not complete yet.' },
+    id: 'data-coverage', label: 'Data & Coverage', items: [
+      { label: 'Historical Bootstrap', path: '/bootstrap', icon: History, lockReason: 'Active — live archive campaign and season state are now read from Supabase.' },
       { label: 'Countries', path: '/data/countries', icon: Globe, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Leagues', path: '/data/leagues', icon: Trophy, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Fixtures', path: '/data/fixtures', icon: CalendarDays, locked: true, lockReason: 'Locked — provider fixture ingestion exists, but the admin control/read surface is not complete yet.' },
       { label: 'Data Quality', path: '/data/quality', icon: Gauge, badgeKey: 'dataQuality', locked: true, lockReason: NOT_IMPLEMENTED },
-      { label: 'Provider Incidents', path: '/data/provider-incidents', icon: AlertTriangle, locked: true, lockReason: NOT_IMPLEMENTED },
+      { label: 'Provider Incidents', path: '/data/provider-incidents', icon: AlertTriangle, badgeKey: 'providerIncidents', locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Archive', path: '/data/archive', icon: Archive },
     ],
   },
   {
-    id: 'predictions',
-    label: 'Predictions',
-    items: [
+    id: 'predictions', label: 'Predictions', items: [
       { label: 'Prediction Monitor', path: '/predictions', icon: Activity, locked: true, lockReason: 'Locked — prediction execution backend is not started.' },
       { label: 'Prediction Episodes', path: '/predictions/episodes', icon: ListTree, locked: true, lockReason: 'Locked — prediction execution backend is not started.' },
       { label: 'Markets', path: '/markets', icon: Layers, locked: true, lockReason: 'Locked — prediction/market backend is not started.' },
@@ -59,9 +53,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    id: 'providers',
-    label: 'Providers',
-    items: [
+    id: 'providers', label: 'Providers', items: [
       { label: 'Provider Overview', path: '/providers', icon: Server },
       { label: 'API-Football', path: '/providers/api-football', icon: Radio },
       { label: 'PropLine', path: '/providers/propline', icon: Coins, badgeKey: 'propline', locked: true, lockReason: NOT_IMPLEMENTED },
@@ -71,9 +63,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    id: 'workers-pipelines',
-    label: 'Workers & Pipelines',
-    items: [
+    id: 'workers-pipelines', label: 'Workers & Pipelines', items: [
       { label: 'Queues', path: '/workers/queues', icon: ListOrdered, badgeKey: 'queues', locked: true, lockReason: 'Locked — admin queue control/read contract is not complete.' },
       { label: 'Workers', path: '/workers', icon: Cpu, locked: true, lockReason: 'Locked — worker registry/health backend is not complete.' },
       { label: 'Jobs', path: '/workers/jobs', icon: ClipboardList, locked: true, lockReason: 'Locked — admin job control/read contract is not complete.' },
@@ -83,9 +73,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    id: 'models',
-    label: 'Models',
-    items: [
+    id: 'models', label: 'Models', items: [
       { label: 'Model Registry', path: '/models', icon: Boxes, locked: true, lockReason: 'Locked — model execution/control backend is not started.' },
       { label: 'Active Model', path: '/models/active', icon: Star, locked: true, lockReason: 'Locked — model execution/control backend is not started.' },
       { label: 'Candidates', path: '/models/candidates', icon: FlaskConical, locked: true, lockReason: 'Locked — model execution/control backend is not started.' },
@@ -97,9 +85,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    id: 'security-control',
-    label: 'Security & Control',
-    items: [
+    id: 'security-control', label: 'Security & Control', items: [
       { label: 'Admin Users', path: '/security/admins', icon: Users, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Roles & Permissions', path: '/security/roles', icon: KeyRound, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Audit Log', path: '/security/audit', icon: ScrollText, locked: true, lockReason: NOT_IMPLEMENTED },
@@ -110,9 +96,7 @@ export const NAV_GROUPS: NavGroup[] = [
     ],
   },
   {
-    id: 'system',
-    label: 'System',
-    items: [
+    id: 'system', label: 'System', items: [
       { label: 'System Settings', path: '/settings', icon: Settings, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Feature Flags', path: '/settings/feature-flags', icon: Flag, locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Environment', path: '/settings/environment', icon: Cloud, locked: true, lockReason: NOT_IMPLEMENTED },

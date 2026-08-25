@@ -13,18 +13,31 @@ export const CardDescription = ({ className, ...p }: any) => <p className={cn('t
 export const CardContent = ({ className, ...p }: any) => <div className={cn('p-6 pt-0', className)} {...p} />
 export const CardFooter = ({ className, ...p }: any) => <div className={cn('flex items-center p-6 pt-0', className)} {...p} />
 
-export const Dialog = ({ open, onOpenChange, children }: any) => open === false ? null : <div>{children}</div>
-export const DialogTrigger = ({ asChild, children, ...p }: any) => <span {...p}>{children}</span>
-export const DialogClose = ({ children, ...p }: any) => <button {...p}>{children}</button>
+export const Dialog = ({ open, children }: any) => open === false ? null : <div>{children}</div>
+export const DialogTrigger = ({ children, ...p }: any) => <span {...p}>{children}</span>
+export const DialogClose = ({ children, ...p }: any) => <button type="button" {...p}>{children}</button>
 export const DialogContent = ({ className, children, ...p }: any) => <div role="dialog" className={cn('fixed inset-0 z-50 m-auto h-fit max-h-[90vh] w-[calc(100%-2rem)] max-w-lg overflow-auto rounded-lg border border-border bg-background p-6 shadow-lg', className)} {...p}>{children}</div>
 export const DialogHeader = ({ className, ...p }: any) => <div className={cn('flex flex-col gap-1.5', className)} {...p} />
 export const DialogFooter = ({ className, ...p }: any) => <div className={cn('flex flex-col-reverse gap-2 sm:flex-row sm:justify-end', className)} {...p} />
 export const DialogTitle = ({ className, ...p }: any) => <h2 className={cn('text-lg font-semibold', className)} {...p} />
 export const DialogDescription = ({ className, ...p }: any) => <p className={cn('text-sm text-muted-foreground', className)} {...p} />
 
+/* Minimal Sheet compatibility for the Retool-exported UI. */
+export const Sheet = ({ open = true, children }: any) => open === false ? null : <div data-sheet-root>{children}</div>
+export const SheetTrigger = ({ children, ...p }: any) => <span {...p}>{children}</span>
+export const SheetClose = ({ children, ...p }: any) => <button type="button" {...p}>{children}</button>
+export const SheetContent = ({ side = 'right', className, children, ...p }: any) => <div role="dialog" className={cn('fixed z-50 bg-background border shadow-lg p-6 overflow-auto', side === 'left' || side === 'right' ? 'inset-y-0 w-[min(24rem,100vw)]' : 'inset-x-0 h-[min(24rem,100vh)]', side === 'left' ? 'left-0 border-r' : side === 'right' ? 'right-0 border-l' : side === 'top' ? 'top-0 border-b' : 'bottom-0 border-t', className)} {...p}>{children}</div>
+export const SheetHeader = ({ className, ...p }: any) => <div className={cn('flex flex-col gap-2', className)} {...p} />
+export const SheetFooter = ({ className, ...p }: any) => <div className={cn('mt-auto flex flex-col gap-2', className)} {...p} />
+export const SheetTitle = ({ className, ...p }: any) => <h2 className={cn('text-lg font-semibold', className)} {...p} />
+export const SheetDescription = ({ className, ...p }: any) => <p className={cn('text-sm text-muted-foreground', className)} {...p} />
+
 const SelectContext = React.createContext<any>(null)
 export const Select = ({ value, onValueChange, children }: any) => <SelectContext.Provider value={{ value, onValueChange }}>{children}</SelectContext.Provider>
-export const SelectTrigger = ({ className, children, ...p }: any) => <select value={React.useContext(SelectContext)?.value ?? ''} onChange={e => React.useContext(SelectContext)?.onValueChange?.(e.target.value)} className={cn('flex h-9 w-full items-center rounded-md border border-input bg-background px-3 text-sm', className)} {...p}>{children}</select>
+export const SelectTrigger = ({ className, children, ...p }: any) => {
+  const ctx = React.useContext(SelectContext)
+  return <select value={ctx?.value ?? ''} onChange={e => ctx?.onValueChange?.(e.target.value)} className={cn('flex h-9 w-full items-center rounded-md border border-input bg-background px-3 text-sm', className)} {...p}>{children}</select>
+}
 export const SelectValue = ({ placeholder = 'Select…' }: any) => <option value="">{placeholder}</option>
 export const SelectContent = ({ children }: any) => <>{children}</>
 export const SelectItem = ({ value, children }: any) => <option value={value}>{children}</option>

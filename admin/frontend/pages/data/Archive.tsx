@@ -1,47 +1,95 @@
 import { useMemo, useState, type ReactNode } from 'react'
-import type { ColumnDef } from '@tanstack/react-table'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
 import { ProgressBar } from '../../components/status/ProgressBar'
 import { DataTable } from '../../components/tables/DataTable'
 import { DetailDrawer } from '../../components/drawers/DetailDrawer'
-import { ConfirmDialog } from '../../components/dialogs/ConfirmDialog'
 import { Button } from '../../lib/shadcn/button'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../lib/shadcn/select'
-import { toast } from '../../lib/shadcn/sonner'
 import { ARCHIVE_RECORDS, ARCHIVE_SEASON_SUMMARY } from '../../mock/data/archive'
 import type { ArchiveSeasonRecord } from '../../types/domain'
-import { ShieldCheck, Wrench, Database } from 'lucide-react'
+import { VERIFIED_ARCHIVE_CAMPAIGN } from '../../integrations/archiveVerified'
+import { CheckCircle2, Database, ExternalLink } from 'lucide-react'
 
 const ALL = '__all__'
 
 export default function ArchivePage() {
   const [seasonFilter, setSeasonFilter] = useState(ALL)
   const [selected, setSelected] = useState<ArchiveSeasonRecord | null>(null)
-  const [repairOpen, setRepairOpen] = useState(false)
 
   const filtered = useMemo(
     () => ARCHIVE_RECORDS.filter((r) => seasonFilter === ALL || r.season === seasonFilter),
     [seasonFilter]
   )
 
-  const columns = useMemo<ColumnDef<ArchiveSeasonRecord, any>[]>(() => [
+  const verification = VERIFIED_ARCHIVE_CAMPAIGN
+
+  const columns = useMemo(() => [
     { accessorKey: 'season', header: 'Season' },
     { accessorKey: 'country', header: 'Country' },
     { accessorKey: 'league', header: 'League' },
     { accessorKey: 'dataset', header: 'Dataset' },
-    { accessorKey: 'rowCount', header: 'Rows', cell: ({ getValue }) => getValue<number>().toLocaleString() },
-    { accessorKey: 'completenessPct', header: 'Completeness', cell: ({ getValue }) => <ProgressBar value={getValue<number>()} size="sm" /> },
-    { accessorKey: 'status', header: 'Status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} /> },
-    { accessorKey: 'createdAt', header: 'Created', cell: ({ getValue }) => new Date(getValue<string>()).toLocaleDateString() },
+    { accessorKey: 'rowCount', header: 'Rows', cell: ({ getValue }: any) => getValue<number>().toLocaleString() },
+    { accessorKey: 'completenessPct', header: 'Completeness', cell: ({ getValue }: any) => <ProgressBar value={getValue<number>()} size="sm" /> },
+    { accessorKey: 'status', header: 'Status', cell: ({ getValue }: any) => <StatusBadge status={getValue<string>()} /> },
+    { accessorKey: 'createdAt', header: 'Created', cell: ({ getValue }: any) => new Date(getValue<string>()).toLocaleDateString() },
   ], [])
 
   return (
     <div className="flex flex-col gap-density-lg">
       <PageHeader
         title="Archive & Retrieval"
-        description="2020–2026 cold storage. Search by country, league, season, dataset, or provider. No direct delete — repair and validation are governed workflows."
+        description="Historical archive control and verification. The controls below reflect the archive worker contract; no UI action creates an unsupported job."
       />
+
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="mb-density-md flex flex-wrap items-start justify-between gap-density-md">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold text-foreground">Verified backend archive</h2>
+              <StatusBadge status="SUCCEEDED" dense />
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">Last verified run of the real archive worker and S3 object.</p>
+          </div>
+          <div className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+            <CheckCircle2 className="h-4 w-4 text-success" />
+            Verified {new Date(verification.verifiedAt).toLocaleString()}
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-density-md md:grid-cols-4">
+          <Fact label="Campaign" value={verification.campaignId} mono />
+          <Fact label="Season" value={String(verification.season)} />
+          <Fact label="Dataset" value={verification.datasetType} />
+          <Fact label="Worker job" value={verification.workerJobId} mono />
+          <Fact label="Manifest" value={verification.manifestId} mono />
+          <Fact label="Rows" value={verification.rowCount.toLocaleString()} />
+          <Fact label="Completeness" value={`${(verification.completenessScore * 100).toFixed(0)}%`} />
+          <Fact label="Attempts" value={String(verification.attempts)} />
+        </div>
+
+        <div className="mt-density-md grid gap-density-md md:grid-cols-2">
+          <div className="rounded-md border border-border p-density-md">
+            <div className="mb-1 text-xs uppercase text-muted-foreground">S3 object</div>
+            <div className="break-all font-mono text-xs text-foreground">{verification.objectUri}</div>
+          </div>
+          <div className="rounded-md border border-border p-density-md">
+            <div className="mb-1 text-xs uppercase text-muted-foreground">SHA-256 checksum</div>
+            <div className="break-all font-mono text-xs text-foreground">{verification.checksum}</div>
+          </div>
+        </div>
+
+        <div className="mt-density-md flex flex-wrap items-center gap-density-sm">
+          <Button variant="outline" size="sm" asChild>
+            <a href={verification.objectUri} target="_blank" rel="noreferrer">
+              <ExternalLink className="h-3.5 w-3.5" /> Object URI
+            </a>
+          </Button>
+          <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+            <Database className="h-3.5 w-3.5" /> Queue: {verification.queueName} · Worker: {verification.workerStatus}
+          </span>
+        </div>
+      </section>
 
       <div className="grid grid-cols-2 gap-density-sm sm:grid-cols-4 lg:grid-cols-7">
         {ARCHIVE_SEASON_SUMMARY.map((s) => (
@@ -80,21 +128,6 @@ export default function ArchivePage() {
         onOpenChange={(o) => !o && setSelected(null)}
         title={selected ? `${selected.league} — ${selected.season}` : ''}
         description={selected?.dataset}
-        footer={
-          selected && (
-            <div className="flex flex-wrap justify-end gap-density-sm">
-              <Button variant="outline" onClick={() => toast.success('Integrity validation started', { description: 'This is a UI-only preview action.' })}>
-                <ShieldCheck className="h-4 w-4" /> Validate
-              </Button>
-              <Button variant="outline" onClick={() => setRepairOpen(true)}>
-                <Wrench className="h-4 w-4" /> Repair
-              </Button>
-              <Button onClick={() => toast.success('Training dataset build queued', { description: 'This is a UI-only preview action — no evaluation job was actually created.' })}>
-                <Database className="h-4 w-4" /> Prepare training dataset
-              </Button>
-            </div>
-          )
-        }
       >
         {selected && (
           <div className="flex flex-col gap-density-md text-sm">
@@ -108,17 +141,15 @@ export default function ArchivePage() {
           </div>
         )}
       </DetailDrawer>
+    </div>
+  )
+}
 
-      <ConfirmDialog
-        open={repairOpen}
-        onOpenChange={setRepairOpen}
-        title="Repair archive manifest"
-        actionSummary="Queues a repair job to re-validate and, if needed, re-acquire the affected manifest data."
-        scope={selected ? `${selected.league} — ${selected.season} (${selected.dataset})` : ''}
-        consequences={['Creates a new manifest lineage rather than mutating the existing one.', 'Original manifest remains available until the repair is verified.', 'Downstream training/evaluation datasets built from this manifest may need to be rebuilt.']}
-        confirmLabel="Queue repair"
-        onConfirm={() => toast.success('Repair job queued', { description: 'This is a UI-only preview action — no job was actually created.' })}
-      />
+function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div>
+      <div className="mb-1 text-xs uppercase text-muted-foreground">{label}</div>
+      <div className={`text-sm text-foreground ${mono ? 'break-all font-mono text-xs' : 'font-medium'}`}>{value}</div>
     </div>
   )
 }

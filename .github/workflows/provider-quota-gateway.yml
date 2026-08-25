@@ -182,3 +182,5 @@ jobs:
             quota_snapshot.json
             registry_bootstrap.json
             fixture_ingest.json
+
+# Live Pro-plan season registration trigger validation.

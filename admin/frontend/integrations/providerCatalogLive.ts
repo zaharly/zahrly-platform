@@ -1,58 +1,72 @@
+import { supabase } from '../lib/supabase'
+
 export interface LiveCountry {
   id: string
   code: string
   name: string
+  status: string
+  league_count: number
+  enabled_league_count: number
+  backfill_job_count: number
+  archive_manifest_count: number
+}
+
+export interface LiveSeasonState {
+  season: number
+  status: string
+  endpoints: string[]
+  checked_at: string | null
 }
 
 export interface LiveCompetition {
   id: string
   country_id: string
   name: string
-  supported_seasons: number
-  seasons: number[]
+  status: string
+  processing_state: string | null
+  processing_reason: string | null
+  registered_seasons: number
+  seasons: LiveSeasonState[]
+  backfill_jobs: {
+    total: number
+    queued: number
+    running: number
+    succeeded: number
+    failed: number
+    progress: number
+  }
+  archive: {
+    manifest_count: number
+    completeness: number
+  }
 }
 
 export interface ProviderCatalogLive {
   countries: LiveCountry[]
   competitions: LiveCompetition[]
+  provider_capabilities: Array<{
+    id: string
+    provider: string
+    competition_id: string
+    season: number
+    endpoint: string
+    market: string | null
+    status: string
+    checked_at: string | null
+  }>
+  backfill_jobs: unknown[]
+  archive: unknown[]
 }
 
-async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
-  const url = import.meta.env.VITE_SUPABASE_URL?.trim()
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
-  if (!url || !anonKey) throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY')
-  const response = await fetch(`${url.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
-    method: 'POST',
-    headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '')
-    throw new Error(`Provider catalog RPC ${name} failed (${response.status}): ${detail}`)
-  }
-  return response.json() as Promise<T>
+async function getAccessToken() {
+  const { data: { session } } = await supabase.auth.getSession()
+  const token = session?.access_token?.trim()
+  if (!token) throw new Error('Admin authentication required. Please sign in again.')
+  return token
 }
 
 export async function fetchProviderCatalogLive(): Promise<ProviderCatalogLive> {
-  const options = await rpc<{
-    countries: LiveCountry[]
-    competitions: Array<{ id: string; country_id: string; name: string }>
-    registered_seasons: Array<{ provider: string; competition_id: string; season: number; status: string }>
-  }>('admin_archive_campaign_options', {})
-
-  const seasonsByCompetition = new Map<string, number[]>()
-  for (const row of options.registered_seasons ?? []) {
-    if (row.provider !== 'api-football' || row.status !== 'SUPPORTED') continue
-    const list = seasonsByCompetition.get(row.competition_id) ?? []
-    list.push(row.season)
-    seasonsByCompetition.set(row.competition_id, list)
-  }
-
-  return {
-    countries: options.countries ?? [],
-    competitions: (options.competitions ?? []).map((c) => {
-      const seasons = [...new Set(seasonsByCompetition.get(c.id) ?? [])].sort((a, b) => b - a)
-      return { ...c, seasons, supported_seasons: seasons.length }
-    }),
-  }
+  const { data, error } = await supabase.rpc('admin_data_control_catalog')
+  if (error) throw error
+  return (data ?? { countries: [], competitions: [], provider_capabilities: [], backfill_jobs: [], archive: [] }) as ProviderCatalogLive
 }

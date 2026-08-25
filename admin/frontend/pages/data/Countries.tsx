@@ -41,8 +41,13 @@ export default function Countries() {
     const next = isEnabled(country) ? 'DISABLED' : 'ENABLED'
     try {
       await setDataControl('country', country.id, next)
+      const fresh = await fetchProviderCatalogLive()
+      const updated = fresh.countries.find((c) => c.id === country.id)
+      if (!updated || (updated.processing_state === 'ENABLED') !== (next === 'ENABLED')) throw new Error('Country ingestion state was not persisted.')
+      setCountries(fresh.countries)
+      setCompetitions(fresh.competitions)
+      setSelected((current) => current ? fresh.countries.find((c) => c.id === current.id) ?? null : null)
       toast.success(`${country.name}: ${next === 'ENABLED' ? 'enabled for ingestion' : 'disabled for ingestion'}`)
-      await load()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Unable to update ingestion state')
     }
@@ -57,10 +62,7 @@ export default function Countries() {
     { accessorKey: 'league_count', header: 'Leagues' },
     { accessorKey: 'enabled_league_count', header: 'Enabled leagues' },
     { id: 'ingestion', header: 'Ingestion', cell: ({ row }) => <StatusBadge status={row.original.ingestion_enabled ? 'ENABLED' : 'DISABLED'} dense /> },
-    {
-      id: 'actions', header: 'Actions', enableSorting: false,
-      cell: ({ row }) => <Button variant="ghost" size="sm" title={row.original.ingestion_enabled ? 'Disable ingestion' : 'Enable ingestion'} onClick={(e) => { e.stopPropagation(); void toggleCountry(row.original) }}>{row.original.ingestion_enabled ? <PowerOff className="h-3.5 w-3.5" /> : <Power className="h-3.5 w-3.5" />}</Button>,
-    },
+    { id: 'actions', header: 'Actions', enableSorting: false, cell: ({ row }) => <Button variant="ghost" size="sm" title={row.original.ingestion_enabled ? 'Disable ingestion' : 'Enable ingestion'} onClick={(e) => { e.stopPropagation(); void toggleCountry(row.original) }}>{row.original.ingestion_enabled ? <PowerOff className="h-3.5 w-3.5" /> : <Power className="h-3.5 w-3.5" />}</Button> },
   ], [countries])
 
   const selectedCompetitions = selected ? competitions.filter((c) => c.country_id === selected.id) : []

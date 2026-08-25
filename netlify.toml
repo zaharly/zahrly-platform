@@ -2,6 +2,8 @@
   command = "npm --prefix admin/frontend install --no-package-lock && npm --prefix admin/frontend run build"
   publish = "admin/frontend/dist"
   functions = "admin/netlify/functions"
+  [build.environment]
+    NODE_VERSION = "20"
 
 [[redirects]]
   from = "/api/*"
@@ -12,3 +14,11 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+[context.production]
+  command = "npm --prefix admin/frontend install --no-package-lock && npm --prefix admin/frontend run build"
+  publish = "admin/frontend/dist"
+
+[context.deploy-preview]
+  command = "npm --prefix admin/frontend install --no-package-lock && npm --prefix admin/frontend run build"
+  publish = "admin/frontend/dist"

@@ -1,0 +1,17 @@
+export const VERIFIED_ARCHIVE_CAMPAIGN = {
+  campaignId: '74a52118-bffd-4438-9ddd-757928e094d4',
+  season: 2024,
+  datasetType: 'evaluation_metrics',
+  provider: 'e2e-provider',
+  campaignStatus: 'SUCCEEDED',
+  workerJobId: '3a410260-d61a-4c17-9ee6-365d44465b07',
+  workerStatus: 'SUCCEEDED',
+  queueName: 'archive_campaign',
+  attempts: 1,
+  manifestId: '380a773b-0664-4fa9-83b9-e5cdad36e318',
+  objectUri: 's3://zahrly-community-storage/zahrly/archive/evaluation_metrics/season=2024/campaign=74a52118-bffd-4438-9ddd-757928e094d4.json',
+  checksum: '272cc9f7f09823f8bacc46f058419b84a7d96979f76e99ba2f1de0abd93d0e61',
+  rowCount: 3,
+  completenessScore: 0.99,
+  verifiedAt: '2026-08-25T08:07:59.910099Z',
+} as const

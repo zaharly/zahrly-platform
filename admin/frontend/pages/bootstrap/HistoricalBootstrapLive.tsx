@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { AlertTriangle, CheckCircle2, Database, Play, RefreshCw, Send } from 'lucide-react'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
@@ -199,7 +199,7 @@ function Metric({ label, value }: { label: string; value: string }) { return <di
 
 function StageCard({ step, title, value, ready }: { step: string; title: string; value: string; ready: boolean }) { return <div className="rounded-md border border-border/60 p-density-md"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold uppercase text-muted-foreground">Step {step}</span>{ready ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4 text-muted-foreground" />}</div><div className="mt-2 text-sm font-medium">{title}</div><div className="mt-1 text-xs text-muted-foreground">{value}</div></div> }
 
-function Notice({ icon, title, text, success = false }: { icon: React.ReactNode; title: string; text: string; success?: boolean }) { return <div className={`mt-density-lg flex items-start gap-2 rounded-lg border p-density-md text-sm ${success ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5'}`}>{icon}<div><div className="font-medium text-foreground">{title}</div><div className="mt-1 text-muted-foreground">{text}</div></div></div> }
+function Notice({ icon, title, text, success = false }: { icon: ReactNode; title: string; text: string; success?: boolean }) { return <div className={`mt-density-lg flex items-start gap-2 rounded-lg border p-density-md text-sm ${success ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5'}`}>{icon}<div><div className="font-medium text-foreground">{title}</div><div className="mt-1 text-muted-foreground">{text}</div></div></div> }
 
 function QueueCard({ title, rows }: { title: string; rows: Array<Record<string, unknown>> }) {
   return <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="text-base font-semibold">{title}</h2><div className="mt-4 space-y-2">{rows.slice(0, 8).map((row, i) => <div key={String(row.job_id ?? row.manifest_id ?? i)} className="rounded-md border border-border/60 p-3 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{String(row.dataset_type ?? 'record')}</span><StatusBadge status={String(row.status ?? '—')} dense /></div><div className="mt-1 text-muted-foreground">Season {String(row.season ?? '—')} · Requests {String(row.requests_used ?? '—')}</div></div>)}{!rows.length && <div className="py-6 text-center text-sm text-muted-foreground">No records.</div>}</div></section>

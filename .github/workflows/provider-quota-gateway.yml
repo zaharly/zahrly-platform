@@ -32,8 +32,17 @@ jobs:
           PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
         run: |
           set -euo pipefail
+
+          # GitHub secrets can accidentally be saved with a trailing CR/LF.
+          # API clients reject control characters in HTTP header values, so
+          # normalize only the transport credentials here without logging them.
+          API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
+          PROVIDER_GATEWAY_SECRET="$(printf '%s' "${PROVIDER_GATEWAY_SECRET}" | tr -d '\r\n')"
+          export API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET
+
           test -n "${API_FOOTBALL_KEY}"
           test -n "${PROVIDER_GATEWAY_SECRET}"
+
           docker run --rm \
             -e API_FOOTBALL_KEY \
             -e PROVIDER_GATEWAY_SECRET \
@@ -82,6 +91,9 @@ jobs:
           PROVIDER_FIXTURE_PERSISTENCE_URL: ${{ env.PROVIDER_FIXTURE_PERSISTENCE_URL }}
         run: |
           set -euo pipefail
+          API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
+          PROVIDER_GATEWAY_SECRET="$(printf '%s' "${PROVIDER_GATEWAY_SECRET}" | tr -d '\r\n')"
+          export API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET
           test -n "${API_FOOTBALL_KEY}"
           test -n "${PROVIDER_GATEWAY_SECRET}"
           python -m workers.provider_gateway.fixture_ingest > fixture_ingest.json

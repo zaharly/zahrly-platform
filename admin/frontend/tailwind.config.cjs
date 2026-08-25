@@ -4,6 +4,16 @@ module.exports = {
   darkMode: ['class'],
   theme: {
     extend: {
+      spacing: {
+        'density-xs': '4px',
+        'density-sm': '8px',
+        'density-md': '12px',
+        'density-lg': '16px',
+        'density-xl': '24px',
+      },
+      boxShadow: {
+        'retool-sm': '0 1px 2px 0 rgb(0 0 0 / 0.05)',
+      },
       colors: {
         border: 'hsl(var(--border) / <alpha-value>)',
         input: 'hsl(var(--input) / <alpha-value>)',
@@ -17,6 +27,15 @@ module.exports = {
         accent: { DEFAULT: 'hsl(var(--accent) / <alpha-value>)', foreground: 'hsl(var(--accent-foreground) / <alpha-value>)' },
         card: { DEFAULT: 'hsl(var(--card) / <alpha-value>)', foreground: 'hsl(var(--card-foreground) / <alpha-value>)' },
         popover: { DEFAULT: 'hsl(var(--popover) / <alpha-value>)', foreground: 'hsl(var(--popover-foreground) / <alpha-value>)' },
+        success: 'hsl(var(--success) / <alpha-value>)',
+        warning: 'hsl(var(--warning) / <alpha-value>)',
+        chart: {
+          1: 'hsl(var(--chart-1) / <alpha-value>)',
+          2: 'hsl(var(--chart-2) / <alpha-value>)',
+          3: 'hsl(var(--chart-3) / <alpha-value>)',
+          4: 'hsl(var(--chart-4) / <alpha-value>)',
+          5: 'hsl(var(--chart-5) / <alpha-value>)',
+        },
       },
       borderRadius: {
         lg: 'var(--radius)',

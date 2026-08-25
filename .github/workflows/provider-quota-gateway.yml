@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       season:
-        description: 'API-Football season to register and ingest'
+        description: 'API-Football season to discover and register'
         required: true
         default: '2008'
         type: string
@@ -81,7 +81,7 @@ jobs:
           print('provider worker + private Supabase persistence: PASS')
           PY
 
-      - name: Register the dashboard-selected API-Football season
+      - name: Discover and persist the dashboard-selected API-Football season
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
@@ -105,7 +105,7 @@ jobs:
             python -m workers.provider_gateway.registry_bootstrap > registry_bootstrap.json
           cat registry_bootstrap.json
 
-      - name: Validate one real API-Football season registration
+      - name: Validate canonical season discovery persistence
         env:
           TARGET_SEASON: ${{ github.event.inputs.season || '2008' }}
         run: |
@@ -121,13 +121,18 @@ jobs:
               raise SystemExit(f'unexpected season: {result}')
           if result.get('season_available') is not True:
               raise SystemExit(f'API-Football did not expose season {target}: {result}')
-          if result.get('registered_zahrly_competitions', 0) <= 0:
-              raise SystemExit('no Zahrly competitions are mapped to API-Football')
+          if result.get('discovered_leagues', 0) <= 0:
+              raise SystemExit(f'no API-Football leagues were discovered for season {target}: {result}')
           if result.get('persisted_registrations', 0) <= 0:
               raise SystemExit(f'no provider season registrations were persisted: {result}')
-          print('real API-Football single-season registry: PASS')
+          if result.get('countries_written', 0) <= 0:
+              raise SystemExit(f'no countries were persisted during season discovery: {result}')
+          print('canonical API-Football season discovery + catalog persistence: PASS')
           print(f"season={target}")
-          print(f"matched_league_season_pairs={result['matched_league_season_pairs']}")
+          print(f"discovered_leagues={result['discovered_leagues']}")
+          print(f"countries_written={result['countries_written']}")
+          print(f"competitions_created={result['competitions_created']}")
+          print(f"competitions_updated={result['competitions_updated']}")
           print(f"persisted_registrations={result['persisted_registrations']}")
           PY
 
@@ -154,7 +159,7 @@ jobs:
           result = json.loads(Path('fixture_ingest.json').read_text(encoding='utf-8'))
           if result.get('persisted') is not True:
               if result.get('reason') == 'no_upcoming_fixtures':
-                  print('no upcoming fixture returned by the live fixture sample; season registration remains valid')
+                  print('no upcoming fixture returned by the live fixture sample; season discovery remains valid')
               else:
                   raise SystemExit(f'fixture ingestion failed: {result}')
               raise SystemExit(0)

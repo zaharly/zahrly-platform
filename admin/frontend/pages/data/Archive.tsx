@@ -80,11 +80,14 @@ export default function ArchivePage() {
         </div>
 
         <div className="mt-density-md flex flex-wrap items-center gap-density-sm">
-          <Button variant="outline" size="sm" asChild>
-            <a href={verification.objectUri} target="_blank" rel="noreferrer">
-              <ExternalLink className="h-3.5 w-3.5" /> Object URI
-            </a>
-          </Button>
+          <a
+            href={verification.objectUri}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-muted"
+          >
+            <ExternalLink className="h-3.5 w-3.5" /> Object URI
+          </a>
           <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
             <Database className="h-3.5 w-3.5" /> Queue: {verification.queueName} · Worker: {verification.workerStatus}
           </span>

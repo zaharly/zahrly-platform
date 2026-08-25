@@ -33,10 +33,10 @@ export const NAV_GROUPS: NavGroup[] = [
   },
   {
     id: 'data-coverage', label: 'Data & Coverage', items: [
-      { label: 'Historical Bootstrap', path: '/bootstrap', icon: History, lockReason: 'Active — live archive campaign and season state are now read from Supabase.' },
-      { label: 'Countries', path: '/data/countries', icon: Globe, locked: true, lockReason: NOT_IMPLEMENTED },
-      { label: 'Leagues', path: '/data/leagues', icon: Trophy, locked: true, lockReason: NOT_IMPLEMENTED },
-      { label: 'Fixtures', path: '/data/fixtures', icon: CalendarDays, locked: true, lockReason: 'Locked — provider fixture ingestion exists, but the admin control/read surface is not complete yet.' },
+      { label: 'Historical Bootstrap', path: '/bootstrap', icon: History },
+      { label: 'Countries', path: '/data/countries', icon: Globe },
+      { label: 'Leagues', path: '/data/leagues', icon: Trophy },
+      { label: 'Fixtures', path: '/data/fixtures', icon: CalendarDays, locked: true, lockReason: 'Locked until the canonical live fixture read surface replaces mock prediction state.' },
       { label: 'Data Quality', path: '/data/quality', icon: Gauge, badgeKey: 'dataQuality', locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Provider Incidents', path: '/data/provider-incidents', icon: AlertTriangle, badgeKey: 'providerIncidents', locked: true, lockReason: NOT_IMPLEMENTED },
       { label: 'Archive', path: '/data/archive', icon: Archive },

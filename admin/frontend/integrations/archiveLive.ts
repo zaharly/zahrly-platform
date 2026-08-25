@@ -33,13 +33,50 @@ export interface ArchiveCampaignLive {
 
 export interface ArchiveSeasonLive { season: number; campaigns: number; succeeded: number; failed: number; active: number; avg_completeness: number }
 export interface ArchiveLiveSnapshot { campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] }
-export interface ArchiveCampaignCountryOption { id: string; code: string; name: string }
-export interface ArchiveCampaignCompetitionOption { id: string; country_id: string; name: string }
+export interface ArchiveCampaignCountryOption { id: string; code: string; name: string; status?: string }
+export interface ArchiveCampaignCompetitionOption { id: string; country_id: string; name: string; status?: string }
 export interface ArchiveCampaignRuleOption { dataset_type: string; policy_version: string; required_threshold: number }
 export interface ArchiveRegisteredSeasonOption { provider: string; competition_id: string; season: number; endpoint: string; market: string | null; status: string; checked_at: string | null }
 export interface ArchiveCampaignOptions { countries: ArchiveCampaignCountryOption[]; competitions: ArchiveCampaignCompetitionOption[]; rules: ArchiveCampaignRuleOption[]; registered_seasons: ArchiveRegisteredSeasonOption[] }
-export interface BackfillSeasonJobResult { job_id: string; country_id: string | null; competition_id: string | null; season: number; dataset_type: string; status: string; priority: number }
+export interface BackfillSeasonJobResult { job_id: string; historical_campaign_id?: string | null; country_id: string | null; competition_id: string | null; season: number; dataset_type: string; status: string; priority: number }
 export interface ProviderSeasonTriggerResult { accepted: true; season: number; workflow: string }
+
+export interface HistoricalCampaignLive {
+  campaign_id: string
+  target_start_season: number
+  target_end_season: number
+  planned_start_at: string
+  minimum_target_end_at: string
+  status: string
+  quota_policy_version: string | null
+  production_reserve_policy_version: string | null
+  last_successful_watermark: Record<string, unknown> | null
+  completeness_score: number | null
+  requests_used: number
+  created_at: string
+  updated_at: string
+}
+
+export interface HistoricalSeasonProgress {
+  season: number
+  supported_leagues: number
+  provider_leagues: number
+  backfill_jobs: number
+  backfill_succeeded: number
+  backfill_progress: number
+  archive_campaigns: number
+  archive_succeeded: number
+  archive_completeness: number
+}
+
+export interface HistoricalBootstrapSnapshot {
+  campaign: HistoricalCampaignLive | Record<string, never>
+  seasons: HistoricalSeasonProgress[]
+  tranche_queue: Array<Record<string, unknown>>
+  blocked_scopes: Array<Record<string, unknown>>
+  archive_output: Array<Record<string, unknown>>
+  quota: Record<string, unknown>
+}
 
 async function getAccessToken() {
   const { data: { session } } = await supabase.auth.getSession()
@@ -69,6 +106,10 @@ export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> { return 
 export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> { return rpc('admin_archive_campaign_options', {}) }
 export async function queueBackfillSeason(competitionId: string, season: number, datasetType: string, priority = 0): Promise<BackfillSeasonJobResult> {
   return rpc('admin_queue_backfill_season', { p_competition_id: competitionId, p_season: season, p_dataset_type: datasetType, p_priority: priority })
+}
+export async function fetchHistoricalBootstrapSnapshot(): Promise<HistoricalBootstrapSnapshot> { return rpc('admin_historical_bootstrap_snapshot', {}) }
+export async function startHistoricalCampaign(startSeason: number, endSeason: number): Promise<HistoricalCampaignLive & { created?: boolean }> {
+  return rpc('admin_start_historical_campaign', { p_start_season: startSeason, p_end_season: endSeason })
 }
 
 export async function triggerProviderSeason(season: number): Promise<ProviderSeasonTriggerResult> {

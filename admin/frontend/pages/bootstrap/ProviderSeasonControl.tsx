@@ -60,7 +60,7 @@ export default function ProviderSeasonControl() {
     <div className="flex flex-col gap-density-xl">
       <PageHeader
         title="Historical Bootstrap"
-        description="Select exactly one season. The backend then asks API-Football for that season's leagues, checks coverage, and registers only verified Zahrly competitions."
+        description="Select exactly one season. The backend asks API-Football for that season's leagues and coverage, then exposes canonical provider, processing, backfill, and archive state in the Data pages."
         tag={<StatusBadge status={loading ? 'LOADING' : 'ACTIVE'} />}
         actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>}
       />
@@ -94,11 +94,11 @@ export default function ProviderSeasonControl() {
             <div className="mt-density-lg rounded-lg border border-border/60 bg-muted/20 p-density-md text-sm">
               <div className="font-medium">Current database state for {season}</div>
               {selectedSeasonRegistered ? (
-                <div className="mt-2 flex items-center gap-2 text-muted-foreground"><CheckCircle2 className="h-4 w-4" /> {selectedRegistrations.length} verified competition-season registration(s)</div>
+                <div className="mt-2 flex items-center gap-2 text-muted-foreground"><CheckCircle2 className="h-4 w-4" /> {selectedRegistrations.length} provider registration(s) already recorded</div>
               ) : (
                 <div className="mt-2 flex items-center gap-2 text-muted-foreground"><AlertTriangle className="h-4 w-4" /> Not registered yet</div>
               )}
-              {lastAccepted === Number(season) && <div className="mt-2 text-xs text-muted-foreground">Workflow accepted. Refresh after the provider worker completes to see registrations.</div>}
+              {lastAccepted === Number(season) && <div className="mt-2 text-xs text-muted-foreground">Workflow accepted. Refresh after the provider worker completes to see the persisted registrations.</div>}
             </div>
           </div>
         </div>

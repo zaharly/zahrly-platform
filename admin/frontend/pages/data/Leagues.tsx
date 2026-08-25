@@ -15,6 +15,7 @@ function isEnabled(league: LiveCompetition) {
 
 export default function Leagues() {
   const [competitions, setCompetitions] = useState<LiveCompetition[]>([])
+  const [countries, setCountries] = useState<Array<{ id: string; name: string; processing_state: 'ENABLED' | 'DISABLED' | null }>>([])
   const [countryMap, setCountryMap] = useState<Record<string, string>>({})
   const [selected, setSelected] = useState<LiveCompetition | null>(null)
   const [loading, setLoading] = useState(true)
@@ -26,6 +27,7 @@ export default function Leagues() {
     try {
       const live = await fetchProviderCatalogLive()
       setCompetitions(live.competitions)
+      setCountries(live.countries.map((c) => ({ id: c.id, name: c.name, processing_state: c.processing_state })))
       setCountryMap(Object.fromEntries(live.countries.map((c) => [c.id, `${c.name} (${c.code})`])))
       setSelected((current) => current ? live.competitions.find((c) => c.id === current.id) ?? null : null)
     } catch (e) {
@@ -39,10 +41,30 @@ export default function Leagues() {
 
   async function toggleLeague(league: LiveCompetition) {
     const next = isEnabled(league) ? 'DISABLED' : 'ENABLED'
+    if (next === 'ENABLED') {
+      const country = countries.find((c) => c.id === league.country_id)
+      if (country && country.processing_state !== 'ENABLED') {
+        const confirmed = window.confirm(`The country "${country.name}" is currently disabled. Enabling "${league.name}" requires enabling the country too. Continue and enable both?`)
+        if (!confirmed) return
+        try {
+          await setDataControl('country', country.id, 'ENABLED')
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : 'Unable to enable the country')
+          return
+        }
+      }
+    }
+
     try {
       await setDataControl('competition', league.id, next)
+      const fresh = await fetchProviderCatalogLive()
+      const updated = fresh.competitions.find((c) => c.id === league.id)
+      if (!updated || (updated.processing_state === 'ENABLED') !== (next === 'ENABLED')) throw new Error('League ingestion state was not persisted.')
+      setCompetitions(fresh.competitions)
+      setCountries(fresh.countries.map((c) => ({ id: c.id, name: c.name, processing_state: c.processing_state })))
+      setCountryMap(Object.fromEntries(fresh.countries.map((c) => [c.id, `${c.name} (${c.code})`])))
+      setSelected((current) => current ? fresh.competitions.find((c) => c.id === current.id) ?? null : null)
       toast.success(`${league.name}: ${next === 'ENABLED' ? 'enabled for ingestion' : 'disabled for ingestion'}`)
-      await load()
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Unable to update ingestion state')
     }
@@ -56,11 +78,8 @@ export default function Leagues() {
     { accessorKey: 'status', header: 'Catalog status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} dense /> },
     { accessorKey: 'registered_seasons', header: 'Provider seasons' },
     { accessorKey: 'ingestion_enabled', header: 'Ingestion', cell: ({ row }) => <StatusBadge status={row.original.ingestion_enabled ? 'ENABLED' : 'DISABLED'} dense /> },
-    {
-      id: 'actions', header: 'Actions', enableSorting: false,
-      cell: ({ row }) => <Button variant="ghost" size="sm" title={row.original.ingestion_enabled ? 'Disable ingestion' : 'Enable ingestion'} onClick={(e) => { e.stopPropagation(); void toggleLeague(row.original) }}>{row.original.ingestion_enabled ? <PowerOff className="h-3.5 w-3.5" /> : <Power className="h-3.5 w-3.5" />}</Button>,
-    },
-  ], [competitions, countryMap])
+    { id: 'actions', header: 'Actions', enableSorting: false, cell: ({ row }) => <Button variant="ghost" size="sm" title={row.original.ingestion_enabled ? 'Disable ingestion' : 'Enable ingestion'} onClick={(e) => { e.stopPropagation(); void toggleLeague(row.original) }}>{row.original.ingestion_enabled ? <PowerOff className="h-3.5 w-3.5" /> : <Power className="h-3.5 w-3.5" />}</Button> },
+  ], [competitions, countryMap, countries])
 
   return (
     <div className="flex flex-col gap-density-lg">

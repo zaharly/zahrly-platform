@@ -61,34 +61,36 @@ export interface ArchiveCampaignRuleOption {
   required_threshold: number
 }
 
+export interface ArchiveRegisteredSeasonOption {
+  provider: string
+  competition_id: string
+  season: number
+  endpoint: string
+  market: string | null
+  status: string
+  checked_at: string | null
+}
+
 export interface ArchiveCampaignOptions {
   countries: ArchiveCampaignCountryOption[]
   competitions: ArchiveCampaignCompetitionOption[]
   rules: ArchiveCampaignRuleOption[]
+  registered_seasons: ArchiveRegisteredSeasonOption[]
 }
 
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   const url = import.meta.env.VITE_SUPABASE_URL?.trim()
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
-  if (!url || !anonKey) {
-    throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY')
-  }
-
+  if (!url || !anonKey) throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY')
   const response = await fetch(`${url.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
     method: 'POST',
-    headers: {
-      apikey: anonKey,
-      Authorization: `Bearer ${anonKey}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { apikey: anonKey, Authorization: `Bearer ${anonKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-
   if (!response.ok) {
     const detail = await response.text().catch(() => '')
     throw new Error(`Archive RPC ${name} failed (${response.status}): ${detail}`)
   }
-
   return response.json() as Promise<T>
 }
 
@@ -98,48 +100,4 @@ export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
 
 export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> {
   return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {})
-}
-
-export interface CreateArchiveCampaignInput {
-  country_id: string
-  competition_id: string
-  season: number
-  dataset_type: string
-  provider: string
-  date_start: string
-  date_end: string
-  team_set_hash: string
-  schema_version: string
-  completeness_score: number
-  completeness_policy_version?: string | null
-  auto_queue?: boolean
-}
-
-export interface CreatedArchiveCampaign {
-  campaign_id: string
-  worker_job_id: string | null
-  status: string
-  scope_state: string
-  dataset_type: string
-  provider: string
-  season: number
-  completeness_score: number
-  completeness_policy_version: string
-}
-
-export async function createArchiveCampaign(input: CreateArchiveCampaignInput): Promise<CreatedArchiveCampaign> {
-  return rpc<CreatedArchiveCampaign>('admin_create_archive_campaign', {
-    p_country_id: input.country_id,
-    p_competition_id: input.competition_id,
-    p_season: input.season,
-    p_dataset_type: input.dataset_type,
-    p_provider: input.provider,
-    p_date_start: input.date_start,
-    p_date_end: input.date_end,
-    p_team_set_hash: input.team_set_hash,
-    p_schema_version: input.schema_version,
-    p_completeness_score: input.completeness_score,
-    p_completeness_policy_version: input.completeness_policy_version ?? null,
-    p_auto_queue: input.auto_queue ?? true,
-  })
 }

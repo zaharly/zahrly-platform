@@ -1,0 +1,14 @@
+[build]
+  command = "npm --prefix admin/frontend install --no-package-lock && npm --prefix admin/frontend run build"
+  publish = "admin/frontend/dist"
+  functions = "admin/netlify/functions"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200

@@ -13,8 +13,8 @@ export const CardDescription = ({ className, ...p }: any) => <p className={cn('t
 export const CardContent = ({ className, ...p }: any) => <div className={cn('p-6 pt-0', className)} {...p} />
 export const CardFooter = ({ className, ...p }: any) => <div className={cn('flex items-center p-6 pt-0', className)} {...p} />
 
-export const Dialog = ({ open, onOpenChange, children }: any) => open === false ? null : <div>{children}</div>
-export const DialogTrigger = ({ asChild, children, ...p }: any) => <span {...p}>{children}</span>
+export const Dialog = ({ open, children }: any) => open === false ? null : <div>{children}</div>
+export const DialogTrigger = ({ children, ...p }: any) => <span {...p}>{children}</span>
 export const DialogClose = ({ children, ...p }: any) => <button {...p}>{children}</button>
 export const DialogContent = ({ className, children, ...p }: any) => <div role="dialog" className={cn('fixed inset-0 z-50 m-auto h-fit max-h-[90vh] w-[calc(100%-2rem)] max-w-lg overflow-auto rounded-lg border border-border bg-background p-6 shadow-lg', className)} {...p}>{children}</div>
 export const DialogHeader = ({ className, ...p }: any) => <div className={cn('flex flex-col gap-1.5', className)} {...p} />
@@ -36,7 +36,6 @@ export const TooltipProvider = ({ children }: any) => <>{children}</>
 export const Tooltip = ({ children }: any) => <>{children}</>
 export const TooltipTrigger = ({ children }: any) => <>{children}</>
 export const TooltipContent = ({ children }: any) => <span className="sr-only">{children}</span>
-
 export const Progress = ({ value = 0, className }: any) => <div className={cn('h-2 w-full overflow-hidden rounded-full bg-muted', className)}><div className="h-full bg-foreground" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div>
 export const Separator = ({ orientation = 'horizontal', className }: any) => <div className={cn(orientation === 'vertical' ? 'h-full w-px' : 'h-px w-full', 'bg-border', className)} />
 export const Checkbox = ({ checked, onCheckedChange, className, ...p }: any) => <input type="checkbox" checked={!!checked} onChange={e => onCheckedChange?.(e.target.checked)} className={cn('h-4 w-4 rounded border', className)} {...p} />
@@ -47,7 +46,6 @@ export const Tabs = ({ defaultValue, children }: any) => <div data-default-value
 export const TabsList = ({ className, ...p }: any) => <div role="tablist" className={cn('inline-flex rounded-md bg-muted p-1', className)} {...p} />
 export const TabsTrigger = ({ className, ...p }: any) => <button role="tab" className={cn('rounded px-3 py-1.5 text-sm', className)} {...p} />
 export const TabsContent = ({ className, ...p }: any) => <div role="tabpanel" className={cn('mt-2', className)} {...p} />
-
 export const Accordion = ({ children }: any) => <div>{children}</div>
 export const AccordionItem = ({ children }: any) => <div className="border-b border-border">{children}</div>
 export const AccordionTrigger = ({ children, ...p }: any) => <button className="flex w-full items-center justify-between py-4 text-sm font-medium" {...p}>{children}</button>
@@ -88,6 +86,14 @@ export const SheetFooter = ({ className, ...p }: any) => <div className={cn('fle
 export const SheetTitle = ({ className, ...p }: any) => <h2 className={cn('text-lg font-semibold', className)} {...p} />
 export const SheetDescription = ({ className, ...p }: any) => <p className={cn('text-sm text-muted-foreground', className)} {...p} />
 
+export const CommandDialog = Dialog
+export const CommandInput = ({ className, ...p }: any) => <input autoFocus className={cn('h-10 w-full border-b border-border bg-transparent px-3 text-sm outline-none', className)} {...p} />
+export const CommandList = ({ className, children, ...p }: any) => <div className={cn('max-h-72 overflow-auto p-1', className)} {...p}>{children}</div>
+export const CommandEmpty = ({ className, children = 'No results found.', ...p }: any) => <div className={cn('py-6 text-center text-sm text-muted-foreground', className)} {...p}>{children}</div>
+export const CommandGroup = ({ className, children, ...p }: any) => <div className={cn('overflow-hidden p-1', className)} {...p}>{children}</div>
+export const CommandItem = ({ className, children, ...p }: any) => <button className={cn('flex w-full items-center rounded-sm px-2 py-1.5 text-sm hover:bg-muted', className)} {...p}>{children}</button>
+export const CommandShortcut = ({ className, children, ...p }: any) => <span className={cn('ml-auto text-xs text-muted-foreground', className)} {...p}>{children}</span>
+
 export const AlertDialog = Dialog
 export const AlertDialogTrigger = DialogTrigger
 export const AlertDialogContent = DialogContent
@@ -97,15 +103,10 @@ export const AlertDialogTitle = DialogTitle
 export const AlertDialogDescription = DialogDescription
 export const AlertDialogCancel = DialogClose
 export const AlertDialogAction = Button
-
 export const RadioGroup = ({ value, onValueChange, children }: any) => <div data-value={value} onChange={(e: any) => onValueChange?.(e.target.value)}>{children}</div>
 export const RadioGroupItem = ({ value, ...p }: any) => <input type="radio" value={value} {...p} />
 
-export const toast = Object.assign((message: string, options?: any) => console.log(message, options), {
-  success: (message: string, options?: any) => console.log(message, options),
-  error: (message: string, options?: any) => console.error(message, options),
-  info: (message: string, options?: any) => console.info(message, options),
-})
+export const toast = Object.assign((message: string, options?: any) => console.log(message, options), { success: (message: string, options?: any) => console.log(message, options), error: (message: string, options?: any) => console.error(message, options), info: (message: string, options?: any) => console.info(message, options) })
 export const Toaster = () => null
 
 export const Table = ({ className, ...p }: any) => <table className={cn('w-full caption-bottom text-sm', className)} {...p} />

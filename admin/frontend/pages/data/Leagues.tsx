@@ -48,17 +48,13 @@ export default function Leagues() {
     }
   }
 
-  const rows = useMemo(() => competitions.map((league) => ({
-    ...league,
-    countryName: countryMap[league.country_id] ?? '—',
-    ingestion_enabled: isEnabled(league),
-  })), [competitions, countryMap])
+  const rows = useMemo(() => competitions.map((league) => ({ ...league, countryName: countryMap[league.country_id] ?? '—', ingestion_enabled: isEnabled(league) })), [competitions, countryMap])
 
   const columns = useMemo<ColumnDef<(typeof rows)[number], any>[]>(() => [
     { accessorKey: 'name', header: 'League' },
     { accessorKey: 'countryName', header: 'Country' },
     { accessorKey: 'status', header: 'Catalog status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} dense /> },
-    { accessorKey: 'seasonCount', header: 'Provider seasons', cell: ({ row }) => row.original.registered_seasons },
+    { accessorKey: 'registered_seasons', header: 'Provider seasons' },
     { accessorKey: 'ingestion_enabled', header: 'Ingestion', cell: ({ row }) => <StatusBadge status={row.original.ingestion_enabled ? 'ENABLED' : 'DISABLED'} dense /> },
     {
       id: 'actions', header: 'Actions', enableSorting: false,

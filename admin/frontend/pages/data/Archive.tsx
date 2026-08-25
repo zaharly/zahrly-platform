@@ -8,6 +8,7 @@ import { DetailDrawer } from '../../components/drawers/DetailDrawer'
 import { Button } from '../../lib/shadcn/button'
 import { fetchArchiveLive, type ArchiveCampaignLive } from '../../integrations/archiveLive'
 
+// Live Supabase archive view; intentionally no static E2E archive fixture.
 export default function ArchivePage() {
   const [campaigns, setCampaigns] = useState<ArchiveCampaignLive[]>([])
   const [selected, setSelected] = useState<ArchiveCampaignLive | null>(null)

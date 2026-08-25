@@ -88,6 +88,12 @@ export interface BackfillSeasonJobResult {
   priority: number
 }
 
+export interface ProviderSeasonTriggerResult {
+  accepted: true
+  season: number
+  workflow: string
+}
+
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   const url = import.meta.env.VITE_SUPABASE_URL?.trim()
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
@@ -124,4 +130,16 @@ export async function queueBackfillSeason(
     p_dataset_type: datasetType,
     p_priority: priority,
   })
+}
+
+export async function triggerProviderSeason(season: number): Promise<ProviderSeasonTriggerResult> {
+  const response = await fetch('/api/provider-season', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ season }),
+  })
+  const detail = await response.text().catch(() => '')
+  if (!response.ok) throw new Error(detail || `Provider season trigger failed (${response.status})`)
+  return JSON.parse(detail) as ProviderSeasonTriggerResult
 }

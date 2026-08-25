@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { AlertTriangle, CheckCircle2, Database, RefreshCw, Send, Pause, ListChecks, Archive } from 'lucide-react'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
@@ -163,6 +163,6 @@ export default function ProviderSeasonControl() {
 
 function Metric({ label, value }: { label: string; value: string }) { return <div><div className="text-xs uppercase text-muted-foreground">{label}</div><div className="mt-1 font-semibold">{value}</div></div> }
 function Progress({ value }: { value: number }) { return <div className="flex min-w-28 flex-col gap-1"><span className="text-xs font-medium">{value.toFixed(1)}%</span><div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary"><div className="h-full rounded-full bg-foreground" style={{ width: `${Math.max(0, Math.min(100, value))}%` }} /></div></div> }
-function QueueCard({ title, icon, rows }: { title: string; icon: React.ReactNode; rows: Array<Record<string, unknown>> }) {
+function QueueCard({ title, icon, rows }: { title: string; icon: ReactNode; rows: Array<Record<string, unknown>> }) {
   return <div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><div className="flex items-center gap-2">{icon}<h2 className="text-base font-semibold">{title}</h2></div><div className="mt-4 space-y-2">{rows.slice(0, 8).map((row, i) => <div key={String(row.job_id ?? row.manifest_id ?? i)} className="rounded-md border border-border/60 p-3 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{String(row.dataset_type ?? 'archive output')}</span><StatusBadge status={String(row.status ?? '—')} dense /></div><div className="mt-1 text-muted-foreground">Season {String(row.season ?? '—')} · Requests {String(row.requests_used ?? '—')} · {row.object_uri ? String(row.object_uri) : 'No object yet'}</div></div>)}{!rows.length && <div className="py-6 text-center text-sm text-muted-foreground">No records.</div>}</div></div>
 }

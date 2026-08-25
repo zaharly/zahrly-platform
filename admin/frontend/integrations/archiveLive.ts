@@ -15,10 +15,6 @@ export interface ArchiveCampaignLive {
   attempts: number
   started_at: string | null
   finished_at: string | null
-  error_code: string | null
-  error_message: string | null
-  created_at: string
-  updated_at: string
   worker_job_id: string | null
   queue_name: string | null
   worker_status: string | null
@@ -27,72 +23,21 @@ export interface ArchiveCampaignLive {
   worker_finished_at: string | null
   worker_error_code: string | null
   worker_error_message: string | null
+  error_code: string | null
+  error_message: string | null
+  created_at: string
+  updated_at: string
 }
 
-export interface ArchiveSeasonLive {
-  season: number
-  campaigns: number
-  succeeded: number
-  failed: number
-  active: number
-  avg_completeness: number
-}
-
-export interface ArchiveLiveSnapshot {
-  campaigns: ArchiveCampaignLive[]
-  seasons: ArchiveSeasonLive[]
-}
-
-export interface ArchiveCampaignCountryOption {
-  id: string
-  code: string
-  name: string
-}
-
-export interface ArchiveCampaignCompetitionOption {
-  id: string
-  country_id: string
-  name: string
-}
-
-export interface ArchiveCampaignRuleOption {
-  dataset_type: string
-  policy_version: string
-  required_threshold: number
-}
-
-export interface ArchiveRegisteredSeasonOption {
-  provider: string
-  competition_id: string
-  season: number
-  endpoint: string
-  market: string | null
-  status: string
-  checked_at: string | null
-}
-
-export interface ArchiveCampaignOptions {
-  countries: ArchiveCampaignCountryOption[]
-  competitions: ArchiveCampaignCompetitionOption[]
-  rules: ArchiveCampaignRuleOption[]
-  registered_seasons: ArchiveRegisteredSeasonOption[]
-}
-
-export interface BackfillSeasonJobResult {
-  job_id: string
-  country_id: string | null
-  competition_id: string | null
-  season: number
-  dataset_type: string
-  status: string
-  priority: number
-}
-
-export interface ProviderSeasonTriggerResult {
-  accepted: true
-  season: number
-  workflow: string
-}
+export interface ArchiveSeasonLive { season: number; campaigns: number; succeeded: number; failed: number; active: number; avg_completeness: number }
+export interface ArchiveLiveSnapshot { campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] }
+export interface ArchiveCampaignCountryOption { id: string; code: string; name: string }
+export interface ArchiveCampaignCompetitionOption { id: string; country_id: string; name: string }
+export interface ArchiveCampaignRuleOption { dataset_type: string; policy_version: string; required_threshold: number }
+export interface ArchiveRegisteredSeasonOption { provider: string; competition_id: string; season: number; endpoint: string; market: string | null; status: string; checked_at: string | null }
+export interface ArchiveCampaignOptions { countries: ArchiveCampaignCountryOption[]; competitions: ArchiveCampaignCompetitionOption[]; rules: ArchiveCampaignRuleOption[]; registered_seasons: ArchiveRegisteredSeasonOption[] }
+export interface BackfillSeasonJobResult { job_id: string; country_id: string | null; competition_id: string | null; season: number; dataset_type: string; status: string; priority: number }
+export interface ProviderSeasonTriggerResult { accepted: true; season: number; workflow: string }
 
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   const url = import.meta.env.VITE_SUPABASE_URL?.trim()
@@ -110,32 +55,18 @@ async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   return response.json() as Promise<T>
 }
 
-export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
-  return rpc<ArchiveLiveSnapshot>('admin_archive_snapshot', {})
-}
-
-export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> {
-  return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {})
-}
-
-export async function queueBackfillSeason(
-  competitionId: string,
-  season: number,
-  datasetType: string,
-  priority = 0,
-): Promise<BackfillSeasonJobResult> {
-  return rpc<BackfillSeasonJobResult>('admin_queue_backfill_season', {
-    p_competition_id: competitionId,
-    p_season: season,
-    p_dataset_type: datasetType,
-    p_priority: priority,
-  })
+export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> { return rpc('admin_archive_snapshot', {}) }
+export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> { return rpc('admin_archive_campaign_options', {}) }
+export async function queueBackfillSeason(competitionId: string, season: number, datasetType: string, priority = 0): Promise<BackfillSeasonJobResult> {
+  return rpc('admin_queue_backfill_season', { p_competition_id: competitionId, p_season: season, p_dataset_type: datasetType, p_priority: priority })
 }
 
 export async function triggerProviderSeason(season: number): Promise<ProviderSeasonTriggerResult> {
+  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
+  if (!anonKey) throw new Error('Missing VITE_SUPABASE_ANON_KEY')
   const response = await fetch('/api/provider-season', {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${anonKey}` },
     credentials: 'include',
     body: JSON.stringify({ season }),
   })

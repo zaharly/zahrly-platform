@@ -49,10 +49,11 @@ async function getAccessToken() {
 }
 
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
+  const url = import.meta.env.VITE_SUPABASE_URL?.trim()
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
-  if (!anonKey) throw new Error('Missing VITE_SUPABASE_ANON_KEY')
+  if (!url || !anonKey) throw new Error('Missing VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY')
   const accessToken = await getAccessToken()
-  const response = await fetch(`${supabase.supabaseUrl.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
+  const response = await fetch(`${url.replace(/\/$/, '')}/rest/v1/rpc/${name}`, {
     method: 'POST',
     headers: { apikey: anonKey, Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),

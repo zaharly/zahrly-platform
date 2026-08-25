@@ -6,7 +6,7 @@ import AdminAuthGate from './components/auth/AdminAuthGate'
 
 import Dashboard from './pages/Dashboard'
 import IncidentCenter from './pages/incidents/IncidentCenter'
-import HistoricalBootstrap from './pages/bootstrap/ProviderSeasonControl'
+import HistoricalBootstrap from './pages/bootstrap/HistoricalBootstrapLive'
 import Countries from './pages/data/Countries'
 import Leagues from './pages/data/Leagues'
 import LeagueDetail from './pages/data/LeagueDetail'

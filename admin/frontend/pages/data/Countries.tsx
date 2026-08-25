@@ -41,6 +41,7 @@ export default function Countries() {
     { accessorKey: 'name', header: 'Country' },
     { accessorKey: 'code', header: 'Code' },
     { accessorKey: 'status', header: 'Status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} dense /> },
+    { accessorKey: 'processing_state', header: 'Processing' },
     { accessorKey: 'league_count', header: 'Leagues' },
     { accessorKey: 'enabled_league_count', header: 'Enabled leagues' },
     { accessorKey: 'backfill_job_count', header: 'Backfill jobs' },
@@ -54,7 +55,7 @@ export default function Countries() {
     <div className="flex flex-col gap-density-lg">
       <PageHeader
         title="Countries"
-        description="Canonical country operational state from Supabase. Provider, backfill, processing-control, and archive state remain visible; this page does not replace operational state with mock/provider-only status."
+        description="Canonical country operational state from Supabase. Provider, processing-control, backfill, and archive state remain visible; this page does not replace operational state with mock/provider-only status."
         actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>}
       />
       {error && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
@@ -69,6 +70,8 @@ export default function Countries() {
           {selected && (
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div><div className="text-xs text-muted-foreground">Status</div><StatusBadge status={selected.status} dense /></div>
+              <div><div className="text-xs text-muted-foreground">Processing</div><div className="font-medium">{selected.processing_state ?? '—'}</div></div>
+              <div><div className="text-xs text-muted-foreground">Processing reason</div><div className="font-medium">{selected.processing_reason ?? '—'}</div></div>
               <div><div className="text-xs text-muted-foreground">Leagues</div><div className="font-medium">{selected.league_count}</div></div>
               <div><div className="text-xs text-muted-foreground">Enabled leagues</div><div className="font-medium">{selected.enabled_league_count}</div></div>
               <div><div className="text-xs text-muted-foreground">Backfill jobs</div><div className="font-medium">{selected.backfill_job_count}</div></div>

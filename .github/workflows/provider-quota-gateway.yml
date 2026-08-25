@@ -2,6 +2,12 @@ name: provider-worker-ci
 
 on:
   workflow_dispatch:
+    inputs:
+      season:
+        description: 'Single API-Football season to register (starting year)'
+        required: true
+        default: '2008'
+        type: string
   push:
     paths:
       - '.github/workflows/provider-quota-gateway.yml'
@@ -75,13 +81,14 @@ jobs:
           print('provider worker + private Supabase persistence: PASS')
           PY
 
-      - name: Register real API-Football leagues and seasons 2000-2026
+      - name: Register one real API-Football season
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
           PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
           PROVIDER_REGISTRY_GATEWAY_URL: ${{ env.PROVIDER_REGISTRY_GATEWAY_URL }}
-          SEASON_START: '2000'
-          SEASON_END: '2026'
+          TARGET_SEASON: ${{ github.event.inputs.season || '2008' }}
+          SEASON_START: ${{ github.event.inputs.season || '2008' }}
+          SEASON_END: ${{ github.event.inputs.season || '2008' }}
         run: |
           set -euo pipefail
           API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
@@ -89,6 +96,8 @@ jobs:
           export API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET
           test -n "${API_FOOTBALL_KEY}"
           test -n "${PROVIDER_GATEWAY_SECRET}"
+          test "${TARGET_SEASON}" -ge 1900
+          test "${TARGET_SEASON}" -le 2100
           docker run --rm \
             -e API_FOOTBALL_KEY \
             -e PROVIDER_GATEWAY_SECRET \
@@ -99,24 +108,26 @@ jobs:
             python -m workers.provider_gateway.registry_bootstrap > registry_bootstrap.json
           cat registry_bootstrap.json
 
-      - name: Validate real season registry bootstrap
+      - name: Validate one real API-Football season registration
         run: |
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
           result = json.loads(Path('registry_bootstrap.json').read_text(encoding='utf-8'))
+          target = int(os.environ.get('TARGET_SEASON', '2008'))
           if result.get('provider') != 'api-football':
               raise SystemExit(f'unexpected provider: {result}')
-          if result.get('season_range') != [2000, 2026]:
+          if result.get('season_range') != [target, target]:
               raise SystemExit(f'unexpected season range: {result}')
-          if result.get('available_seasons', 0) <= 0:
-              raise SystemExit('API-Football returned no available seasons in the requested range')
+          if result.get('available_seasons', 0) != 1:
+              raise SystemExit(f'API-Football did not expose the requested season: {result}')
           if result.get('registered_zahrly_competitions', 0) <= 0:
               raise SystemExit('no Zahrly competitions are mapped to API-Football')
           if result.get('persisted_registrations', 0) <= 0:
               raise SystemExit(f'no provider season registrations were persisted: {result}')
-          print('real API-Football league/season registry: PASS')
-          print(f"available_seasons={result['available_seasons']}")
+          print('real API-Football single-season registry: PASS')
+          print(f"season={target}")
           print(f"matched_league_season_pairs={result['matched_league_season_pairs']}")
           print(f"persisted_registrations={result['persisted_registrations']}")
           PY

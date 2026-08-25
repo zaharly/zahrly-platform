@@ -78,6 +78,16 @@ export interface ArchiveCampaignOptions {
   registered_seasons: ArchiveRegisteredSeasonOption[]
 }
 
+export interface BackfillSeasonJobResult {
+  job_id: string
+  country_id: string | null
+  competition_id: string | null
+  season: number
+  dataset_type: string
+  status: string
+  priority: number
+}
+
 async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   const url = import.meta.env.VITE_SUPABASE_URL?.trim()
   const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY?.trim()
@@ -100,4 +110,18 @@ export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
 
 export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> {
   return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {})
+}
+
+export async function queueBackfillSeason(
+  competitionId: string,
+  season: number,
+  datasetType: string,
+  priority = 0,
+): Promise<BackfillSeasonJobResult> {
+  return rpc<BackfillSeasonJobResult>('admin_queue_backfill_season', {
+    p_competition_id: competitionId,
+    p_season: season,
+    p_dataset_type: datasetType,
+    p_priority: priority,
+  })
 }

@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "installCommand": "npm --prefix admin/frontend install",
+  "buildCommand": "npm --prefix admin/frontend run build",
+  "outputDirectory": "admin/frontend/dist",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -122,6 +122,44 @@ def canonical_fixture_status(provider_status: str | None) -> str:
     raise RuntimeError(f"Unsupported API-Football fixture status: {code or '<empty>'}")
 
 
+def _normalize_fixture(item: dict[str, object]) -> dict[str, object] | None:
+    fixture = item.get("fixture") or {}
+    league = item.get("league") or {}
+    teams = item.get("teams") or {}
+    home = teams.get("home") or {}
+    away = teams.get("away") or {}
+    if not fixture.get("id") or not league.get("id") or not home.get("id") or not away.get("id"):
+        return None
+
+    provider_status = (fixture.get("status") or {}).get("short")
+    return {
+        "provider": "api-football",
+        "provider_fixture_id": fixture["id"],
+        "country": {"code": None, "name": league.get("country") or "Unknown"},
+        "competition": {"id": league["id"], "name": league.get("name") or "Unknown"},
+        "home_team": {"id": home["id"], "name": home.get("name") or str(home["id"])},
+        "away_team": {"id": away["id"], "name": away.get("name") or str(away["id"])},
+        "kickoff_at": fixture.get("date"),
+        "status": canonical_fixture_status(provider_status),
+    }
+
+
+def fetch_fixtures_for_league_season(league_id: int, season: int) -> list[dict[str, object]]:
+    """Fetch and normalize one real provider league/season for historical backfill."""
+    if int(league_id) <= 0:
+        raise ValueError("league_id must be positive")
+    if not isinstance(season, int) or season < 1900 or season > 2100:
+        raise ValueError("season must be between 1900 and 2100")
+
+    body = _get_json("/fixtures", {"league": int(league_id), "season": season}, timeout=90)
+    normalized: list[dict[str, object]] = []
+    for item in body.get("response") or []:
+        row = _normalize_fixture(item)
+        if row:
+            normalized.append(row)
+    return normalized
+
+
 def fetch_upcoming_fixtures(date: str | None = None) -> list[dict[str, object]]:
     """Fetch and normalize fixture observations for the canonical ingest worker."""
     if date is None:
@@ -130,23 +168,7 @@ def fetch_upcoming_fixtures(date: str | None = None) -> list[dict[str, object]]:
     body = _get_json("/fixtures", {"date": date}, timeout=30)
     normalized: list[dict[str, object]] = []
     for item in body.get("response", []):
-        fixture = item.get("fixture") or {}
-        league = item.get("league") or {}
-        teams = item.get("teams") or {}
-        home = teams.get("home") or {}
-        away = teams.get("away") or {}
-        if not fixture.get("id") or not league.get("id") or not home.get("id") or not away.get("id"):
-            continue
-
-        provider_status = (fixture.get("status") or {}).get("short")
-        normalized.append({
-            "provider": "api-football",
-            "provider_fixture_id": fixture["id"],
-            "country": {"code": None, "name": league.get("country") or "Unknown"},
-            "competition": {"id": league["id"], "name": league.get("name") or "Unknown"},
-            "home_team": {"id": home["id"], "name": home.get("name") or str(home["id"])},
-            "away_team": {"id": away["id"], "name": away.get("name") or str(away["id"])},
-            "kickoff_at": fixture.get("date"),
-            "status": canonical_fixture_status(provider_status),
-        })
+        row = _normalize_fixture(item)
+        if row:
+            normalized.append(row)
     return normalized

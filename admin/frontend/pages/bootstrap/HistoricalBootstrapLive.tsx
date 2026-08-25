@@ -13,6 +13,7 @@ import { RefreshCw, ExternalLink, Database, Plus, AlertTriangle, CheckCircle2 } 
 import {
   fetchArchiveCampaignOptions,
   fetchArchiveLive,
+  queueBackfillSeason,
   type ArchiveCampaignLive,
   type ArchiveCampaignOptions,
   type ArchiveSeasonLive,
@@ -89,12 +90,12 @@ export default function HistoricalBootstrapLive() {
     <div className="flex flex-col gap-density-xl">
       <PageHeader
         title="Historical Bootstrap"
-        description="Live archive operating path backed by internal.archive_campaigns, internal.worker_jobs, and internal.archive_catalog. Historical data is displayed from Supabase, not mock fixtures."
+        description="Live historical season backfill path backed by Supabase. One season is queued at a time through the project’s backfill control plane."
         tag={<StatusBadge status={loading || optionsLoading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
         actions={
           <div className="flex items-center gap-density-sm">
-            <Button onClick={() => setCreateOpen(true)}>
-              <Plus className="h-4 w-4" /> Add archive request
+            <Button onClick={() => setCreateOpen(true)} disabled={optionsLoading}>
+              <Plus className="h-4 w-4" /> Queue season
             </Button>
             <Button variant="outline" onClick={() => { void load(); void loadOptions() }} disabled={loading || optionsLoading}>
               <RefreshCw className="h-4 w-4" /> Refresh
@@ -149,7 +150,7 @@ export default function HistoricalBootstrapLive() {
         )}
       </DetailDrawer>
 
-      <ArchiveRequestDialog open={createOpen} onOpenChange={setCreateOpen} options={options} />
+      <SeasonBackfillDialog open={createOpen} onOpenChange={setCreateOpen} options={options} onQueued={() => { void load(); void loadOptions() }} />
     </div>
   )
 }
@@ -158,30 +159,31 @@ function ReadinessPanel({ options }: { options: ArchiveCampaignOptions | null })
   const registered = options?.registered_seasons ?? []
   const activeCompetitions = options?.competitions ?? []
   const rules = options?.rules ?? []
-  const ready = registered.length > 0 && activeCompetitions.length > 0 && rules.length > 0
+  const supportedSeasons = registered.filter((s) => s.provider === 'api-football' && s.status === 'SUPPORTED')
+  const ready = supportedSeasons.length > 0 && activeCompetitions.length > 0 && rules.length > 0
 
   return (
     <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
       <div className="flex items-start justify-between gap-density-md">
         <div>
-          <h2 className="text-base font-semibold">Archive request readiness</h2>
-          <p className="mt-1 text-sm text-muted-foreground">The dashboard no longer asks for provider or lineage internals. Those values must come from the project’s provider-backed season registration path.</p>
+          <h2 className="text-base font-semibold">Historical backfill readiness</h2>
+          <p className="mt-1 text-sm text-muted-foreground">Only provider-backed seasons marked SUPPORTED can be queued. Backend-only lineage and completeness fields are never entered here.</p>
         </div>
         <StatusBadge status={ready ? 'READY' : 'BLOCKED'} />
       </div>
 
       <div className="mt-density-md grid grid-cols-1 gap-density-sm md:grid-cols-3">
         <ReadinessItem ok={activeCompetitions.length > 0} label="Active competitions" value={String(activeCompetitions.length)} />
-        <ReadinessItem ok={registered.length > 0} label="Provider-backed seasons" value={String(registered.length)} />
-        <ReadinessItem ok={rules.length > 0} label="Configured archive datasets" value={String(rules.length)} />
+        <ReadinessItem ok={supportedSeasons.length > 0} label="Supported seasons" value={String(supportedSeasons.length)} />
+        <ReadinessItem ok={rules.length > 0} label="Configured datasets" value={String(rules.length)} />
       </div>
 
       {!ready && (
         <div className="mt-density-md flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <div>
-            <div className="font-medium text-foreground">Add archive request is intentionally blocked.</div>
-            <div className="mt-1">A real provider-backed season must exist before the system can derive the provider, season dates, team scope, schema and completeness metadata required by the archive campaign contract.</div>
+            <div className="font-medium text-foreground">Season queueing is blocked until prerequisites exist.</div>
+            <div className="mt-1">The selected season must already be registered by the provider layer as SUPPORTED. The dashboard will not invent provider, dates, team scope, schema or completeness metadata.</div>
           </div>
         </div>
       )}
@@ -201,36 +203,40 @@ function ReadinessItem({ ok, label, value }: { ok: boolean; label: string; value
   )
 }
 
-function ArchiveRequestDialog({ open, onOpenChange, options }: {
+function SeasonBackfillDialog({ open, onOpenChange, options, onQueued }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   options: ArchiveCampaignOptions | null
+  onQueued: () => void
 }) {
   const [competitionId, setCompetitionId] = useState('')
   const [seasonKey, setSeasonKey] = useState('')
   const [datasetType, setDatasetType] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
   const registeredSeasons = options?.registered_seasons ?? []
   const competitions = options?.competitions ?? []
   const rules = options?.rules ?? []
+  const supportedSeasons = registeredSeasons.filter((s) => s.provider === 'api-football' && s.status === 'SUPPORTED')
   const seasonsForCompetition = useMemo(
-    () => registeredSeasons.filter((s) => !competitionId || s.competition_id === competitionId),
-    [registeredSeasons, competitionId],
+    () => supportedSeasons.filter((s) => !competitionId || s.competition_id === competitionId),
+    [supportedSeasons, competitionId],
   )
   const selectedRegistration = seasonsForCompetition.find((s) => `${s.competition_id}:${s.season}` === seasonKey)
-  const canRequest = false
+  const canRequest = !!competitionId && !!selectedRegistration && !!datasetType && !submitting
 
   useEffect(() => {
     if (!open) {
       setCompetitionId('')
       setSeasonKey('')
       setDatasetType('')
+      setSubmitting(false)
     }
   }, [open])
 
   useEffect(() => {
     if (!competitionId) {
-      if (seasonKey) setSeasonKey('')
+      setSeasonKey('')
       return
     }
     const validSeason = seasonsForCompetition.some((s) => `${s.competition_id}:${s.season}` === seasonKey)
@@ -243,13 +249,28 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
 
   const competitionName = competitions.find((c) => c.id === competitionId)?.name ?? '—'
 
+  async function submit() {
+    if (!selectedRegistration || !competitionId || !datasetType) return
+    setSubmitting(true)
+    try {
+      const result = await queueBackfillSeason(competitionId, selectedRegistration.season, datasetType)
+      toast.success(`Season ${result.season} queued`, { description: `Job ${result.job_id}` })
+      onOpenChange(false)
+      onQueued()
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'Unable to queue season')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Add archive request</DialogTitle>
+          <DialogTitle>Queue historical season</DialogTitle>
           <DialogDescription>
-            Choose the business scope only. Provider, dates, team scope, schema and completeness are derived by the backend from the registered provider season; they are not user inputs.
+            Select one real provider-backed season. The request enters the existing backfill control plane; no technical campaign metadata is manually supplied.
           </DialogDescription>
         </DialogHeader>
 
@@ -263,7 +284,7 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
 
           <Field label="Season">
             <Select value={seasonKey} onValueChange={setSeasonKey} disabled={seasonsForCompetition.length === 0}>
-              <SelectTrigger><SelectValue placeholder="Select registered season" /></SelectTrigger>
+              <SelectTrigger><SelectValue placeholder="Select supported season" /></SelectTrigger>
               <SelectContent>{seasonsForCompetition.map((season) => <SelectItem key={`${season.competition_id}:${season.season}`} value={`${season.competition_id}:${season.season}`}>{season.season}</SelectItem>)}</SelectContent>
             </Select>
           </Field>
@@ -271,7 +292,7 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
           <div className="md:col-span-2">
             <Field label="Dataset">
               <Select value={datasetType} onValueChange={setDatasetType} disabled={rules.length === 0}>
-                <SelectTrigger><SelectValue placeholder="Select archive dataset" /></SelectTrigger>
+                <SelectTrigger><SelectValue placeholder="Select dataset" /></SelectTrigger>
                 <SelectContent>{rules.map((rule) => <SelectItem key={`${rule.dataset_type}:${rule.policy_version}`} value={rule.dataset_type}>{rule.dataset_type}</SelectItem>)}</SelectContent>
               </Select>
             </Field>
@@ -279,21 +300,21 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
         </div>
 
         <div className="rounded-lg border border-border/60 bg-muted/20 p-density-md text-sm">
-          <div className="font-medium">Selected scope</div>
+          <div className="font-medium">Request scope</div>
           <div className="mt-1 text-muted-foreground">{competitionName} · {selectedRegistration?.season ?? '—'} · {datasetType || '—'}</div>
         </div>
 
         {!selectedRegistration && (
           <div className="flex items-start gap-density-sm rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm text-muted-foreground">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-            <div>No provider-backed season is registered for the selected competition yet. The request cannot be created safely.</div>
+            <div>No SUPPORTED API-Football season is registered for this competition yet. The request cannot be queued safely.</div>
           </div>
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-          <Button disabled={!canRequest} title="Waiting for the provider-backed campaign creation contract to be implemented">
-            Create archive request
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>Close</Button>
+          <Button onClick={() => { void submit() }} disabled={!canRequest}>
+            {submitting ? 'Queueing…' : 'Queue season'}
           </Button>
         </DialogFooter>
       </DialogContent>

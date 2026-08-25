@@ -5,6 +5,8 @@ export interface LiveCountry {
   code: string
   name: string
   status: string
+  processing_state: string | null
+  processing_reason: string | null
   league_count: number
   enabled_league_count: number
   backfill_job_count: number
@@ -16,6 +18,18 @@ export interface LiveSeasonState {
   status: string
   endpoints: string[]
   checked_at: string | null
+  backfill: {
+    total: number
+    queued: number
+    running: number
+    succeeded: number
+    failed: number
+    progress: number
+  }
+  archive: {
+    manifest_count: number
+    completeness: number
+  }
 }
 
 export interface LiveCompetition {
@@ -56,13 +70,6 @@ export interface ProviderCatalogLive {
   }>
   backfill_jobs: unknown[]
   archive: unknown[]
-}
-
-async function getAccessToken() {
-  const { data: { session } } = await supabase.auth.getSession()
-  const token = session?.access_token?.trim()
-  if (!token) throw new Error('Admin authentication required. Please sign in again.')
-  return token
 }
 
 export async function fetchProviderCatalogLive(): Promise<ProviderCatalogLive> {

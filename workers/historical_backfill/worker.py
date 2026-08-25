@@ -10,6 +10,7 @@ Important runtime rules:
 - Never send page=1; use the first response, then page=2..N only when paging.total requires it.
 - Retrieve fixture enrichment with /fixtures?ids=... in batches of at most 20 IDs.
 - Do not run fixture-dependent jobs until the season's fixtures job succeeded.
+- S3 is the historical source of truth; Supabase stores catalog/manifest metadata.
 """
 from __future__ import annotations
 
@@ -29,12 +30,15 @@ import psycopg
 from botocore.config import Config
 from psycopg.rows import dict_row
 
+from workers.historical_backfill.archive_metadata import resolve_archive_window
+
 BASE_URL = "https://v3.football.api-sports.io"
 QUEUE_NAME = "backfill_queue"
 WORKER_ID_PREFIX = "historical-backfill"
 MAX_ERROR_LENGTH = 2000
 REQUESTS_PER_MINUTE = 50
 FIXTURE_BATCH_SIZE = 20
+SCHEMA_VERSION = "api-football-raw-v2"
 
 
 class ProviderRateLimit(Exception):
@@ -48,7 +52,7 @@ class RetryableProviderError(Exception):
 
 
 class RequestLimiter:
-    """Process-local sliding-window limiter; 50/min is intentional and independent of daily quota."""
+    """Process-local sliding-window limiter; 50/min is independent of daily quota."""
     def __init__(self, limit: int = REQUESTS_PER_MINUTE):
         self.limit = limit
         self.started: list[float] = []
@@ -124,7 +128,7 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
 
 
 def api_pages(path: str, params: dict[str, object], max_pages: int = 100) -> tuple[list[dict[str, object]], int]:
-    """Fetch the first page without a page parameter, then continue only when required."""
+    """Fetch the first page without page=1; continue only when paging.total requires it."""
     rows: list[dict[str, object]] = []
     requests_used = 0
     body = api_json(path, params, timeout=90)
@@ -161,13 +165,12 @@ def teams(league_id: int, season: int) -> tuple[list[dict[str, object]], int]:
 
 def fixture_ids_for_season(league_id: int, season: int) -> tuple[list[dict[str, object]], int]:
     rows, used = fixtures(league_id, season)
-    # Historical enrichment is only meaningful for played/ongoing matches.
     rows = [r for r in rows if ((r.get("fixture") or {}).get("id"))]
     return rows, used
 
 
 def fixture_enrichment(dataset: str, fixture_rows: list[dict[str, object]]) -> tuple[list[dict[str, object]], int]:
-    """Use the API-Football /fixtures?ids= endpoint: <=20 IDs and embedded events/lineups/statistics/players."""
+    """Use /fixtures?ids= with <=20 IDs; preserve embedded provider sub-documents."""
     fixture_ids = sorted({int((r.get("fixture") or {}).get("id")) for r in fixture_rows if (r.get("fixture") or {}).get("id")})
     out: list[dict[str, object]] = []
     requests_used = 0
@@ -300,9 +303,12 @@ def claim_job(conn):
             cur.execute(
                 """
                 select b.*, c.provider_ids->>'api_football' as provider_league_id,
-                       c.canonical_name as competition_name, w.job_id as worker_job_id
+                       c.canonical_name as competition_name,
+                       coalesce(country.code, 'unknown') as country_code,
+                       w.job_id as worker_job_id
                   from internal.backfill_jobs b
                   join public.competitions c on c.id=b.league_id
+                  left join public.countries country on country.id=b.country_id
                   join internal.worker_jobs w on w.idempotency_key='backfill:' || b.job_id::text
                  where b.status in ('QUEUED','RETRYABLE')
                    and w.queue_name=%s
@@ -355,8 +361,22 @@ def upload_s3(payload: bytes, job: dict, checksum: str) -> str:
     )
     bucket = env('S3_BUCKET')
     prefix = env('S3_PREFIX', required=False, default='zahrly/archive').strip('/')
-    key = f"{prefix}/historical/{job['dataset_type']}/season={job['season']}/league={job['league_id']}/job={job['job_id']}.json"
-    client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType='application/json')
+    country_code = str(job.get('country_code') or 'unknown').strip().replace('/', '_')
+    provider_league_id = str(job['provider_league_id'])
+    key = (
+        f"{prefix}/historical/raw/provider=api-football/"
+        f"season={job['season']}/country={country_code}/league={provider_league_id}/"
+        f"dataset={job['dataset_type']}/job={job['job_id']}.json"
+    )
+    metadata = {
+        'provider': 'api-football',
+        'season': str(job['season']),
+        'country': country_code,
+        'league': provider_league_id,
+        'dataset': str(job['dataset_type']),
+        'schema-version': SCHEMA_VERSION,
+    }
+    client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType='application/json', Metadata=metadata)
     head = client.head_object(Bucket=bucket, Key=key)
     if int(head.get('ContentLength', -1)) != len(payload):
         raise RuntimeError('S3 object length verification failed')
@@ -366,18 +386,24 @@ def upload_s3(payload: bytes, job: dict, checksum: str) -> str:
     return f"s3://{bucket}/{key}"
 
 
-def mark_succeeded(conn, job, object_uri: str, checksum: str, row_count: int, requests_used: int):
+def mark_succeeded(conn, job, document: dict, object_uri: str, checksum: str, row_count: int, requests_used: int):
+    date_start, date_end = resolve_archive_window(conn, job, document)
     manifest_id = uuid.uuid4()
-    now = datetime.now(timezone.utc)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute("""
                 insert into internal.archive_catalog
-                  (manifest_id,country_id,competition_id,season,dataset_type,provider,date_start,date_end,object_uri,checksum,row_count,completeness_score,schema_version,team_set_hash)
-                values (%s,%s,%s,%s,%s,'api-football',%s,%s,%s,%s,%s,1,'api-football-raw-v1','')
-            """, (manifest_id,job['country_id'],job['league_id'],job['season'],job['dataset_type'],now,now,object_uri,checksum,row_count))
-            cur.execute("update internal.backfill_jobs set status='SUCCEEDED',progress=100,requests_used=%s,manifest_id=%s,updated_at=now(),next_retry_at=null where job_id=%s", (requests_used,manifest_id,job['job_id']))
+                  (manifest_id,country_id,competition_id,season,dataset_type,provider,
+                   date_start,date_end,object_uri,checksum,row_count,completeness_score,
+                   schema_version,team_set_hash)
+                values (%s,%s,%s,%s,%s,'api-football',%s,%s,%s,%s,%s,1,%s,'')
+            """, (
+                manifest_id, job['country_id'], job['league_id'], job['season'], job['dataset_type'],
+                date_start, date_end, object_uri, checksum, row_count, SCHEMA_VERSION,
+            ))
+            cur.execute("update internal.backfill_jobs set status='SUCCEEDED',progress=100,requests_used=%s,manifest_id=%s,updated_at=now(),next_retry_at=null,error_code=null,error_message=null where job_id=%s", (requests_used, manifest_id, job['job_id']))
             cur.execute("update internal.worker_jobs set status='SUCCEEDED',finished_at=now(),lease_expires_at=null,error_code=null,error_message=null,next_retry_at=null where job_id=%s", (job['worker_job_id'],))
+    return str(manifest_id), date_start, date_end
 
 
 def mark_retryable(conn, job, exc: Exception, retry_after: int = 60):
@@ -385,16 +411,16 @@ def mark_retryable(conn, job, exc: Exception, retry_after: int = 60):
     retry_at = datetime.now(timezone.utc).timestamp() + max(1, retry_after)
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("update internal.backfill_jobs set status='RETRYABLE',next_retry_at=to_timestamp(%s),updated_at=now() where job_id=%s", (retry_at, job['job_id']))
-            cur.execute("update internal.worker_jobs set status='RETRYABLE',finished_at=null,lease_expires_at=null,error_code='PROVIDER_RATE_LIMIT',error_message=%s,next_retry_at=to_timestamp(%s) where job_id=%s", (message,retry_at,job['worker_job_id']))
+            cur.execute("update internal.backfill_jobs set status='RETRYABLE',next_retry_at=to_timestamp(%s),updated_at=now(),error_code='PROVIDER_RATE_LIMIT',error_message=%s where job_id=%s", (retry_at, message, job['job_id']))
+            cur.execute("update internal.worker_jobs set status='RETRYABLE',finished_at=null,lease_expires_at=null,error_code='PROVIDER_RATE_LIMIT',error_message=%s,next_retry_at=to_timestamp(%s) where job_id=%s", (message, retry_at, job['worker_job_id']))
 
 
 def mark_failed(conn, job, exc: Exception):
     message = str(exc)[:MAX_ERROR_LENGTH]
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("update internal.backfill_jobs set status='FAILED',updated_at=now() where job_id=%s", (job['job_id'],))
-            cur.execute("update internal.worker_jobs set status='FAILED',finished_at=now(),lease_expires_at=null,error_code='HISTORICAL_DATASET_FAILED',error_message=%s where job_id=%s", (message,job['worker_job_id']))
+            cur.execute("update internal.backfill_jobs set status='FAILED',updated_at=now(),error_code='HISTORICAL_DATASET_FAILED',error_message=%s where job_id=%s", (message, job['job_id']))
+            cur.execute("update internal.worker_jobs set status='FAILED',finished_at=now(),lease_expires_at=null,error_code='HISTORICAL_DATASET_FAILED',error_message=%s where job_id=%s", (message, job['worker_job_id']))
 
 
 def run_one(conn):
@@ -411,21 +437,36 @@ def run_one(conn):
         document, requests_used = collect_dataset(job['dataset_type'], provider_league_id, season)
         update_progress(conn, job, 60, requests_used)
         artifact = {
-            'schema_version': 'api-football-raw-v1',
+            'archive_layer': 'raw',
+            'schema_version': SCHEMA_VERSION,
             'provider': 'api-football',
             'job_id': str(job['job_id']),
             'season': season,
-            'league_id': provider_league_id,
+            'country': {'id': str(job['country_id']) if job.get('country_id') else None, 'code': job.get('country_code')},
+            'competition': {'id': str(job['league_id']) if job.get('league_id') else None, 'provider_id': provider_league_id, 'name': job.get('competition_name')},
             'dataset_type': job['dataset_type'],
-            'generated_at': datetime.now(timezone.utc).isoformat(),
+            'retrieved_at': datetime.now(timezone.utc).isoformat(),
             'requests_used': requests_used,
+            'request': {'endpoint': None, 'season': season, 'league': provider_league_id},
             'payload': document,
         }
         payload = (json.dumps(artifact, sort_keys=True, separators=(',', ':'), default=str) + '\n').encode()
         checksum = hashlib.sha256(payload).hexdigest()
         object_uri = upload_s3(payload, job, checksum)
-        mark_succeeded(conn, job, object_uri, checksum, len(document.get('response') or []), requests_used)
-        return {'processed': True, 'job_id': str(job['job_id']), 'dataset_type': job['dataset_type'], 'season': season, 'status': 'SUCCEEDED', 'object_uri': object_uri, 'requests_used': requests_used}
+        manifest_id, date_start, date_end = mark_succeeded(conn, job, document, object_uri, checksum, len(document.get('response') or []), requests_used)
+        return {
+            'processed': True,
+            'job_id': str(job['job_id']),
+            'dataset_type': job['dataset_type'],
+            'season': season,
+            'status': 'SUCCEEDED',
+            'object_uri': object_uri,
+            'checksum': checksum,
+            'manifest_id': manifest_id,
+            'date_start': date_start.isoformat() if date_start else None,
+            'date_end': date_end.isoformat() if date_end else None,
+            'requests_used': requests_used,
+        }
     except ProviderRateLimit as exc:
         mark_retryable(conn, job, exc, exc.retry_after)
         return {'processed': True, 'job_id': str(job['job_id']), 'dataset_type': job['dataset_type'], 'season': int(job['season']), 'status': 'RETRYABLE', 'reason': 'provider_rate_limit', 'retry_after': exc.retry_after}

@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { AlertTriangle, CheckCircle2, Database, Play, RefreshCw, Send } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlertTriangle, CheckCircle2, Database, Play, RefreshCw } from 'lucide-react'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
 import { ProgressBar } from '../../components/status/ProgressBar'
@@ -9,64 +9,54 @@ import {
   fetchHistoricalBootstrapSnapshot,
   prepareHistoricalSeason,
   startHistoricalCampaign,
-  triggerProviderSeason,
   type HistoricalBootstrapSnapshot,
   type HistoricalSeasonProgress,
 } from '../../integrations/archiveLive'
+import { fetchProviderCatalogLive, type LiveCompetition } from '../../integrations/providerCatalogLive'
 
-const PRIMARY_SEASON = 2008
-const CAMPAIGN_START = 2008
-const CAMPAIGN_END = 2026
+const MIN_SEASON = 2008
+const MAX_SEASON = 2026
+const DATASETS = ['Standings', 'Fixtures', 'Fixture events', 'Lineups', 'Team statistics', 'Player statistics']
+const seasonOptions = Array.from({ length: MAX_SEASON - MIN_SEASON + 1 }, (_, i) => MIN_SEASON + i)
 
-const displaySeason = (season: number) => `${season}/${season + 1}`
+function displaySeason(season: number) {
+  return `${season}/${season + 1}`
+}
 
 function dedupeSeasons(rows: HistoricalSeasonProgress[]) {
   const bySeason = new Map<number, HistoricalSeasonProgress>()
   for (const row of rows) {
     const season = Number(row.season)
     if (!Number.isInteger(season)) continue
-    const previous = bySeason.get(season)
-    if (!previous) {
-      bySeason.set(season, { ...row, season })
-      continue
-    }
-    bySeason.set(season, {
-      ...previous,
-      ...row,
-      season,
-      supported_leagues: Math.max(previous.supported_leagues ?? 0, row.supported_leagues ?? 0),
-      provider_leagues: Math.max(previous.provider_leagues ?? 0, row.provider_leagues ?? 0),
-      backfill_jobs: Math.max(previous.backfill_jobs ?? 0, row.backfill_jobs ?? 0),
-      backfill_succeeded: Math.max(previous.backfill_succeeded ?? 0, row.backfill_succeeded ?? 0),
-      backfill_active: Math.max(previous.backfill_active ?? 0, row.backfill_active ?? 0),
-      backfill_failed: Math.max(previous.backfill_failed ?? 0, row.backfill_failed ?? 0),
-      backfill_progress: Math.max(previous.backfill_progress ?? 0, row.backfill_progress ?? 0),
-      archive_campaigns: Math.max(previous.archive_campaigns ?? 0, row.archive_campaigns ?? 0),
-      archive_succeeded: Math.max(previous.archive_succeeded ?? 0, row.archive_succeeded ?? 0),
-      archive_completeness: Math.max(previous.archive_completeness ?? 0, row.archive_completeness ?? 0),
-      ready_for_archive: Boolean(previous.ready_for_archive || row.ready_for_archive),
-    })
+    bySeason.set(season, { ...(bySeason.get(season) ?? {}), ...row, season })
   }
   return [...bySeason.values()].sort((a, b) => a.season - b.season)
 }
 
+function enabledScope(live: { countries: Array<{ id: string; processing_state: string | null }>; competitions: LiveCompetition[] }, season: number) {
+  const enabledCountries = new Set(live.countries.filter((c) => c.processing_state === 'ENABLED').map((c) => c.id))
+  return live.competitions.filter((league) => {
+    if (league.processing_state !== 'ENABLED' || !enabledCountries.has(league.country_id)) return false
+    return league.seasons.some((s) => Number(s.season) === season)
+  })
+}
+
 export default function HistoricalBootstrapLive() {
+  const [selectedSeason, setSelectedSeason] = useState(2020)
   const [snapshot, setSnapshot] = useState<HistoricalBootstrapSnapshot | null>(null)
+  const [live, setLive] = useState<{ countries: Array<{ id: string; name: string; processing_state: string | null }>; competitions: LiveCompetition[] } | null>(null)
   const [loading, setLoading] = useState(true)
   const [starting, setStarting] = useState(false)
-  const [discovering, setDiscovering] = useState(false)
   const [preparing, setPreparing] = useState(false)
-
-  const seasons = useMemo(() => dedupeSeasons(snapshot?.seasons ?? []), [snapshot?.seasons])
-  const primary = seasons.find((row) => row.season === PRIMARY_SEASON) ?? null
-  const campaign = snapshot?.campaign && 'campaign_id' in snapshot.campaign ? snapshot.campaign : null
 
   async function load() {
     setLoading(true)
     try {
-      setSnapshot(await fetchHistoricalBootstrapSnapshot())
+      const [historical, provider] = await Promise.all([fetchHistoricalBootstrapSnapshot(), fetchProviderCatalogLive()])
+      setSnapshot(historical)
+      setLive({ countries: provider.countries.map((c) => ({ id: c.id, name: c.name, processing_state: c.processing_state })), competitions: provider.competitions })
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to load historical control plane')
+      toast.error(error instanceof Error ? error.message : 'Unable to load historical bootstrap')
     } finally {
       setLoading(false)
     }
@@ -74,45 +64,37 @@ export default function HistoricalBootstrapLive() {
 
   useEffect(() => { void load() }, [])
 
-  async function ensureCampaign() {
-    if (campaign) return
+  const scope = useMemo(() => live ? enabledScope(live, selectedSeason) : [], [live, selectedSeason])
+  const enabledCountries = useMemo(() => {
+    if (!live) return []
+    const ids = new Set(scope.map((x) => x.country_id))
+    return live.countries.filter((c) => ids.has(c.id))
+  }, [live, scope])
+  const seasonRow = useMemo(() => dedupeSeasons(snapshot?.seasons ?? []).find((x) => x.season === selectedSeason) ?? null, [snapshot?.seasons, selectedSeason])
+  const campaign = snapshot?.campaign && 'campaign_id' in snapshot.campaign ? snapshot.campaign : null
+
+  async function startBootstrap() {
     setStarting(true)
     try {
-      await startHistoricalCampaign(CAMPAIGN_START, CAMPAIGN_END)
-      toast.success(`Historical campaign ${CAMPAIGN_START}–${CAMPAIGN_END} is ready`)
+      await startHistoricalCampaign(selectedSeason, selectedSeason)
+      const result = await prepareHistoricalSeason(selectedSeason, 100)
+      toast.success(`Historical ${displaySeason(selectedSeason)} started`, { description: `${result.jobs_total} jobs created from the enabled scope.` })
       await load()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to start historical campaign')
+      toast.error(error instanceof Error ? error.message : 'Unable to start historical bootstrap')
     } finally {
       setStarting(false)
     }
   }
 
-  async function discover2008() {
-    setDiscovering(true)
-    try {
-      await ensureCampaign()
-      await triggerProviderSeason(PRIMARY_SEASON)
-      toast.success(`Season ${displaySeason(PRIMARY_SEASON)} discovery requested`)
-      window.setTimeout(() => void load(), 1500)
-      window.setTimeout(() => void load(), 5000)
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to request season discovery')
-    } finally {
-      setDiscovering(false)
-    }
-  }
-
-  async function prepare2008() {
+  async function prepareOnly() {
     setPreparing(true)
     try {
-      const result = await prepareHistoricalSeason(PRIMARY_SEASON, 100)
-      toast.success(`Season ${displaySeason(PRIMARY_SEASON)} prepared`, {
-        description: `${result.jobs_total} backfill job${result.jobs_total === 1 ? '' : 's'} in the canonical queue`,
-      })
+      const result = await prepareHistoricalSeason(selectedSeason, 100)
+      toast.success(`Season ${displaySeason(selectedSeason)} prepared`, { description: `${result.jobs_total} backfill jobs in scope.` })
       await load()
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : 'Unable to prepare historical season')
+      toast.error(error instanceof Error ? error.message : 'Unable to prepare season')
     } finally {
       setPreparing(false)
     }
@@ -120,87 +102,55 @@ export default function HistoricalBootstrapLive() {
 
   return (
     <div className="flex flex-col gap-density-xl">
-      <PageHeader
-        title="Historical Bootstrap"
-        description="Single historical control plane. Season identity is the numeric year; 2008/2009 is presentation only."
-        tag={<StatusBadge status={loading ? 'LOADING' : campaign?.status ?? 'PLANNED'} />}
-        actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>}
-      />
+      <PageHeader title="Historical Bootstrap" description="Choose one season. Zahrly resolves the enabled Countries + Leagues from the provider catalog, builds the dataset plan, then creates historical jobs." tag={<StatusBadge status={loading ? 'LOADING' : seasonRow?.gate_state ?? 'READY'} />} actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>} />
+
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="grid gap-density-lg lg:grid-cols-[280px,1fr]">
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Season</label>
+            <select value={selectedSeason} onChange={(e) => setSelectedSeason(Number(e.target.value))} className="mt-2 h-10 w-full rounded-md border border-border bg-background px-3 text-sm">
+              {seasonOptions.map((season) => <option key={season} value={season}>{displaySeason(season)}</option>)}
+            </select>
+            <div className="mt-3 text-xs text-muted-foreground">Canonical season key: <span className="font-mono font-semibold text-foreground">{selectedSeason}</span></div>
+          </div>
+
+          <div>
+            <div className="flex items-center gap-2"><Database className="h-5 w-5" /><h2 className="text-base font-semibold">Scope resolution</h2></div>
+            <p className="mt-1 text-sm text-muted-foreground">No Country or League is selected manually. The season is filtered against the synchronized catalog and the ingestion toggles.</p>
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              <Metric label="Enabled countries" value={String(enabledCountries.length)} />
+              <Metric label="Enabled leagues" value={String(scope.length)} />
+              <Metric label="Campaign" value={campaign?.status ?? 'Not started'} />
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="flex items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Dataset plan</h2><p className="mt-1 text-sm text-muted-foreground">The historical contract collects these datasets for the resolved season scope. Archive completeness is measured after a season run, not stored as a permanent League property.</p></div><StatusBadge status="PRE-S3" dense /></div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{DATASETS.map((dataset) => <div key={dataset} className="rounded-md border border-border p-3 text-sm"><div className="flex items-center gap-2"><CheckCircle2 className="h-4 w-4" />{dataset}</div></div>)}</div>
+      </section>
 
       <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
         <div className="flex flex-col gap-density-lg lg:flex-row lg:items-start lg:justify-between">
           <div>
-            <div className="flex items-center gap-2"><Database className="h-5 w-5" /><h2 className="text-base font-semibold">Historical campaign</h2></div>
-            <p className="mt-1 text-sm text-muted-foreground">One campaign owns the historical range and is reused by every season preparation request.</p>
-            <div className="mt-density-lg grid grid-cols-2 gap-density-md md:grid-cols-4">
-              <Metric label="Campaign" value={campaign?.status ?? 'Not started'} />
-              <Metric label="Range" value={campaign ? `${campaign.target_start_season}–${campaign.target_end_season}` : `${CAMPAIGN_START}–${CAMPAIGN_END}`} />
-              <Metric label="Requests" value={String(campaign?.requests_used ?? 0)} />
-              <Metric label="Completeness" value={`${(Number(campaign?.completeness_score ?? 0) * 100).toFixed(1)}%`} />
-            </div>
+            <div className="flex items-center gap-2"><h2 className="text-base font-semibold">Review {displaySeason(selectedSeason)}</h2><StatusBadge status={seasonRow?.gate_state ?? 'READY'} dense /></div>
+            <p className="mt-1 text-sm text-muted-foreground">The final scope below is exactly what the campaign will process: Country enabled AND League enabled AND season available in the provider catalog.</p>
           </div>
-          <Button onClick={() => void ensureCampaign()} disabled={starting || !!campaign}>
-            {campaign ? <><CheckCircle2 className="h-4 w-4" /> Campaign ready</> : <><Play className="h-4 w-4" /> Start campaign</>}
-          </Button>
+          <div className="flex gap-2"><Button onClick={() => void prepareOnly()} disabled={preparing || starting || loading || scope.length === 0} variant="outline"><Database className="h-4 w-4" /> {preparing ? 'Preparing…' : 'Prepare jobs'}</Button><Button onClick={() => void startBootstrap()} disabled={starting || preparing || loading || scope.length === 0}><Play className="h-4 w-4" /> {starting ? 'Starting…' : 'Start Historical Bootstrap'}</Button></div>
         </div>
+
+        {scope.length === 0 ? <Notice title="No enabled scope for this season" text="Enable at least one Country and one League on the Countries / Leagues pages before starting the campaign." /> : <div className="mt-5 max-h-[420px] overflow-auto rounded-md border border-border"><table className="w-full text-sm"><thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="px-3 py-2">Country</th><th className="px-3 py-2">League</th><th className="px-3 py-2">Provider season</th><th className="px-3 py-2">Ingestion</th></tr></thead><tbody>{scope.map((league) => <tr key={league.id} className="border-b last:border-0"><td className="px-3 py-3">{live?.countries.find((c) => c.id === league.country_id)?.name ?? '—'}</td><td className="px-3 py-3 font-medium">{league.name}</td><td className="px-3 py-3">{displaySeason(selectedSeason)}</td><td className="px-3 py-3"><StatusBadge status="ENABLED" dense /></td></tr>)}</tbody></table></div>}
       </section>
 
       <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-        <div className="flex items-start justify-between gap-density-md">
-          <div>
-            <div className="flex items-center gap-2"><h2 className="text-base font-semibold">Season {displaySeason(PRIMARY_SEASON)}</h2><StatusBadge status={primary?.gate_state ?? 'BLOCKED'} dense /></div>
-            <p className="mt-1 text-sm text-muted-foreground">All 2008 operational steps are handled here. No competition, dataset, date, or schema is entered manually.</p>
-          </div>
-          <div className="text-right text-xs text-muted-foreground">Canonical season key: <span className="font-mono font-semibold text-foreground">{PRIMARY_SEASON}</span></div>
-        </div>
-
-        <div className="mt-density-lg grid grid-cols-1 gap-density-md md:grid-cols-2 xl:grid-cols-4">
-          <StageCard step="1" title="Campaign" value={campaign ? campaign.status : 'PLANNED'} ready={!!campaign} />
-          <StageCard step="2" title="Provider discovery" value={primary ? `${primary.supported_leagues}/${primary.provider_leagues} competitions` : 'Waiting'} ready={Number(primary?.provider_leagues ?? 0) > 0} />
-          <StageCard step="3" title="Backfill jobs" value={primary ? `${primary.backfill_succeeded}/${primary.backfill_jobs} succeeded` : 'Not prepared'} ready={Number(primary?.backfill_jobs ?? 0) > 0} />
-          <StageCard step="4" title="Pre-archive gate" value={primary?.gate_state ?? 'BLOCKED'} ready={Boolean(primary?.ready_for_archive)} />
-        </div>
-
-        <div className="mt-density-lg flex flex-wrap gap-2">
-          <Button variant="outline" onClick={() => void discover2008()} disabled={discovering || loading}>
-            <Send className="h-4 w-4" /> {discovering ? 'Requesting…' : 'Discover 2008'}
-          </Button>
-          <Button onClick={() => void prepare2008()} disabled={preparing || discovering || Number(primary?.provider_leagues ?? 0) === 0}>
-            <Database className="h-4 w-4" /> {preparing ? 'Preparing…' : 'Prepare 2008'}
-          </Button>
-        </div>
-
-        {!primary && <Notice icon={<AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />} title="2008 is not discovered yet." text="Run provider discovery first. The database creates the canonical season state; the UI never creates a second 2008 record." />}
-        {primary?.ready_for_archive && <Notice icon={<CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />} title="2008 passed the pre-archive gate." text="Archive creation is now permitted by the database guard. This page never creates archive objects itself." success />}
+        <div className="flex items-center justify-between"><div><h2 className="text-base font-semibold">Season progress</h2><p className="mt-1 text-sm text-muted-foreground">Archive completeness is interpreted per season. A complete 2010 season does not imply that a disabled 2026 League should be processed.</p></div><div className="text-xs text-muted-foreground">{seasonRow ? `${seasonRow.backfill_succeeded}/${seasonRow.backfill_jobs} jobs succeeded` : 'Not started'}</div></div>
+        <div className="mt-4"><ProgressBar value={Math.max(0, Math.min(100, Number(seasonRow?.backfill_progress ?? 0)))} /></div>
+        <div className="mt-2 grid grid-cols-2 gap-3 text-xs text-muted-foreground md:grid-cols-4"><Metric label="Queued" value={String(seasonRow?.backfill_jobs ?? 0)} /><Metric label="Succeeded" value={String(seasonRow?.backfill_succeeded ?? 0)} /><Metric label="Failed" value={String(seasonRow?.backfill_failed ?? 0)} /><Metric label="Archive completeness" value={seasonRow ? `${(Number(seasonRow.archive_completeness ?? 0) * 100).toFixed(1)}%` : '—'} /></div>
       </section>
-
-      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-        <div className="mb-density-md flex items-center justify-between gap-3"><div><h2 className="text-base font-semibold">Historical seasons</h2><p className="mt-1 text-sm text-muted-foreground">One row per numeric season. Provider registrations are unique server-side and deduplicated defensively here.</p></div><div className="text-xs text-muted-foreground">{seasons.length} unique seasons</div></div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="border-b text-left text-xs uppercase text-muted-foreground"><th className="px-3 py-2">Season</th><th className="px-3 py-2">Provider</th><th className="px-3 py-2">Backfill</th><th className="px-3 py-2">Gate</th><th className="px-3 py-2">Archive</th></tr></thead>
-            <tbody>
-              {seasons.map((row) => <tr key={row.season} className="border-b last:border-0"><td className="px-3 py-3 font-medium">{displaySeason(row.season)}</td><td className="px-3 py-3">{row.supported_leagues}/{row.provider_leagues}</td><td className="px-3 py-3"><div className="min-w-44"><ProgressBar value={Math.max(0, Math.min(100, Number(row.backfill_progress ?? 0)))} size="sm" /></div><div className="mt-1 text-xs text-muted-foreground">{row.backfill_succeeded}/{row.backfill_jobs} succeeded · {row.backfill_active} active · {row.backfill_failed} failed</div></td><td className="px-3 py-3"><StatusBadge status={row.gate_state} dense /></td><td className="px-3 py-3">{row.archive_succeeded}/{row.archive_campaigns}</td></tr>)}
-              {!seasons.length && <tr><td colSpan={5} className="px-3 py-8 text-center text-muted-foreground">No historical seasons available yet.</td></tr>}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-1 gap-density-lg lg:grid-cols-2">
-        <QueueCard title="Backfill queue" rows={snapshot?.tranche_queue ?? []} />
-        <QueueCard title="Archive output" rows={snapshot?.archive_output ?? []} />
-      </div>
     </div>
   )
 }
 
 function Metric({ label, value }: { label: string; value: string }) { return <div><div className="text-xs uppercase text-muted-foreground">{label}</div><div className="mt-1 font-semibold">{value}</div></div> }
-
-function StageCard({ step, title, value, ready }: { step: string; title: string; value: string; ready: boolean }) { return <div className="rounded-md border border-border/60 p-density-md"><div className="flex items-center justify-between gap-2"><span className="text-xs font-semibold uppercase text-muted-foreground">Step {step}</span>{ready ? <CheckCircle2 className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4 text-muted-foreground" />}</div><div className="mt-2 text-sm font-medium">{title}</div><div className="mt-1 text-xs text-muted-foreground">{value}</div></div> }
-
-function Notice({ icon, title, text, success = false }: { icon: ReactNode; title: string; text: string; success?: boolean }) { return <div className={`mt-density-lg flex items-start gap-2 rounded-lg border p-density-md text-sm ${success ? 'border-success/40 bg-success/5' : 'border-warning/40 bg-warning/5'}`}>{icon}<div><div className="font-medium text-foreground">{title}</div><div className="mt-1 text-muted-foreground">{text}</div></div></div> }
-
-function QueueCard({ title, rows }: { title: string; rows: Array<Record<string, unknown>> }) {
-  return <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="text-base font-semibold">{title}</h2><div className="mt-4 space-y-2">{rows.slice(0, 8).map((row, i) => <div key={String(row.job_id ?? row.manifest_id ?? i)} className="rounded-md border border-border/60 p-3 text-xs"><div className="flex items-center justify-between gap-2"><span className="font-medium">{String(row.dataset_type ?? 'record')}</span><StatusBadge status={String(row.status ?? '—')} dense /></div><div className="mt-1 text-muted-foreground">Season {String(row.season ?? '—')} · Requests {String(row.requests_used ?? '—')}</div></div>)}{!rows.length && <div className="py-6 text-center text-sm text-muted-foreground">No records.</div>}</div></section>
-}
+function Notice({ title, text }: { title: string; text: string }) { return <div className="mt-4 flex items-start gap-2 rounded-lg border border-warning/40 bg-warning/5 p-density-md text-sm"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><div><div className="font-medium">{title}</div><div className="mt-1 text-muted-foreground">{text}</div></div></div> }

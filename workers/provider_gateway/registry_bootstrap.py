@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register real API-Football league/season availability for Zahrly competitions."""
+"""Register one real API-Football league/season for Zahrly competitions."""
 from __future__ import annotations
 
 import json
@@ -42,12 +42,14 @@ def _get_registered_competitions() -> list[dict[str, object]]:
 
 def main() -> int:
     try:
-        start = int(os.environ.get("SEASON_START", "2000"))
-        end = int(os.environ.get("SEASON_END", "2026"))
-        if start > end:
-            raise ValueError("SEASON_START must be <= SEASON_END")
+        season = int(os.environ.get("SEASON", "2008"))
+        if season < 1900 or season > 2100:
+            raise ValueError("SEASON must be between 1900 and 2100")
 
-        available = [year for year in fetch_available_seasons() if start <= year <= end]
+        available = set(fetch_available_seasons())
+        if season not in available:
+            raise RuntimeError(f"API-Football does not expose season {season}")
+
         competitions = _get_registered_competitions()
         if not competitions:
             raise RuntimeError("no ENABLED Zahrly competitions with api_football provider_ids are registered")
@@ -55,23 +57,18 @@ def main() -> int:
         provider_leagues = {int(c["provider_league_id"]): c for c in competitions}
         registrations: list[dict[str, object]] = []
         matched = 0
+        for league in fetch_leagues_for_season(season):
+            target = provider_leagues.get(int(league["provider_league_id"]))
+            if not target:
+                continue
+            matched += 1
+            registrations.append({
+                "competition_id": target["competition_id"],
+                "season": season,
+                "endpoint": "leagues",
+                "status": "SUPPORTED",
+            })
 
-        for season in available:
-            for league in fetch_leagues_for_season(season):
-                target = provider_leagues.get(int(league["provider_league_id"]))
-                if not target:
-                    continue
-                matched += 1
-                registrations.append({
-                    "competition_id": target["competition_id"],
-                    "season": season,
-                    "endpoint": "leagues",
-                    "status": "SUPPORTED",
-                })
-
-        # The registry is intentionally limited to verified API responses. If a
-        # competition has no league result for a season, we do not manufacture a
-        # capability row for it.
         written = 0
         for offset in range(0, len(registrations), 500):
             result = _post_registrations(registrations[offset : offset + 500])
@@ -79,8 +76,8 @@ def main() -> int:
 
         print(json.dumps({
             "provider": "api-football",
-            "season_range": [start, end],
-            "available_seasons": len(available),
+            "season": season,
+            "season_available": True,
             "registered_zahrly_competitions": len(competitions),
             "matched_league_season_pairs": matched,
             "persisted_registrations": written,

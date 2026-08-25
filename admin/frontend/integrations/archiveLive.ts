@@ -206,3 +206,6 @@ export async function triggerProviderSeason(season: number): Promise<ProviderSea
   if (!response.ok) throw new Error(detail || `Provider season trigger failed (${response.status})`)
   return JSON.parse(detail) as ProviderSeasonTriggerResult
 }
+
+// Keep the archive integration exports in the canonical admin/frontend/integrations path.
+// Consumers must import this module via ../../integrations/archiveLive.

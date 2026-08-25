@@ -1,4 +1,5 @@
-import { FormEvent, ReactNode, useEffect, useState } from 'react'
+import type { FormEvent, ReactNode } from 'react'
+import { useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
 
 export default function AdminAuthGate({ children }: { children: ReactNode }) {
@@ -174,12 +175,6 @@ export default function AdminAuthGate({ children }: { children: ReactNode }) {
         {error && (
           <div className="mt-4 rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {error}
-          </div>
-        )}
-
-        {userEmail && !isAdmin && !error && (
-          <div className="mt-4 rounded-md border border-warning/40 bg-warning/5 p-3 text-sm text-muted-foreground">
-            Signed in as <span className="font-medium text-foreground">{userEmail}</span>, but this account does not have admin access.
           </div>
         )}
       </div>

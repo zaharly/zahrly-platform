@@ -81,13 +81,21 @@ export default function Leagues() {
             <div>
               <div className="mb-2 text-sm font-medium">Season scope</div>
               <div className="flex flex-col gap-2">
-                {selected.seasons.length === 0 ? <div className="text-sm text-muted-foreground">No provider season registration yet.</div> : selected.seasons.map((season) => (
-                  <div key={season.season} className="rounded-md border border-border p-3">
-                    <div className="flex items-center justify-between gap-3"><div className="font-medium">{season.season}/{season.season + 1}</div><StatusBadge status={season.status} dense /></div>
-                    <div className="mt-1 text-xs text-muted-foreground">Endpoints: {season.endpoints.join(', ') || '—'}</div>
-                    <div className="mt-1 text-xs text-muted-foreground">Checked: {season.checked_at ? new Date(season.checked_at).toLocaleString() : '—'}</div>
-                  </div>
-                ))}
+                {selected.seasons.length === 0 ? <div className="text-sm text-muted-foreground">No provider season registration yet.</div> : selected.seasons.map((season) => {
+                  const completeness = Math.max(0, Math.min(100, Number(season.archive.completeness) * 100))
+                  return (
+                    <div key={season.season} className="rounded-md border border-border p-3">
+                      <div className="flex items-center justify-between gap-3"><div className="font-medium">{season.season}/{season.season + 1}</div><StatusBadge status={season.status} dense /></div>
+                      <div className="mt-1 text-xs text-muted-foreground">Endpoints: {season.endpoints.join(', ') || '—'}</div>
+                      <div className="mt-1 text-xs text-muted-foreground">Checked: {season.checked_at ? new Date(season.checked_at).toLocaleString() : '—'}</div>
+                      <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
+                        <div><div className="text-muted-foreground">Backfill</div><div className="font-medium">{season.backfill.total} jobs · {season.backfill.progress}%</div></div>
+                        <div><div className="text-muted-foreground">Archive</div><div className="font-medium">{season.archive.manifest_count} manifests · {completeness}%</div></div>
+                      </div>
+                      <div className="mt-2"><ProgressBar value={completeness} size="sm" /></div>
+                    </div>
+                  )
+                })}
               </div>
             </div>
 

@@ -15,7 +15,6 @@ import {
   fetchArchiveLive,
   type ArchiveCampaignLive,
   type ArchiveCampaignOptions,
-  type ArchiveRegisteredSeasonOption,
   type ArchiveSeasonLive,
 } from '../../integrations/archiveLive'
 
@@ -86,10 +85,6 @@ export default function HistoricalBootstrapLive() {
     return { total, succeeded, active, avg }
   }, [data])
 
-  const registeredSeasonCount = options?.registered_seasons.length ?? 0
-  const activeCompetitionCount = options?.competitions.length ?? 0
-  const requestReady = registeredSeasonCount > 0 && activeCompetitionCount > 0 && (options?.rules.length ?? 0) > 0
-
   return (
     <div className="flex flex-col gap-density-xl">
       <PageHeader
@@ -98,7 +93,7 @@ export default function HistoricalBootstrapLive() {
         tag={<StatusBadge status={loading || optionsLoading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
         actions={
           <div className="flex items-center gap-density-sm">
-            <Button onClick={() => setCreateOpen(true)} disabled={!requestReady}>
+            <Button onClick={() => setCreateOpen(true)}>
               <Plus className="h-4 w-4" /> Add archive request
             </Button>
             <Button variant="outline" onClick={() => { void load(); void loadOptions() }} disabled={loading || optionsLoading}>
@@ -218,9 +213,12 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
   const registeredSeasons = options?.registered_seasons ?? []
   const competitions = options?.competitions ?? []
   const rules = options?.rules ?? []
-  const seasonsForCompetition = registeredSeasons.filter((s) => !competitionId || s.competition_id === competitionId)
+  const seasonsForCompetition = useMemo(
+    () => registeredSeasons.filter((s) => !competitionId || s.competition_id === competitionId),
+    [registeredSeasons, competitionId],
+  )
   const selectedRegistration = seasonsForCompetition.find((s) => `${s.competition_id}:${s.season}` === seasonKey)
-  const canRequest = Boolean(competitionId && selectedRegistration && datasetType && false)
+  const canRequest = false
 
   useEffect(() => {
     if (!open) {
@@ -231,7 +229,10 @@ function ArchiveRequestDialog({ open, onOpenChange, options }: {
   }, [open])
 
   useEffect(() => {
-    if (!competitionId) return
+    if (!competitionId) {
+      if (seasonKey) setSeasonKey('')
+      return
+    }
     const validSeason = seasonsForCompetition.some((s) => `${s.competition_id}:${s.season}` === seasonKey)
     if (!validSeason) setSeasonKey(seasonsForCompetition[0] ? `${seasonsForCompetition[0].competition_id}:${seasonsForCompetition[0].season}` : '')
   }, [competitionId, seasonKey, seasonsForCompetition])

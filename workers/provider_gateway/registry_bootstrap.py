@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Register one real API-Football league/season for Zahrly competitions."""
+"""Discover one real API-Football season and persist its canonical Zahrly catalog state."""
 from __future__ import annotations
 
 import json
@@ -10,34 +10,24 @@ from urllib.request import Request, urlopen
 from .api_football import fetch_available_seasons, fetch_leagues_for_season
 
 
-def _post_registrations(registrations: list[dict[str, object]]) -> dict[str, object]:
+def _post_season_discovery(season: int, leagues: list[dict[str, object]]) -> dict[str, object]:
     url = (os.environ.get("PROVIDER_REGISTRY_GATEWAY_URL") or "").strip()
     secret = (os.environ.get("PROVIDER_GATEWAY_SECRET") or "").strip()
     if not url or not secret:
         raise RuntimeError("PROVIDER_REGISTRY_GATEWAY_URL and PROVIDER_GATEWAY_SECRET are required")
-    payload = json.dumps({"registrations": registrations}).encode("utf-8")
+
+    payload = json.dumps({"mode": "season_discovery", "season": season, "leagues": leagues}).encode("utf-8")
     req = Request(
         url.rstrip("/"),
         data=payload,
         method="POST",
         headers={"content-type": "application/json", "x-provider-gateway-secret": secret},
     )
-    with urlopen(req, timeout=60) as response:
+    with urlopen(req, timeout=90) as response:
         body = json.loads(response.read().decode("utf-8"))
-    if not body.get("persisted"):
-        raise RuntimeError(f"provider registry did not confirm persistence: {body}")
+    if body.get("persisted") is not True:
+        raise RuntimeError(f"provider registry did not confirm season discovery persistence: {body}")
     return body
-
-
-def _get_registered_competitions() -> list[dict[str, object]]:
-    url = (os.environ.get("PROVIDER_REGISTRY_GATEWAY_URL") or "").strip()
-    secret = (os.environ.get("PROVIDER_GATEWAY_SECRET") or "").strip()
-    if not url or not secret:
-        raise RuntimeError("PROVIDER_REGISTRY_GATEWAY_URL and PROVIDER_GATEWAY_SECRET are required")
-    req = Request(url.rstrip("/"), method="GET", headers={"x-provider-gateway-secret": secret})
-    with urlopen(req, timeout=30) as response:
-        body = json.loads(response.read().decode("utf-8"))
-    return body.get("competitions") or []
 
 
 def main() -> int:
@@ -50,37 +40,36 @@ def main() -> int:
         if season not in available:
             raise RuntimeError(f"API-Football does not expose season {season}")
 
-        competitions = _get_registered_competitions()
-        if not competitions:
-            raise RuntimeError("no ENABLED Zahrly competitions with api_football provider_ids are registered")
-
-        provider_leagues = {int(c["provider_league_id"]): c for c in competitions}
-        registrations: list[dict[str, object]] = []
-        matched = 0
+        discovered: list[dict[str, object]] = []
         for league in fetch_leagues_for_season(season):
-            target = provider_leagues.get(int(league["provider_league_id"]))
-            if not target:
+            provider_league_id = int(league["provider_league_id"])
+            league_name = str(league.get("league_name") or "").strip()
+            country_code = str(league.get("country_code") or "").strip().upper()
+            country_name = str(league.get("country_name") or country_code or "Unknown").strip()
+            if provider_league_id <= 0 or not league_name:
                 continue
-            matched += 1
-            registrations.append({
-                "competition_id": target["competition_id"],
-                "season": season,
-                "endpoint": "leagues",
-                "status": "SUPPORTED",
+            discovered.append({
+                "provider_league_id": provider_league_id,
+                "league_name": league_name,
+                "country_code": country_code,
+                "country_name": country_name,
             })
 
-        written = 0
-        for offset in range(0, len(registrations), 500):
-            result = _post_registrations(registrations[offset : offset + 500])
-            written += int(result.get("written") or 0)
+        if not discovered:
+            raise RuntimeError(f"API-Football returned no valid leagues for season {season}")
+
+        result = _post_season_discovery(season, discovered)
 
         print(json.dumps({
             "provider": "api-football",
             "season": season,
             "season_available": True,
-            "registered_zahrly_competitions": len(competitions),
-            "matched_league_season_pairs": matched,
-            "persisted_registrations": written,
+            "discovered_leagues": len(discovered),
+            "countries_written": int(result.get("countriesWritten") or 0),
+            "competitions_created": int(result.get("competitionsCreated") or 0),
+            "competitions_updated": int(result.get("competitionsUpdated") or 0),
+            "processing_controls_initialized": int(result.get("controlRowsCreated") or 0),
+            "persisted_registrations": int(result.get("registrationsWritten") or 0),
         }, separators=(",", ":")))
         return 0
     except Exception as exc:

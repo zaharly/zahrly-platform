@@ -1,146 +1,94 @@
-import { useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { RefreshCw, Database, ExternalLink } from 'lucide-react'
 import { PageHeader } from '../../components/layout/PageHeader'
 import { StatusBadge } from '../../components/status/StatusBadge'
 import { ProgressBar } from '../../components/status/ProgressBar'
 import { DataTable } from '../../components/tables/DataTable'
 import { DetailDrawer } from '../../components/drawers/DetailDrawer'
 import { Button } from '../../lib/shadcn/button'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../lib/shadcn/select'
-import { ARCHIVE_RECORDS, ARCHIVE_SEASON_SUMMARY } from '../../mock/data/archive'
-import type { ArchiveSeasonRecord } from '../../types/domain'
-import { VERIFIED_ARCHIVE_CAMPAIGN } from '../../integrations/archiveVerified'
-import { CheckCircle2, Database, ExternalLink } from 'lucide-react'
-
-const ALL = '__all__'
+import { fetchArchiveLive, type ArchiveCampaignLive } from '../../integrations/archiveLive'
 
 export default function ArchivePage() {
-  const [seasonFilter, setSeasonFilter] = useState(ALL)
-  const [selected, setSelected] = useState<ArchiveSeasonRecord | null>(null)
+  const [campaigns, setCampaigns] = useState<ArchiveCampaignLive[]>([])
+  const [selected, setSelected] = useState<ArchiveCampaignLive | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
-  const filtered = useMemo(
-    () => ARCHIVE_RECORDS.filter((r) => seasonFilter === ALL || r.season === seasonFilter),
-    [seasonFilter]
-  )
+  async function load() {
+    setLoading(true)
+    setError(null)
+    try {
+      const snapshot = await fetchArchiveLive()
+      setCampaigns(snapshot.campaigns)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Unable to load live archive data')
+    } finally {
+      setLoading(false)
+    }
+  }
 
-  const verification = VERIFIED_ARCHIVE_CAMPAIGN
+  useEffect(() => { void load() }, [])
+
+  const stats = useMemo(() => ({
+    total: campaigns.length,
+    succeeded: campaigns.filter((c) => c.status === 'SUCCEEDED').length,
+    active: campaigns.filter((c) => ['READY', 'QUEUED', 'RUNNING'].includes(c.status)).length,
+    failed: campaigns.filter((c) => c.status === 'FAILED').length,
+  }), [campaigns])
 
   const columns = useMemo(() => [
     { accessorKey: 'season', header: 'Season' },
-    { accessorKey: 'country', header: 'Country' },
-    { accessorKey: 'league', header: 'League' },
-    { accessorKey: 'dataset', header: 'Dataset' },
-    { accessorKey: 'rowCount', header: 'Rows', cell: ({ getValue }: any) => getValue<number>().toLocaleString() },
-    { accessorKey: 'completenessPct', header: 'Completeness', cell: ({ getValue }: any) => <ProgressBar value={getValue<number>()} size="sm" /> },
-    { accessorKey: 'status', header: 'Status', cell: ({ getValue }: any) => <StatusBadge status={getValue<string>()} /> },
-    { accessorKey: 'createdAt', header: 'Created', cell: ({ getValue }: any) => new Date(getValue<string>()).toLocaleDateString() },
+    { accessorKey: 'dataset_type', header: 'Dataset' },
+    { accessorKey: 'provider', header: 'Provider' },
+    { accessorKey: 'status', header: 'Campaign', cell: ({ getValue }: any) => <StatusBadge status={getValue<string>()} /> },
+    { accessorKey: 'worker_status', header: 'Worker', cell: ({ getValue }: any) => <StatusBadge status={String(getValue<string>() ?? '—')} dense /> },
+    { accessorKey: 'completeness_score', header: 'Completeness', cell: ({ getValue }: any) => <ProgressBar value={Number(getValue<number | null>() ?? 0) * 100} size="sm" /> },
+    { accessorKey: 'row_count', header: 'Rows', cell: ({ getValue }: any) => Number(getValue<number | null>() ?? 0).toLocaleString() },
+    { accessorKey: 'created_at', header: 'Created', cell: ({ getValue }: any) => new Date(getValue<string>()).toLocaleString() },
   ], [])
 
   return (
-    <div className="flex flex-col gap-density-lg">
+    <div className="flex flex-col gap-density-xl">
       <PageHeader
         title="Archive & Retrieval"
-        description="Historical archive control and verification. The controls below reflect the archive worker contract; no UI action creates an unsupported job."
+        description="Live archive state backed by Supabase. No mock archive fixtures are used on this page."
+        tag={<StatusBadge status={loading ? 'LOADING' : error ? 'DEGRADED' : 'ACTIVE'} />}
+        actions={<Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>}
       />
 
-      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-        <div className="mb-density-md flex flex-wrap items-start justify-between gap-density-md">
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-foreground">Verified backend archive</h2>
-              <StatusBadge status="SUCCEEDED" dense />
-            </div>
-            <p className="mt-1 text-sm text-muted-foreground">Last verified run of the real archive worker and S3 object.</p>
-          </div>
-          <div className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-            <CheckCircle2 className="h-4 w-4 text-success" />
-            Verified {new Date(verification.verifiedAt).toLocaleString()}
-          </div>
-        </div>
+      {error && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
 
-        <div className="grid grid-cols-2 gap-density-md md:grid-cols-4">
-          <Fact label="Campaign" value={verification.campaignId} mono />
-          <Fact label="Season" value={String(verification.season)} />
-          <Fact label="Dataset" value={verification.datasetType} />
-          <Fact label="Worker job" value={verification.workerJobId} mono />
-          <Fact label="Manifest" value={verification.manifestId} mono />
-          <Fact label="Rows" value={verification.rowCount.toLocaleString()} />
-          <Fact label="Completeness" value={`${(verification.completenessScore * 100).toFixed(0)}%`} />
-          <Fact label="Attempts" value={String(verification.attempts)} />
-        </div>
-
-        <div className="mt-density-md grid gap-density-md md:grid-cols-2">
-          <div className="rounded-md border border-border p-density-md">
-            <div className="mb-1 text-xs uppercase text-muted-foreground">S3 object</div>
-            <div className="break-all font-mono text-xs text-foreground">{verification.objectUri}</div>
-          </div>
-          <div className="rounded-md border border-border p-density-md">
-            <div className="mb-1 text-xs uppercase text-muted-foreground">SHA-256 checksum</div>
-            <div className="break-all font-mono text-xs text-foreground">{verification.checksum}</div>
-          </div>
-        </div>
-
-        <div className="mt-density-md flex flex-wrap items-center gap-density-sm">
-          <a
-            href={verification.objectUri}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-8 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm font-medium transition-colors hover:bg-muted"
-          >
-            <ExternalLink className="h-3.5 w-3.5" /> Object URI
-          </a>
-          <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
-            <Database className="h-3.5 w-3.5" /> Queue: {verification.queueName} · Worker: {verification.workerStatus}
-          </span>
-        </div>
-      </section>
-
-      <div className="grid grid-cols-2 gap-density-sm sm:grid-cols-4 lg:grid-cols-7">
-        {ARCHIVE_SEASON_SUMMARY.map((s) => (
-          <button
-            key={s.season}
-            onClick={() => setSeasonFilter(s.season === seasonFilter ? ALL : s.season)}
-            className={`flex flex-col gap-1.5 rounded-md border p-density-sm text-left transition-colors ${seasonFilter === s.season ? 'border-foreground/40 bg-muted' : 'border-border hover:bg-muted/40'}`}
-          >
-            <span className="text-sm font-semibold text-foreground">{s.season}</span>
-            <StatusBadge status={s.status} dense />
-            <ProgressBar value={s.completenessPct} size="sm" showValue={false} />
-            <span className="text-[11px] text-muted-foreground">{s.recordCount} manifests</span>
-          </button>
-        ))}
+      <div className="grid grid-cols-2 gap-density-md md:grid-cols-4">
+        <Fact label="Campaigns" value={stats.total.toLocaleString()} />
+        <Fact label="Succeeded" value={stats.succeeded.toLocaleString()} />
+        <Fact label="Active" value={stats.active.toLocaleString()} />
+        <Fact label="Failed" value={stats.failed.toLocaleString()} />
       </div>
 
-      <DataTable
-        columns={columns}
-        data={filtered}
-        searchPlaceholder="Search archive (country, league, dataset)…"
-        onRowClick={setSelected}
-        pageSize={10}
-        toolbarExtra={
-          <Select value={seasonFilter} onValueChange={setSeasonFilter}>
-            <SelectTrigger className="w-40"><SelectValue placeholder="Season" /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value={ALL}>All seasons</SelectItem>
-              {ARCHIVE_SEASON_SUMMARY.map((s) => <SelectItem key={s.season} value={s.season}>{s.season}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        }
-      />
+      <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+        <div className="mb-density-md flex items-center gap-density-sm"><Database className="h-4 w-4" /><h2 className="text-base font-semibold">Real archive campaigns</h2></div>
+        <DataTable columns={columns} data={campaigns} searchPlaceholder="Search campaigns…" onRowClick={setSelected} pageSize={12} />
+      </section>
 
       <DetailDrawer
         open={!!selected}
-        onOpenChange={(o) => !o && setSelected(null)}
-        title={selected ? `${selected.league} — ${selected.season}` : ''}
-        description={selected?.dataset}
+        onOpenChange={(open) => !open && setSelected(null)}
+        title={selected ? `Season ${selected.season} · ${selected.dataset_type}` : ''}
+        description={selected?.campaign_id}
       >
         {selected && (
           <div className="flex flex-col gap-density-md text-sm">
-            <Row label="Manifest ID" value={selected.manifestId} />
-            <Row label="Checksum" value={<span className="font-mono text-xs">{selected.checksum}</span>} />
-            <Row label="Row count" value={selected.rowCount.toLocaleString()} />
-            <Row label="Object URI" value={<span className="break-all font-mono text-xs">{selected.objectUri}</span>} />
-            <Row label="Completeness" value={<ProgressBar value={selected.completenessPct} size="sm" />} />
-            <Row label="Status" value={<StatusBadge status={selected.status} />} />
-            <Row label="Created" value={new Date(selected.createdAt).toLocaleString()} />
+            <Row label="Campaign status" value={<StatusBadge status={selected.status} />} />
+            <Row label="Worker status" value={<StatusBadge status={String(selected.worker_status ?? '—')} />} />
+            <Row label="Provider" value={selected.provider} />
+            <Row label="Scope" value={selected.scope_state} />
+            <Row label="Completeness" value={`${(Number(selected.completeness_score ?? 0) * 100).toFixed(2)}%`} />
+            <Row label="Rows" value={Number(selected.row_count ?? 0).toLocaleString()} />
+            <Row label="Manifest" value={<span className="font-mono text-xs break-all">{selected.manifest_id ?? '—'}</span>} />
+            <Row label="Checksum" value={<span className="font-mono text-xs break-all">{selected.checksum ?? '—'}</span>} />
+            <Row label="Object URI" value={<span className="font-mono text-xs break-all">{selected.object_uri ?? '—'}</span>} />
+            <Row label="Queue" value={selected.queue_name ?? '—'} />
+            {selected.object_uri && <a className="inline-flex items-center gap-1 text-sm font-medium hover:underline" href={selected.object_uri} target="_blank" rel="noreferrer">Open object <ExternalLink className="h-3.5 w-3.5" /></a>}
           </div>
         )}
       </DetailDrawer>
@@ -148,20 +96,10 @@ export default function ArchivePage() {
   )
 }
 
-function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return (
-    <div>
-      <div className="mb-1 text-xs uppercase text-muted-foreground">{label}</div>
-      <div className={`text-sm text-foreground ${mono ? 'break-all font-mono text-xs' : 'font-medium'}`}>{value}</div>
-    </div>
-  )
+function Fact({ label, value }: { label: string; value: string }) {
+  return <div className="rounded-lg border border-border bg-card p-density-md"><div className="text-xs uppercase text-muted-foreground">{label}</div><div className="mt-1 text-2xl font-semibold">{value}</div></div>
 }
 
 function Row({ label, value }: { label: string; value: ReactNode }) {
-  return (
-    <div className="flex flex-col gap-1 border-b border-border/60 pb-density-sm">
-      <span className="text-xs uppercase text-muted-foreground">{label}</span>
-      <span className="text-foreground">{value}</span>
-    </div>
-  )
+  return <div className="flex flex-col gap-1 border-b border-border/60 pb-density-sm"><span className="text-xs uppercase text-muted-foreground">{label}</span><span>{value}</span></div>
 }

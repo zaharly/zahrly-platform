@@ -44,20 +44,21 @@ def resolve_archive_window(conn, job: dict[str, Any], document: dict[str, Any]) 
     if dates:
         return min(dates), max(dates)
 
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            select pcs.start_date, pcs.end_date
-              from public.provider_catalog_seasons pcs
-             where pcs.provider='api-football'
-               and pcs.competition_id=%s
-               and pcs.season=%s
-             order by pcs.updated_at desc
-             limit 1
-            """,
-            (job["league_id"], job["season"]),
-        )
-        row = cur.fetchone()
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select pcs.start_date, pcs.end_date
+                  from public.provider_catalog_seasons pcs
+                 where pcs.provider='api-football'
+                   and pcs.competition_id=%s
+                   and pcs.season=%s
+                 order by pcs.updated_at desc
+                 limit 1
+                """,
+                (job["league_id"], job["season"]),
+            )
+            row = cur.fetchone()
     if not row:
         return None, None
     start_date: date | None = row["start_date"]

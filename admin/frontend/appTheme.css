@@ -1,0 +1,38 @@
+/* ZAHRLY admin console — status color extensions layered on top of the base theme.
+   Additive tokens + utility classes used to express operational status
+   (healthy / warning / critical / info / model) consistently in both color modes. */
+
+:root {
+  --info: 199 89% 42%;
+  --info-foreground: 0 0% 100%;
+  --model: 262 60% 50%;
+  --model-foreground: 0 0% 100%;
+  --surface-sunken: 240 10% 96%;
+}
+
+.dark {
+  --info: 199 89% 62%;
+  --info-foreground: 210 40% 8%;
+  --model: 262 83% 74%;
+  --model-foreground: 260 40% 10%;
+  --surface-sunken: 240 6% 8%;
+}
+
+.zc-chip-success { background-color: hsl(var(--success) / 0.14); color: hsl(var(--success)); border-color: hsl(var(--success) / 0.32); }
+.zc-chip-warning { background-color: hsl(var(--warning) / 0.14); color: hsl(var(--warning)); border-color: hsl(var(--warning) / 0.32); }
+.zc-chip-critical { background-color: hsl(var(--destructive) / 0.14); color: hsl(var(--destructive)); border-color: hsl(var(--destructive) / 0.32); }
+.zc-chip-info { background-color: hsl(var(--info) / 0.14); color: hsl(var(--info)); border-color: hsl(var(--info) / 0.32); }
+.zc-chip-model { background-color: hsl(var(--model) / 0.14); color: hsl(var(--model)); border-color: hsl(var(--model) / 0.32); }
+.zc-chip-neutral { background-color: hsl(var(--secondary)); color: hsl(var(--secondary-foreground)); border-color: hsl(var(--border)); }
+.zc-chip-muted { background-color: hsl(var(--muted)); color: hsl(var(--muted-foreground)); border-color: hsl(var(--border)); }
+
+.zc-dot-success { background-color: hsl(var(--success)); }
+.zc-dot-warning { background-color: hsl(var(--warning)); }
+.zc-dot-critical { background-color: hsl(var(--destructive)); }
+.zc-dot-info { background-color: hsl(var(--info)); }
+.zc-dot-model { background-color: hsl(var(--model)); }
+.zc-dot-neutral { background-color: hsl(var(--foreground) / 0.5); }
+.zc-dot-muted { background-color: hsl(var(--muted-foreground)); }
+
+.zc-text-info { color: hsl(var(--info)); }
+.zc-text-model { color: hsl(var(--model)); }

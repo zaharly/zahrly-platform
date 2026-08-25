@@ -1,0 +1,27 @@
+import type { FeatureFlag, PolicySetting } from '../../types/domain'
+
+export const POLICY_SETTINGS: PolicySetting[] = [
+  { id: 'pol-sim', name: 'Simulation policy', category: 'Simulation', value: 'Routine: 10k cap · Final Lock: 20k cap · Research: 25k cap', policyVersion: 'sim-policy-v6', lastChanged: '2026-08-01T00:00:00Z', changedBy: 'Elena Fischer', effectiveAt: '2026-08-02T00:00:00Z' },
+  { id: 'pol-coldstart', name: 'Cold-start policy', category: 'Model', value: 'Minimum 200 fixtures per league before baseline eligibility', policyVersion: 'coldstart-v3', lastChanged: '2026-07-15T00:00:00Z', changedBy: 'Elena Fischer', effectiveAt: '2026-07-16T00:00:00Z' },
+  { id: 'pol-value', name: 'Value / EV policy', category: 'Odds', value: 'Minimum edge 2.5% over closing-line benchmark', policyVersion: 'value-policy-v2', lastChanged: '2026-06-20T00:00:00Z', changedBy: 'Marcus Rossi', effectiveAt: '2026-06-21T00:00:00Z' },
+  { id: 'pol-provider', name: 'Provider policy', category: 'Providers', value: 'API-Football primary, PropLine secondary, OddsHub fallback', policyVersion: 'provider-policy-v5', lastChanged: '2026-08-10T00:00:00Z', changedBy: 'Priya Bennett', effectiveAt: '2026-08-11T00:00:00Z' },
+  { id: 'pol-quota', name: 'Quota reserve policy', category: 'Providers', value: 'Rolling 30% · Repair 10% · Backfill 60%', policyVersion: 'quota-policy-v4', lastChanged: '2026-08-05T00:00:00Z', changedBy: 'Priya Bennett', effectiveAt: '2026-08-06T00:00:00Z' },
+  { id: 'pol-queue', name: 'Queue policy', category: 'Workers & Pipelines', value: 'Max 3 retries, exponential backoff 30s base', policyVersion: 'queue-policy-v3', lastChanged: '2026-07-22T00:00:00Z', changedBy: 'Kenji Petrov', effectiveAt: '2026-07-23T00:00:00Z' },
+  { id: 'pol-retry', name: 'Retry classification policy', category: 'Workers & Pipelines', value: 'Transient/data/provider/code failure classes', policyVersion: 'retry-policy-v2', lastChanged: '2026-07-22T00:00:00Z', changedBy: 'Kenji Petrov', effectiveAt: '2026-07-23T00:00:00Z' },
+  { id: 'pol-archive', name: 'Archive policy', category: 'Archive', value: 'Cold storage after 90 days, checksum verified nightly', policyVersion: 'archive-policy-v3', lastChanged: '2026-06-01T00:00:00Z', changedBy: 'Victor Haddad', effectiveAt: '2026-06-02T00:00:00Z' },
+  { id: 'pol-semantics', name: 'Market semantics validation', category: 'Markets', value: 'Consistency gates + OOS quality >= moderate required for production', policyVersion: 'semantics-policy-v4', lastChanged: '2026-08-12T00:00:00Z', changedBy: 'Nadia Alves', effectiveAt: '2026-08-13T00:00:00Z' },
+  { id: 'pol-readmodel', name: 'Read-model version', category: 'System', value: 'prediction_read_models schema v7', policyVersion: 'readmodel-v7', lastChanged: '2026-07-01T00:00:00Z', changedBy: 'Kenji Petrov', effectiveAt: '2026-07-02T00:00:00Z' },
+  { id: 'pol-cache', name: 'Cache TTL policy', category: 'System', value: 'Prediction read model 60s · Odds 15s · Archive metadata 1h', policyVersion: 'cache-policy-v2', lastChanged: '2026-07-01T00:00:00Z', changedBy: 'Kenji Petrov', effectiveAt: '2026-07-02T00:00:00Z' },
+  { id: 'pol-twoperson', name: 'Two-person approval policy', category: 'Governance', value: 'Required for model-family changes and DR operations', policyVersion: 'governance-policy-v2', lastChanged: '2026-05-18T00:00:00Z', changedBy: 'Talia Larsen', effectiveAt: '2026-05-19T00:00:00Z' },
+]
+
+export const FEATURE_FLAGS: FeatureFlag[] = [
+  { id: 'ff-shadow-auto', name: 'Auto-start shadow on candidate training completion', description: 'Automatically enrolls a completed candidate into shadow evaluation.', enabled: true, environment: 'production', lastChanged: '2026-08-01T00:00:00Z', changedBy: 'Elena Fischer' },
+  { id: 'ff-combo-markets', name: 'Combination markets in production', description: 'Exposes combination market family to the recommendation surface.', enabled: true, environment: 'production', lastChanged: '2026-07-19T00:00:00Z', changedBy: 'Nadia Alves' },
+  { id: 'ff-player-props', name: 'Player prop markets', description: 'Enables player prop market family (currently experimental).', enabled: false, environment: 'staging', lastChanged: '2026-08-09T00:00:00Z', changedBy: 'Nadia Alves' },
+  { id: 'ff-oddshub', name: 'OddsHub as tertiary price source', description: 'Adds OddsHub as a fallback price source when PropLine is degraded.', enabled: true, environment: 'production', lastChanged: '2026-08-22T00:00:00Z', changedBy: 'Marcus Rossi' },
+  { id: 'ff-two-person', name: 'Two-person approval enforcement', description: 'Requires second approver for model-family promotions.', enabled: true, environment: 'all', lastChanged: '2026-05-19T00:00:00Z', changedBy: 'Talia Larsen' },
+  { id: 'ff-repair-autoretry', name: 'Repair queue auto-retry for transient failures', description: 'Automatically retries REPAIR_QUEUE jobs classified as transient.', enabled: true, environment: 'production', lastChanged: '2026-07-23T00:00:00Z', changedBy: 'Kenji Petrov' },
+  { id: 'ff-hierarchical-bayes', name: 'Hierarchical Bayes model family (research)', description: 'Enables v2.0 research model family for internal evaluation only.', enabled: false, environment: 'staging', lastChanged: '2026-08-21T00:00:00Z', changedBy: 'Elena Fischer' },
+  { id: 'ff-geo-strict', name: 'Strict geo fail-closed default', description: 'Unresolved jurisdictions default to NO_CTA instead of best-effort.', enabled: true, environment: 'all', lastChanged: '2026-06-01T00:00:00Z', changedBy: 'Talia Larsen' },
+]

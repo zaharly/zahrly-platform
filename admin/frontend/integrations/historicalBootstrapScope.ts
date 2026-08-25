@@ -27,6 +27,25 @@ export interface HistoricalBootstrapDatasetPlan {
   scope_count: number
 }
 
+export interface HistoricalBootstrapQuota {
+  daily_budget?: number
+  quota_used?: number
+  backfill_budget?: number
+  protected_production_budget?: number
+  window_start?: string
+  window_end?: string
+  reserve_policy_version?: string | null
+}
+
+export interface HistoricalBootstrapCampaignInfo {
+  campaign_id?: string
+  status?: string
+  planned_start_at?: string
+  minimum_target_end_at?: string
+  requests_used?: number
+  completeness_score?: number | null
+}
+
 export interface HistoricalBootstrapScope {
   season: number
   countries: HistoricalBootstrapCountryScope[]
@@ -35,6 +54,8 @@ export interface HistoricalBootstrapScope {
   enabled_league_count: number
   available_league_count: number
   dataset_plan: HistoricalBootstrapDatasetPlan[]
+  quota: HistoricalBootstrapQuota
+  campaign: HistoricalBootstrapCampaignInfo
 }
 
 export async function fetchHistoricalBootstrapScope(season: number): Promise<HistoricalBootstrapScope> {
@@ -48,5 +69,7 @@ export async function fetchHistoricalBootstrapScope(season: number): Promise<His
     enabled_league_count: 0,
     available_league_count: 0,
     dataset_plan: [],
+    quota: {},
+    campaign: {},
   }) as HistoricalBootstrapScope
 }

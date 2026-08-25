@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { ChevronsLeft, ChevronsRight } from 'lucide-react'
+import { ChevronsLeft, ChevronsRight, Lock } from 'lucide-react'
 import { cn } from '../../lib/shadcn/utils'
 import { NAV_GROUPS } from './navConfig'
 import { useNavBadges } from '../../hooks/useNavBadges'
@@ -46,8 +46,56 @@ export function Sidebar() {
               )}
               <ul className="flex flex-col gap-0.5">
                 {group.items.map((item) => {
-                  const active = isActive(location.pathname, item.path)
+                  const active = !item.locked && isActive(location.pathname, item.path)
                   const badge = item.badgeKey ? badges[item.badgeKey] : undefined
+
+                  const content = (
+                    <>
+                      <item.icon className={cn(
+                        'h-4 w-4 shrink-0',
+                        active ? 'text-foreground' : item.locked ? 'text-muted-foreground/60' : 'text-muted-foreground group-hover:text-foreground'
+                      )} />
+                      {!collapsed && <span className={cn('truncate', item.locked && 'text-muted-foreground/70')}>{item.label}</span>}
+                      {!collapsed && item.locked && <Lock className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground/70" aria-label="Locked" />}
+                      {!collapsed && !item.locked && !!badge && (
+                        <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
+                          {badge}
+                        </span>
+                      )}
+                      {collapsed && !!badge && !item.locked && (
+                        <span className="absolute ml-5 mt-[-14px] inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-destructive text-[9px] font-semibold text-destructive-foreground">
+                          {badge}
+                        </span>
+                      )}
+                      {collapsed && item.locked && <Lock className="absolute ml-5 mt-5 h-3 w-3 text-muted-foreground/70" aria-label="Locked" />}
+                    </>
+                  )
+
+                  if (item.locked) {
+                    return (
+                      <li key={item.path} className="relative">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled
+                              aria-disabled="true"
+                              className={cn(
+                                'group flex w-full cursor-not-allowed items-center gap-2.5 rounded-md px-density-md py-2 text-sm font-medium opacity-80',
+                                collapsed && 'justify-center px-0'
+                              )}
+                            >
+                              {content}
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side={collapsed ? 'right' : 'bottom'}>
+                            <div className="max-w-xs">{item.lockReason ?? 'Locked — backend not implemented yet.'}</div>
+                          </TooltipContent>
+                        </Tooltip>
+                      </li>
+                    )
+                  }
+
                   const link = (
                     <Link
                       to={item.path}
@@ -57,20 +105,10 @@ export function Sidebar() {
                         collapsed && 'justify-center px-0'
                       )}
                     >
-                      <item.icon className={cn('h-4 w-4 shrink-0', active ? 'text-foreground' : 'text-muted-foreground group-hover:text-foreground')} />
-                      {!collapsed && <span className="truncate">{item.label}</span>}
-                      {!collapsed && !!badge && (
-                        <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
-                          {badge}
-                        </span>
-                      )}
-                      {collapsed && !!badge && (
-                        <span className="absolute ml-5 mt-[-14px] inline-flex h-3.5 w-3.5 items-center justify-center rounded-full bg-destructive text-[9px] font-semibold text-destructive-foreground">
-                          {badge}
-                        </span>
-                      )}
+                      {content}
                     </Link>
                   )
+
                   return (
                     <li key={item.path} className="relative">
                       {collapsed ? (

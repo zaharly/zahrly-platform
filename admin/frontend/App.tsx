@@ -5,7 +5,7 @@ import { StoreProvider } from './state/StoreContext'
 
 import Dashboard from './pages/Dashboard'
 import IncidentCenter from './pages/incidents/IncidentCenter'
-import HistoricalBootstrap from './pages/bootstrap/HistoricalBootstrapLive'
+import HistoricalBootstrap from './pages/bootstrap/ProviderSeasonControl'
 import Countries from './pages/data/Countries'
 import Leagues from './pages/data/Leagues'
 import LeagueDetail from './pages/data/LeagueDetail'

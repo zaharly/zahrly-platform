@@ -7,6 +7,9 @@ import AdminAuthGate from './components/auth/AdminAuthGate'
 import Dashboard from './pages/Dashboard'
 import IncidentCenter from './pages/incidents/IncidentCenter'
 import HistoricalBootstrap from './pages/bootstrap/HistoricalBootstrapLive'
+import SeasonCampaigns from './pages/bootstrap/SeasonCampaigns'
+import ProviderCatalog from './pages/providers/ProviderCatalog'
+import IngestionControls from './pages/data/IngestionControls'
 import Countries from './pages/data/Countries'
 import Leagues from './pages/data/Leagues'
 import LeagueDetail from './pages/data/LeagueDetail'
@@ -45,6 +48,9 @@ export default function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/incidents" element={<IncidentCenter />} />
             <Route path="/bootstrap" element={<HistoricalBootstrap />} />
+            <Route path="/bootstrap/campaigns" element={<SeasonCampaigns />} />
+            <Route path="/providers/catalog" element={<ProviderCatalog />} />
+            <Route path="/data/ingestion-controls" element={<IngestionControls />} />
             <Route path="/data/countries" element={<Countries />} />
             <Route path="/data/leagues" element={<Leagues />} />
             <Route path="/data/leagues/:id" element={<LeagueDetail />} />

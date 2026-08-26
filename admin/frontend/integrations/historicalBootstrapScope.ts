@@ -25,6 +25,13 @@ export interface HistoricalBootstrapDatasetPlan {
   execution_supported: boolean
   available_count: number
   scope_count: number
+  total_count: number
+  processed_count: number
+  succeeded_count: number
+  failed_count: number
+  remaining_count: number
+  priority?: number | null
+  dependency_keys?: string[] | null
 }
 
 export interface HistoricalBootstrapQuota {

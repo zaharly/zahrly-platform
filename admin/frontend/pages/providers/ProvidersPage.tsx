@@ -1,97 +1,53 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Gauge, ServerCrash, Timer } from 'lucide-react'
+import type { ColumnDef } from '@tanstack/react-table'
 import { PageHeader } from '../../components/layout/PageHeader'
-import { MetricCard } from '../../components/dashboard/MetricCard'
-import { ProgressBar } from '../../components/status/ProgressBar'
-import { HealthIndicator } from '../../components/status/HealthIndicator'
 import { StatusBadge } from '../../components/status/StatusBadge'
+import { HealthIndicator } from '../../components/status/HealthIndicator'
+import { ProgressBar } from '../../components/status/ProgressBar'
+import { Sparkline } from '../../components/dashboard/Sparkline'
+import { MetricCard } from '../../components/dashboard/MetricCard'
+import { DataTable } from '../../components/tables/DataTable'
+import { DetailDrawer } from '../../components/drawers/DetailDrawer'
+import { ConfirmDialog } from '../../components/dialogs/ConfirmDialog'
+import { OpenIncidentDialog } from '../../components/dialogs/OpenIncidentDialog'
+import { ControlledReplayWizard } from '../../components/dialogs/ControlledReplayWizard'
 import { Tabs, TabsList, TabsTrigger } from '../../lib/shadcn/tabs'
-import { fetchProviderSnapshot, type AdminProvider } from '../../lib/adminLive'
+import { Button } from '../../lib/shadcn/button'
+import { toast } from '../../lib/shadcn/sonner'
+import { useProviders, useProviderById, useSchemaDriftEvents, useProviderConflicts, useLeagues, useStoreActions } from '../../state/StoreContext'
+import type { SchemaDriftEvent, ProviderConflict } from '../../types/domain'
+import { ShieldOff, Gauge, Timer, ServerCrash, AlertTriangle, FileSearch, Layers, FileCog, Eye, CheckCircle2, Repeat } from 'lucide-react'
 
 const TABS = [
   { path: '/providers', value: 'overview', label: 'Overview' },
   { path: '/providers/api-football', value: 'api-football', label: 'API-Football' },
+  { path: '/providers/propline', value: 'propline', label: 'PropLine' },
+  { path: '/providers/odds', value: 'odds', label: 'Odds / Prices' },
+  { path: '/providers/capabilities', value: 'capabilities', label: 'Capabilities' },
+  { path: '/providers/schema-drift', value: 'schema-drift', label: 'Schema Changes' },
+  { path: '/providers/conflicts', value: 'conflicts', label: 'Conflicts' },
 ]
 
-function ProviderCard({ provider }: { provider: AdminProvider }) {
-  const quotaMax = provider.daily_budget ?? 0
-  return (
-    <div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="text-sm font-semibold">{provider.provider}</div>
-          <div className="mt-1 text-xs text-muted-foreground">Observed {new Date(provider.observed_at).toLocaleString()}</div>
-        </div>
-        <HealthIndicator status={provider.status} label={provider.status} size="sm" />
-      </div>
-      <div className="mt-density-lg">
-        <ProgressBar label="Quota used" value={provider.quota_used} max={quotaMax} showValue={false} tone={provider.quota_pct !== null && provider.quota_pct >= 90 ? 'critical' : 'info'} />
-        <div className="mt-1 text-xs text-muted-foreground">{provider.quota_used.toLocaleString()} / {quotaMax.toLocaleString()} requests ({provider.quota_pct ?? 0}%)</div>
-      </div>
-      <div className="mt-density-md grid grid-cols-2 gap-2 text-xs text-muted-foreground">
-        <span>Backfill budget: {provider.backfill_budget.toLocaleString()}</span>
-        <span>Protected budget: {provider.protected_production_budget.toLocaleString()}</span>
-        <span>24h requests: {provider.requests_24h}</span>
-        <span>24h failures: {provider.failed_24h}</span>
-      </div>
-    </div>
-  )
-}
-
 export default function ProvidersPage() {
-  const location = useLocation()
-  const navigate = useNavigate()
-  const active = TABS.find((tab) => tab.path === location.pathname)?.value ?? 'overview'
-  const [providers, setProviders] = useState<AdminProvider[]>([])
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let mounted = true
-    fetchProviderSnapshot()
-      .then((data) => mounted && setProviders(data.providers))
-      .catch((e) => mounted && setError(e instanceof Error ? e.message : 'Unable to load provider telemetry'))
-    return () => { mounted = false }
-  }, [])
-
-  const apiFootball = useMemo(() => providers.find((p) => p.provider === 'api-football'), [providers])
-
-  return (
-    <div className="flex flex-col gap-density-lg">
-      <PageHeader title="Provider Operations" description="Live provider telemetry only. Unimplemented provider controls remain locked in the navigation." />
-      <Tabs value={active} onValueChange={(value) => navigate(TABS.find((tab) => tab.value === value)?.path ?? '/providers')}>
-        <TabsList><TabsTrigger value="overview">Overview</TabsTrigger><TabsTrigger value="api-football">API-Football</TabsTrigger></TabsList>
-      </Tabs>
-
-      {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
-      {!error && providers.length === 0 && <div className="rounded-lg border border-border bg-card p-density-lg text-sm text-muted-foreground">No provider telemetry has been recorded yet.</div>}
-
-      {active === 'overview' && (
-        <div className="grid gap-density-md lg:grid-cols-2">{providers.map((provider) => <ProviderCard key={provider.provider} provider={provider} />)}</div>
-      )}
-
-      {active === 'api-football' && apiFootball && (
-        <div className="flex flex-col gap-density-lg">
-          <div className="grid grid-cols-2 gap-density-md md:grid-cols-4">
-            <MetricCard label="Status" value={apiFootball.status} icon={ServerCrash} tone={apiFootball.status === 'healthy' ? 'success' : 'warning'} />
-            <MetricCard label="Daily quota" value={apiFootball.daily_budget?.toLocaleString() ?? '—'} icon={Gauge} />
-            <MetricCard label="Quota used" value={`${apiFootball.quota_pct ?? 0}%`} icon={Gauge} tone={apiFootball.quota_pct !== null && apiFootball.quota_pct >= 90 ? 'critical' : 'info'} />
-            <MetricCard label="Last HTTP status" value={String(apiFootball.last_provider_status ?? '—')} icon={Timer} />
-          </div>
-          <div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
-            <div className="flex items-center justify-between">
-              <div><h2 className="text-base font-semibold">Operational quota state</h2><p className="text-sm text-muted-foreground">Latest snapshot from the provider quota ledger.</p></div>
-              <StatusBadge status={apiFootball.status} dense />
-            </div>
-            <div className="mt-density-lg grid gap-density-md md:grid-cols-3">
-              <div className="rounded-md border border-border p-density-md"><div className="text-xs text-muted-foreground">Backfill budget</div><div className="mt-1 text-lg font-semibold">{apiFootball.backfill_budget.toLocaleString()}</div></div>
-              <div className="rounded-md border border-border p-density-md"><div className="text-xs text-muted-foreground">Protected production budget</div><div className="mt-1 text-lg font-semibold">{apiFootball.protected_production_budget.toLocaleString()}</div></div>
-              <div className="rounded-md border border-border p-density-md"><div className="text-xs text-muted-foreground">Rate remaining</div><div className="mt-1 text-lg font-semibold">{apiFootball.last_rate_remaining ?? '—'}</div></div>
-            </div>
-          </div>
-        </div>
-      )}
-      {active === 'api-football' && !apiFootball && !error && <div className="rounded-lg border border-border bg-card p-density-lg text-sm text-muted-foreground">No API-Football snapshot is available.</div>}
-    </div>
-  )
+  const location = useLocation(); const navigate = useNavigate(); const active = TABS.find((t) => t.path === location.pathname)?.value ?? 'overview'
+  const [quarantineTarget, setQuarantineTarget] = useState<SchemaDriftEvent | null>(null); const actions = useStoreActions()
+  return <div className="flex flex-col gap-density-lg">
+    <PageHeader title="Provider Operations" description="Quota, capability, schema-drift, and conflict resolution across API-Football, PropLine, and secondary price sources." />
+    <Tabs value={active} onValueChange={(v) => navigate(TABS.find((t) => t.value === v)?.path ?? '/providers')}><TabsList className="flex-wrap h-auto">{TABS.map((t) => <TabsTrigger key={t.value} value={t.value}>{t.label}</TabsTrigger>)}</TabsList></Tabs>
+    {active === 'overview' && <OverviewTab />}{active === 'api-football' && <ProviderDeepDive id="api-football" />}{active === 'propline' && <ProviderDeepDive id="propline" />}{active === 'odds' && <ProviderDeepDive id="oddshub" />}{active === 'capabilities' && <CapabilitiesTab />}{active === 'schema-drift' && <SchemaDriftTab onQuarantine={setQuarantineTarget} />}{active === 'conflicts' && <ConflictsTab />}
+    <ConfirmDialog open={!!quarantineTarget} onOpenChange={(o) => !o && setQuarantineTarget(null)} title={`Quarantine ${quarantineTarget?.endpoint}`} actionSummary="Blocks production traffic to this endpoint until the adapter regression suite passes." scope={`${quarantineTarget?.provider} ${quarantineTarget?.endpoint}`} consequences={['Dependent queues fail closed rather than ingesting unvalidated schema changes.','An incident is opened automatically and linked to this endpoint.','Requires adapter regression suite to pass before resuming production traffic.']} confirmLabel="Quarantine endpoint" onConfirm={(reason) => { if (quarantineTarget) actions.quarantineEndpoint(quarantineTarget.id, reason); toast.success('Endpoint quarantined', { description: 'A linked incident was opened automatically.' }) }} />
+  </div>
 }
+
+function OverviewTab() { const providers = useProviders(); return <div className="grid grid-cols-1 gap-density-md lg:grid-cols-3">{providers.map((p) => <div key={p.id} className="flex flex-col gap-density-sm rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><div className="flex items-center justify-between"><span className="font-semibold text-foreground">{p.name}</span><HealthIndicator status={p.status} label={p.status} size="sm" pulse /></div><div className="text-xs text-muted-foreground">{p.plan}</div><ProgressBar label="Quota used" value={p.quotaUsed} max={p.quotaTotal} tone={p.quotaUsed / p.quotaTotal > 0.9 ? 'critical' : 'info'} showValue={false} /><div className="text-xs text-muted-foreground">{p.quotaUsed.toLocaleString()} / {p.quotaTotal.toLocaleString()} requests</div><Sparkline data={p.quotaHistory} color={p.status === 'healthy' ? 'hsl(var(--success))' : 'hsl(var(--warning))'} /><div className="grid grid-cols-2 gap-2 text-xs text-muted-foreground"><span>Latency: {p.latencyMs}ms</span><span>Error rate: {p.errorRatePct}%</span><span>429s: {p.rateLimit429}</span><span>Coverage: {p.coveragePct}%</span></div></div>)}</div> }
+
+function ProviderDeepDive({ id }: { id: string }) { const provider = useProviderById(id); const schemaDriftEvents = useSchemaDriftEvents(); const leagues = useLeagues(); const actions = useStoreActions(); const [incidentOpen, setIncidentOpen] = useState(false); if (!provider) return <p className="text-sm text-muted-foreground">Provider not found.</p>; const relatedDrift = schemaDriftEvents.filter((e) => e.provider === provider.name); const relatedLeagues = leagues.filter((l) => l.providers.includes(provider.name)); return <div className="flex flex-col gap-density-lg"><div className="grid grid-cols-2 gap-density-md md:grid-cols-4"><MetricCard label="Status" value={provider.status} icon={ServerCrash} tone={provider.status === 'healthy' ? 'success' : provider.status === 'degraded' ? 'warning' : 'critical'} /><MetricCard label="Latency" value={`${provider.latencyMs} ms`} icon={Timer} /><MetricCard label="Error rate" value={`${provider.errorRatePct}%`} icon={Gauge} tone={provider.errorRatePct > 3 ? 'critical' : 'success'} /><MetricCard label="Coverage" value={`${provider.coveragePct}%`} /></div><div className="flex flex-wrap gap-density-sm"><Button variant="outline" size="sm" onClick={() => setIncidentOpen(true)}><AlertTriangle className="h-3.5 w-3.5" /> Open incident</Button><Button variant="outline" size="sm" onClick={() => { actions.reviewCoverage(provider.id); toast.info('Coverage review logged') }}><Layers className="h-3.5 w-3.5" /> Review coverage</Button><Button variant="outline" size="sm" onClick={() => { actions.reviewPlanPolicy(provider.id); toast.info('Plan policy review logged') }}><FileCog className="h-3.5 w-3.5" /> Review plan policy</Button></div><div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="mb-density-sm text-base font-semibold text-foreground">Quota burn-down (14-day trend)</h2><Sparkline data={provider.quotaHistory} height={80} color="hsl(var(--chart-2))" /><div className="mt-density-sm text-sm text-muted-foreground">Plan: {provider.plan} · Schema version {provider.schemaVersion} · Last schema check {new Date(provider.lastSchemaCheck).toLocaleString()}</div></div><div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="mb-density-sm text-base font-semibold text-foreground">League coverage</h2><div className="flex flex-wrap gap-1.5">{relatedLeagues.map((l) => <span key={l.id} className="rounded-md border border-border bg-muted/40 px-2 py-1 text-xs">{l.name}</span>)}{relatedLeagues.length === 0 && <span className="text-sm text-muted-foreground">No leagues currently mapped to this provider.</span>}</div></div>{relatedDrift.length > 0 && <div className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm"><h2 className="mb-density-sm text-base font-semibold text-foreground">Recent schema events</h2><ul className="flex flex-col gap-density-sm">{relatedDrift.map((e) => <li key={e.id} className="flex items-center justify-between rounded-md border border-border p-density-sm text-sm"><span>{e.endpoint}</span><div className="flex items-center gap-density-sm"><StatusBadge status={e.status} dense />{e.status !== 'QUARANTINED' && <Button variant="ghost" size="sm" onClick={() => { actions.reviewSchemaChange(e.id); toast.info('Schema change review started') }}>Review</Button>}</div></li>)}</ul></div>}<OpenIncidentDialog open={incidentOpen} onOpenChange={setIncidentOpen} subject={provider.name} onCreate={(payload) => toast.success('Provider incident opened', { description: `${provider.name}: ${payload.description}` })} /></div> }
+
+function CapabilitiesTab() { const leagues = useLeagues(); const columns = useMemo<ColumnDef<(typeof leagues)[number], any>[]>(() => [{ accessorKey: 'name', header: 'League' },{ accessorKey: 'countryName', header: 'Country' },{ accessorKey: 'currentSeason', header: 'Season' },{ id: 'apiFootball', header: 'API-Football', accessorFn: (l) => l.providers.includes('API-Football'), cell: ({ row }) => <StatusBadge status={row.original.providers.includes('API-Football') ? 'ENABLED' : 'DISABLED'} dense /> },{ id: 'propline', header: 'PropLine', accessorFn: (l) => l.providers.includes('PropLine'), cell: ({ row }) => <StatusBadge status={row.original.providers.includes('PropLine') ? 'ENABLED' : 'DISABLED'} dense /> },{ accessorKey: 'marketCoveragePct', header: 'Market coverage', cell: ({ getValue }) => <ProgressBar value={getValue<number>()} size="sm" /> },{ accessorKey: 'oddsCoveragePct', header: 'Odds coverage', cell: ({ getValue }) => <ProgressBar value={getValue<number>()} size="sm" tone="info" /> }], []); return <DataTable columns={columns} data={leagues} searchPlaceholder="Search league capabilities…" pageSize={12} /> }
+
+function SchemaDriftTab({ onQuarantine }: { onQuarantine: (e: SchemaDriftEvent) => void }) { const schemaDriftEvents = useSchemaDriftEvents(); const actions = useStoreActions(); const columns = useMemo<ColumnDef<SchemaDriftEvent, any>[]>(() => [{ accessorKey: 'provider', header: 'Provider' },{ accessorKey: 'endpoint', header: 'Endpoint' },{ accessorKey: 'oldFingerprint', header: 'Old fingerprint' },{ accessorKey: 'newFingerprint', header: 'New fingerprint' },{ accessorKey: 'severity', header: 'Severity', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} tone={getValue<string>() === 'critical' ? 'critical' : getValue<string>() === 'warning' ? 'warning' : 'info'} dense /> },{ accessorKey: 'status', header: 'Status', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} /> },{ accessorKey: 'regressionSuite', header: 'Regression suite', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} tone={getValue<string>() === 'passing' ? 'success' : getValue<string>() === 'failing' ? 'critical' : 'warning'} dense /> },{ accessorKey: 'productionState', header: 'Production state', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} dense /> },{ id: 'actions', header: '', cell: ({ row }) => <div className="flex items-center gap-density-sm">{row.original.status !== 'QUARANTINED' ? <><Button variant="ghost" size="sm" onClick={() => { actions.reviewSchemaChange(row.original.id); toast.info('Schema change review started') }}><FileSearch className="h-3.5 w-3.5" /> Review</Button><Button variant="outline" size="sm" onClick={() => onQuarantine(row.original)}><ShieldOff className="h-3.5 w-3.5" /> Quarantine</Button></> : <span className="text-xs text-muted-foreground">Quarantined</span>}</div> }], [onQuarantine, actions]); return <DataTable columns={columns} data={schemaDriftEvents} searchPlaceholder="Search schema events…" pageSize={12} /> }
+
+function ConflictsTab() { const conflicts = useProviderConflicts(); const actions = useStoreActions(); const [selectedId, setSelectedId] = useState<string | null>(null); const [resolveOpen, setResolveOpen] = useState(false); const [incidentOpen, setIncidentOpen] = useState(false); const [replayOpen, setReplayOpen] = useState(false); const selected = conflicts.find((c) => c.id === selectedId) ?? null; const columns = useMemo<ColumnDef<ProviderConflict, any>[]>(() => [{ accessorKey: 'fixtureLabel', header: 'Fixture' },{ accessorKey: 'field', header: 'Field' },{ accessorKey: 'providerA', header: 'Provider A', cell: ({ row }) => `${row.original.providerA}: ${row.original.valueA}` },{ accessorKey: 'providerB', header: 'Provider B', cell: ({ row }) => `${row.original.providerB}: ${row.original.valueB}` },{ accessorKey: 'timestamp', header: 'Observed at', cell: ({ getValue }) => new Date(getValue<string>()).toLocaleString() },{ accessorKey: 'trustScore', header: 'Trust score', cell: ({ getValue }) => getValue<number>().toFixed(2) },{ accessorKey: 'materialToPrediction', header: 'Material?', cell: ({ getValue }) => <StatusBadge status={getValue<boolean>() ? 'WARNING' : 'NORMAL'} label={getValue<boolean>() ? 'Yes' : 'No'} dense /> },{ accessorKey: 'state', header: 'Resolution state', cell: ({ getValue }) => <StatusBadge status={getValue<string>()} /> }], []); return <div className="flex flex-col gap-density-lg"><DataTable columns={columns} data={conflicts} searchPlaceholder="Search conflicts…" onRowClick={(c) => setSelectedId(c.id)} pageSize={12} /><DetailDrawer open={!!selected} onOpenChange={(o) => !o && setSelectedId(null)} title={selected ? `${selected.field} conflict` : ''} description={selected?.fixtureLabel} footer={selected && <div className="flex flex-wrap justify-end gap-density-sm"><Button variant="outline" onClick={() => { actions.reviewConflict(selected.id); toast.info('Conflict marked reviewed / corroborated') }}><Eye className="h-4 w-4" /> Review</Button><Button variant="outline" onClick={() => setReplayOpen(true)}><Repeat className="h-4 w-4" /> Controlled replay</Button><Button variant="outline" onClick={() => setIncidentOpen(true)}><AlertTriangle className="h-4 w-4" /> Open incident</Button><Button onClick={() => setResolveOpen(true)}><CheckCircle2 className="h-4 w-4" /> Resolve</Button></div>}>{selected && <div className="flex flex-col gap-density-md text-sm"><div className="grid grid-cols-2 gap-density-md"><Fact label="Provider A" value={`${selected.providerA}: ${selected.valueA}`} /><Fact label="Provider B" value={`${selected.providerB}: ${selected.valueB}`} /><Fact label="Observed at" value={new Date(selected.timestamp).toLocaleString()} /><Fact label="Trust score" value={selected.trustScore.toFixed(2)} /><Fact label="Confidence" value={selected.confidence} /><Fact label="Resolution state" value={<StatusBadge status={selected.state} />} /></div><p className="text-xs text-muted-foreground">Source observations cannot be directly overwritten — resolution routes through a reviewed decision and, where needed, a controlled replay.</p></div>}</DetailDrawer>{selected && <ConfirmDialog open={resolveOpen} onOpenChange={setResolveOpen} title="Resolve conflict" actionSummary="Marks the conflict resolved based on the reviewed source observations. Does not overwrite raw source data." scope={`${selected.fixtureLabel} — ${selected.field}`} consequences={['Conflict is marked RESOLVED and removed from the active queue.','A resolution note is recorded in the audit log.']} confirmLabel="Resolve conflict" destructive={false} onConfirm={(reason) => { actions.resolveConflict(selected.id, reason); toast.success('Conflict resolved') }} />}{selected && <OpenIncidentDialog open={incidentOpen} onOpenChange={setIncidentOpen} subject={`${selected.fixtureLabel} — ${selected.field}`} onCreate={(payload) => toast.success('Provider incident opened', { description: payload.description })} />}{selected && <ControlledReplayWizard open={replayOpen} onOpenChange={setReplayOpen} subjectLabel={`${selected.fixtureLabel} — ${selected.field} conflict`} onConfirm={(reason, artifacts) => actions.controlledReplay(selected.fixtureLabel, reason, artifacts)} />}</div> }
+
+function Fact({ label, value }: { label: string; value: ReactNode }) { return <div><div className="text-xs uppercase text-muted-foreground">{label}</div><div className="mt-0.5 font-medium text-foreground">{value}</div></div> }

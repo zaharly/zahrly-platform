@@ -1,0 +1,43 @@
+name: provider-quota-refresh
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: provider-quota-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Build provider worker image
+        run: docker build -f docker/Dockerfile.runtime -t zahrly-provider-worker:quota .
+
+      - name: Fetch live API-Football quota and persist snapshot
+        env:
+          API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
+          PROVIDER_GATEWAY_SECRET: ${{ secrets.PROVIDER_GATEWAY_SECRET }}
+        run: |
+          set -euo pipefail
+          API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
+          PROVIDER_GATEWAY_SECRET="$(printf '%s' "${PROVIDER_GATEWAY_SECRET}" | tr -d '\r\n')"
+          export API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET
+          test -n "${API_FOOTBALL_KEY}"
+          test -n "${PROVIDER_GATEWAY_SECRET}"
+          docker run --rm \
+            -e API_FOOTBALL_KEY \
+            -e PROVIDER_GATEWAY_SECRET \
+            -e PROVIDER_QUOTA_GATEWAY_URL=https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-quota-persistence-v5 \
+            zahrly-provider-worker:quota \
+            python -m workers.provider_gateway.worker > quota_snapshot.json
+          cat quota_snapshot.json

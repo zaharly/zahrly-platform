@@ -116,7 +116,7 @@ export default function HistoricalBootstrapLive() {
     try {
       await startHistoricalCampaign(selectedSeason, selectedSeason)
       toast.success(`Campaign ${displaySeason(selectedSeason)} created`, {
-        description: 'The campaign is ready for preparation. No dataset jobs were started.',
+        description: 'The campaign is ready for preparation. No dataset jobs were started by this UI step.',
       })
       setCreateOpen(false)
       await loadSnapshot()
@@ -149,6 +149,7 @@ export default function HistoricalBootstrapLive() {
     if (detailSeason == null) return
     setStarting(true)
     try {
+      await startHistoricalCampaign(detailSeason, detailSeason)
       const result = await prepareHistoricalSeason(detailSeason, 100)
       toast.success(`Historical ${displaySeason(detailSeason)} started`, {
         description: `${result.jobs_total} dataset jobs prepared from the enabled season scope.`,
@@ -187,7 +188,7 @@ export default function HistoricalBootstrapLive() {
         <PageHeader
           title="Historical Bootstrap"
           description="Manage historical data campaigns and their execution. Dataset details stay inside each campaign."
-          tag={<StatusBadge status={loading ? 'LOADING' : `${seasons.length} CAMPAIGNS`} />}
+          tag={<span className="inline-flex items-center rounded-full border border-border bg-muted px-2.5 py-1 text-[11px] font-semibold text-muted-foreground">{loading ? 'Loading…' : `${seasons.length} campaigns`}</span>}
           actions={<Button onClick={() => setCreateOpen(true)}><Plus className="h-4 w-4" /> Create Campaign</Button>}
         />
 
@@ -321,11 +322,9 @@ function CampaignDetail({
 
       <section className="rounded-xl border border-border bg-card shadow-retool-sm">
         <div className="px-5 py-4">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-sm font-semibold">Campaign Overview</h2>
-              <p className="mt-1 text-xs text-muted-foreground">Only campaign-specific metadata is shown here.</p>
-            </div>
+          <div>
+            <h2 className="text-sm font-semibold">Campaign Overview</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Only campaign-specific metadata is shown here.</p>
           </div>
           <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <InfoMetric label="Campaign ID" value={campaign.campaign_id ?? '—'} mono />
@@ -390,7 +389,7 @@ function CreateCampaignDialog({
       <div className="w-full max-w-lg rounded-xl border border-border bg-card p-5 shadow-2xl">
         <div>
           <h2 id="create-campaign-title" className="text-base font-semibold">Create Campaign</h2>
-          <p className="mt-1 text-xs leading-5 text-muted-foreground">Create a campaign definition first. This does not prepare dataset jobs or start the provider run.</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">Create a campaign definition first. This UI step does not call job preparation.</p>
         </div>
         <div className="mt-5 rounded-lg border border-border bg-background p-4">
           <label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Season</label>

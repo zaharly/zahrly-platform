@@ -1,10 +1,8 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
-import type { ReactNode } from 'react'
 import './appTheme.css'
 import { AppShell } from './components/layout/AppShell'
 import { StoreProvider } from './state/StoreContext'
 import AdminAuthGate from './components/auth/AdminAuthGate'
-import { AdminRouteAvailabilityGate } from './components/layout/AdminRouteAvailabilityGate'
 
 import Dashboard from './pages/Dashboard'
 import IncidentCenter from './pages/incidents/IncidentCenter'
@@ -40,69 +38,65 @@ import AuditLog from './pages/security/AuditLog'
 import Jurisdiction from './pages/security/Jurisdiction'
 import SettingsPage from './pages/settings/SettingsPage'
 
-function AvailabilityRoute({ element }: { element: ReactNode }) {
-  return <AdminRouteAvailabilityGate>{element}</AdminRouteAvailabilityGate>
-}
-
 export default function App() {
   return (
     <AdminAuthGate>
       <StoreProvider>
         <AppShell>
           <Routes>
-            <Route path="/" element={<AvailabilityRoute element={<Dashboard />} />} />
-            <Route path="/incidents" element={<AvailabilityRoute element={<IncidentCenter />} />} />
-            <Route path="/bootstrap" element={<AvailabilityRoute element={<HistoricalBootstrap />} />} />
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/incidents" element={<IncidentCenter />} />
+            <Route path="/bootstrap" element={<HistoricalBootstrap />} />
             <Route path="/bootstrap/campaigns" element={<Navigate to="/bootstrap" replace />} />
-            <Route path="/providers/catalog" element={<AvailabilityRoute element={<ProviderCatalog />} />} />
-            <Route path="/data/ingestion-controls" element={<AvailabilityRoute element={<IngestionControls />} />} />
-            <Route path="/data/countries" element={<AvailabilityRoute element={<Countries />} />} />
-            <Route path="/data/leagues" element={<AvailabilityRoute element={<Leagues />} />} />
-            <Route path="/data/leagues/:id" element={<AvailabilityRoute element={<LeagueDetail />} />} />
-            <Route path="/data/fixtures" element={<AvailabilityRoute element={<Fixtures />} />} />
-            <Route path="/data/fixtures/:id" element={<AvailabilityRoute element={<FixtureDetail />} />} />
-            <Route path="/data/quality" element={<AvailabilityRoute element={<DataQuality />} />} />
-            <Route path="/data/provider-incidents" element={<AvailabilityRoute element={<ProviderIncidents />} />} />
-            <Route path="/data/archive" element={<AvailabilityRoute element={<ArchivePage />} />} />
-            <Route path="/predictions" element={<AvailabilityRoute element={<PredictionMonitor />} />} />
-            <Route path="/predictions/episodes" element={<AvailabilityRoute element={<Episodes />} />} />
-            <Route path="/predictions/evidence" element={<AvailabilityRoute element={<Evidence />} />} />
-            <Route path="/predictions/consistency" element={<AvailabilityRoute element={<Consistency />} />} />
-            <Route path="/predictions/simulation" element={<AvailabilityRoute element={<Simulation />} />} />
-            <Route path="/predictions/:id" element={<AvailabilityRoute element={<PredictionDetail />} />} />
-            <Route path="/markets" element={<AvailabilityRoute element={<Markets />} />} />
-            <Route path="/providers" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/api-football" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/propline" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/odds" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/capabilities" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/schema-drift" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/providers/conflicts" element={<AvailabilityRoute element={<ProvidersPage />} />} />
-            <Route path="/workers/queues" element={<AvailabilityRoute element={<QueuesPage />} />} />
-            <Route path="/workers/jobs" element={<AvailabilityRoute element={<QueuesPage />} />} />
-            <Route path="/workers/scheduler" element={<AvailabilityRoute element={<QueuesPage />} />} />
-            <Route path="/workers/cron" element={<AvailabilityRoute element={<QueuesPage />} />} />
-            <Route path="/workers" element={<AvailabilityRoute element={<WorkersPage />} />} />
-            <Route path="/workers/dlq" element={<AvailabilityRoute element={<DeadLetterQueue />} />} />
-            <Route path="/models" element={<AvailabilityRoute element={<ModelRegistry />} />} />
-            <Route path="/models/active" element={<AvailabilityRoute element={<ModelRegistry />} />} />
-            <Route path="/models/candidates" element={<AvailabilityRoute element={<ModelRegistry />} />} />
-            <Route path="/models/shadow" element={<AvailabilityRoute element={<ShadowTesting />} />} />
-            <Route path="/models/evaluation" element={<AvailabilityRoute element={<Evaluation />} />} />
-            <Route path="/models/calibration" element={<AvailabilityRoute element={<Evaluation />} />} />
-            <Route path="/models/drift" element={<AvailabilityRoute element={<Drift />} />} />
-            <Route path="/models/rollback" element={<AvailabilityRoute element={<Rollback />} />} />
-            <Route path="/security/admins" element={<AvailabilityRoute element={<SecurityPage />} />} />
-            <Route path="/security/roles" element={<AvailabilityRoute element={<SecurityPage />} />} />
-            <Route path="/security/secrets" element={<AvailabilityRoute element={<SecurityPage />} />} />
-            <Route path="/security/rate-limits" element={<AvailabilityRoute element={<SecurityPage />} />} />
-            <Route path="/security/audit" element={<AvailabilityRoute element={<AuditLog />} />} />
-            <Route path="/security/jurisdiction" element={<AvailabilityRoute element={<Jurisdiction />} />} />
-            <Route path="/security/responsible-gambling" element={<AvailabilityRoute element={<Jurisdiction />} />} />
-            <Route path="/settings" element={<AvailabilityRoute element={<SettingsPage />} />} />
-            <Route path="/settings/feature-flags" element={<AvailabilityRoute element={<SettingsPage />} />} />
-            <Route path="/settings/environment" element={<AvailabilityRoute element={<SettingsPage />} />} />
-            <Route path="/settings/docs" element={<AvailabilityRoute element={<SettingsPage />} />} />
+            <Route path="/providers/catalog" element={<ProviderCatalog />} />
+            <Route path="/data/ingestion-controls" element={<IngestionControls />} />
+            <Route path="/data/countries" element={<Countries />} />
+            <Route path="/data/leagues" element={<Leagues />} />
+            <Route path="/data/leagues/:id" element={<LeagueDetail />} />
+            <Route path="/data/fixtures" element={<Fixtures />} />
+            <Route path="/data/fixtures/:id" element={<FixtureDetail />} />
+            <Route path="/data/quality" element={<DataQuality />} />
+            <Route path="/data/provider-incidents" element={<ProviderIncidents />} />
+            <Route path="/data/archive" element={<ArchivePage />} />
+            <Route path="/predictions" element={<PredictionMonitor />} />
+            <Route path="/predictions/episodes" element={<Episodes />} />
+            <Route path="/predictions/evidence" element={<Evidence />} />
+            <Route path="/predictions/consistency" element={<Consistency />} />
+            <Route path="/predictions/simulation" element={<Simulation />} />
+            <Route path="/predictions/:id" element={<PredictionDetail />} />
+            <Route path="/markets" element={<Markets />} />
+            <Route path="/providers" element={<ProvidersPage />} />
+            <Route path="/providers/api-football" element={<ProvidersPage />} />
+            <Route path="/providers/propline" element={<ProvidersPage />} />
+            <Route path="/providers/odds" element={<ProvidersPage />} />
+            <Route path="/providers/capabilities" element={<ProvidersPage />} />
+            <Route path="/providers/schema-drift" element={<ProvidersPage />} />
+            <Route path="/providers/conflicts" element={<ProvidersPage />} />
+            <Route path="/workers/queues" element={<QueuesPage />} />
+            <Route path="/workers/jobs" element={<QueuesPage />} />
+            <Route path="/workers/scheduler" element={<QueuesPage />} />
+            <Route path="/workers/cron" element={<QueuesPage />} />
+            <Route path="/workers" element={<WorkersPage />} />
+            <Route path="/workers/dlq" element={<DeadLetterQueue />} />
+            <Route path="/models" element={<ModelRegistry />} />
+            <Route path="/models/active" element={<ModelRegistry />} />
+            <Route path="/models/candidates" element={<ModelRegistry />} />
+            <Route path="/models/shadow" element={<ShadowTesting />} />
+            <Route path="/models/evaluation" element={<Evaluation />} />
+            <Route path="/models/calibration" element={<Evaluation />} />
+            <Route path="/models/drift" element={<Drift />} />
+            <Route path="/models/rollback" element={<Rollback />} />
+            <Route path="/security/admins" element={<SecurityPage />} />
+            <Route path="/security/roles" element={<SecurityPage />} />
+            <Route path="/security/secrets" element={<SecurityPage />} />
+            <Route path="/security/rate-limits" element={<SecurityPage />} />
+            <Route path="/security/audit" element={<AuditLog />} />
+            <Route path="/security/jurisdiction" element={<Jurisdiction />} />
+            <Route path="/security/responsible-gambling" element={<Jurisdiction />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/settings/feature-flags" element={<SettingsPage />} />
+            <Route path="/settings/environment" element={<SettingsPage />} />
+            <Route path="/settings/docs" element={<SettingsPage />} />
             <Route path="*" element={<Dashboard />} />
           </Routes>
         </AppShell>

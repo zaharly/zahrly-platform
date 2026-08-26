@@ -1,284 +1,68 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Download, RefreshCw, Search, X, ChevronLeft, ChevronRight } from 'lucide-react'
-import { StatusBadge } from '../../components/status/StatusBadge'
+import { Download, RefreshCw, Search, X, ChevronLeft, ChevronRight, CheckCircle2, AlertTriangle, CircleSlash2, Database } from 'lucide-react'
 import { ProgressBar } from '../../components/status/ProgressBar'
-import { DetailDrawer } from '../../components/drawers/DetailDrawer'
 import { Button } from '../../lib/shadcn/button'
 import { Input } from '../../lib/shadcn/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../lib/shadcn/select'
-import {
-  fetchArchiveCampaignOptions,
-  fetchArchiveLive,
-  fetchHistoricalBootstrapSnapshot,
-  type ArchiveCampaignCompetitionOption,
-  type ArchiveCampaignCountryOption,
-  type ArchiveCampaignLive,
-  type ArchiveCampaignOptions,
-  type ArchiveLiveSnapshot,
-  type ArchiveRegisteredSeasonOption,
-  type HistoricalBootstrapSnapshot,
-  type HistoricalSeasonProgress,
-} from '../../integrations/archiveLive'
+import { fetchArchiveCampaignOptions, fetchArchiveLive, fetchArchiveSeasonDetail, type ArchiveCampaignCompetitionOption, type ArchiveCampaignCountryOption, type ArchiveCampaignLive, type ArchiveCampaignOptions, type ArchiveLiveSnapshot, type ArchiveSeasonDetail } from '../../integrations/archiveLive'
 
 const ALL = 'all'
-const PAGE_SIZE = 10
+const PAGE_SIZE = 12
 
 type ArchiveRow = ArchiveCampaignLive & { country_name: string; league_name: string; season_label: string }
-type SeasonCard = {
-  season: number
-  label: string
-  totalJobs: number
-  processedJobs: number
-  archivedJobs: number
-  activeJobs: number
-  failedJobs: number
-  completeness: number
-  status: string
-  providerLeagues: number
-  archiveRecords: number
-}
+type SeasonCard = { season: number; label: string; processed: number; total: number; archived: number; active: number; failed: number; completeness: number; status: string; providerLeagues: number }
 
-function seasonLabel(season?: number | null) {
-  if (season == null) return '—'
-  return `${season}/${String(season + 1).slice(-2)}`
+function seasonLabel(season?: number | null) { return season == null ? '—' : `${season}/${String(season + 1).slice(-2)}` }
+function formatDate(value?: string | null) { return value ? new Date(value).toLocaleString() : '—' }
+function pct(value: number) { return `${Math.max(0, Math.min(100, Number(value) || 0)).toFixed(1)}%` }
+function statusMeta(status: string) {
+  if (status === 'COMPLETE') return { icon: CheckCircle2, cls: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/20 dark:text-emerald-300' }
+  if (status === 'GAPS' || status === 'FAILED') return { icon: CircleSlash2, cls: 'border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/20 dark:text-rose-300' }
+  if (status === 'IN_PROGRESS' || status === 'RUNNING') return { icon: AlertTriangle, cls: 'border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/20 dark:text-amber-300' }
+  return { icon: AlertTriangle, cls: 'border-border bg-muted text-muted-foreground' }
 }
-
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : '—'
-}
-
-function datasetStatus(row: HistoricalSeasonProgress) {
-  if (row.backfill_failed > 0) return 'BLOCKED'
-  if (row.backfill_active > 0) return 'RUNNING'
-  if (row.backfill_jobs > 0 && row.backfill_succeeded >= row.backfill_jobs) return 'READY_FOR_ARCHIVE'
-  if (row.backfill_jobs > 0) return 'QUEUED'
-  return 'READY'
-}
-
-function cardFromHistorical(row: HistoricalSeasonProgress, providerLeagues: number, archiveRecords: number): SeasonCard {
-  const totalJobs = Number(row.backfill_jobs ?? 0)
-  const processedJobs = Number(row.backfill_succeeded ?? 0) + Number(row.backfill_failed ?? 0)
-  const archivedJobs = Number(row.archive_succeeded ?? 0)
-  const completeness = totalJobs > 0 ? Math.max(0, Math.min(100, (archivedJobs / totalJobs) * 100)) : 0
-  return {
-    season: row.season,
-    label: seasonLabel(row.season),
-    totalJobs,
-    processedJobs,
-    archivedJobs,
-    activeJobs: Number(row.backfill_active ?? 0),
-    failedJobs: Number(row.backfill_failed ?? 0),
-    completeness,
-    status: datasetStatus(row),
-    providerLeagues,
-    archiveRecords,
-  }
-}
+function StatusPill({ status }: { status: string }) { const { icon: Icon, cls } = statusMeta(status); return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${cls}`}><Icon className="h-3 w-3" />{status.replace(/_/g, ' ')}</span> }
+function Metric({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) { return <div className="rounded-lg border border-border bg-card p-4"><div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div><div className="mt-1 text-lg font-semibold text-foreground">{value}</div>{hint && <div className="mt-1 text-[10px] text-muted-foreground">{hint}</div>}</div> }
+function Th({ children }: { children: ReactNode }) { return <th className="h-11 px-4 text-left align-middle text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">{children}</th> }
+function Td({ children, className = '' }: { children: ReactNode; className?: string }) { return <td className={`px-4 py-3 align-middle text-xs ${className}`}>{children}</td> }
+function exportCsv(rows: ArchiveRow[]) { const header = ['season','country','league','dataset','rows','completeness','status','created_at']; const lines = rows.map((r) => [r.season_label,r.country_name,r.league_name,r.dataset_type,r.row_count ?? 0,Number(r.completeness_score ?? 0),r.status,r.created_at].map((v) => JSON.stringify(v ?? '')).join(',')); const blob = new Blob([[header.join(','), ...lines].join('\n')], { type: 'text/csv;charset=utf-8' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'archive-records.csv'; a.click(); URL.revokeObjectURL(url) }
 
 export default function ArchivePage() {
   const [snapshot, setSnapshot] = useState<ArchiveLiveSnapshot | null>(null)
-  const [historical, setHistorical] = useState<HistoricalBootstrapSnapshot | null>(null)
   const [options, setOptions] = useState<ArchiveCampaignOptions | null>(null)
-  const [selected, setSelected] = useState<ArchiveRow | null>(null)
+  const [detail, setDetail] = useState<ArchiveSeasonDetail | null>(null)
   const [selectedSeason, setSelectedSeason] = useState<number | null>(null)
   const [query, setQuery] = useState('')
   const [seasonFilter, setSeasonFilter] = useState(ALL)
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
+  const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function load() {
-    setLoading(true)
-    setError(null)
-    try {
-      const [archive, bootstrap, campaignOptions] = await Promise.all([
-        fetchArchiveLive(),
-        fetchHistoricalBootstrapSnapshot(),
-        fetchArchiveCampaignOptions(),
-      ])
-      setSnapshot(archive)
-      setHistorical(bootstrap)
-      setOptions(campaignOptions)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unable to load live archive data')
-    } finally {
-      setLoading(false)
-    }
-  }
-
+  async function openSeason(season: number) { setSelectedSeason(season); setSeasonFilter(String(season)); setPage(1); setDetailLoading(true); try { setDetail(await fetchArchiveSeasonDetail(season)); setError(null) } catch (e) { setDetail(null); setError(e instanceof Error ? e.message : 'Unable to load season archive detail') } finally { setDetailLoading(false) } }
+  async function load() { setLoading(true); setError(null); try { const [archive, campaignOptions] = await Promise.all([fetchArchiveLive(), fetchArchiveCampaignOptions()]); setSnapshot(archive); setOptions(campaignOptions); const seasons = [...new Set([...(archive.seasons ?? []).map((s) => s.season), ...(archive.campaigns ?? []).map((r) => r.season)])].sort((a,b) => b-a); const target = selectedSeason ?? seasons[0]; if (target != null) await openSeason(target) } catch (e) { setError(e instanceof Error ? e.message : 'Unable to load archive data') } finally { setLoading(false) } }
   useEffect(() => { void load() }, [])
   useEffect(() => { setPage(1) }, [query, seasonFilter])
 
-  const countryById = useMemo(() => new Map((options?.countries ?? []).map((row: ArchiveCampaignCountryOption) => [row.id, row])), [options])
-  const competitionById = useMemo(() => new Map((options?.competitions ?? []).map((row: ArchiveCampaignCompetitionOption) => [row.id, row])), [options])
+  const countryById = useMemo(() => new Map((options?.countries ?? []).map((row: ArchiveCampaignCountryOption) => [row.id, row.name])), [options])
+  const competitionById = useMemo(() => new Map((options?.competitions ?? []).map((row: ArchiveCampaignCompetitionOption) => [row.id, row.name])), [options])
+  const rows = useMemo<ArchiveRow[]>(() => (snapshot?.campaigns ?? []).map((campaign) => ({ ...campaign, country_name: countryById.get(campaign.country_id ?? '') ?? campaign.country_id ?? '—', league_name: competitionById.get(campaign.competition_id ?? '') ?? campaign.competition_id ?? '—', season_label: seasonLabel(campaign.season) })), [snapshot, countryById, competitionById])
+  const seasons = useMemo<SeasonCard[]>(() => { const providerRows = options?.registered_seasons ?? []; const bySeason = new Map<number, SeasonCard>(); for (const s of snapshot?.seasons ?? []) bySeason.set(s.season, { season:s.season, label:seasonLabel(s.season), processed:s.succeeded+s.failed, total:s.campaigns, archived:s.succeeded, active:s.active, failed:s.failed, completeness:Number(s.avg_completeness ?? 0), status:s.failed>0?'GAPS':s.active>0?'IN_PROGRESS':s.succeeded>0?'COMPLETE':'PARTIAL', providerLeagues:providerRows.filter((r)=>r.season===s.season).length }); for (const r of rows) if (!bySeason.has(r.season)) bySeason.set(r.season, { season:r.season,label:r.season_label,processed:0,total:0,archived:0,active:0,failed:0,completeness:0,status:'PARTIAL',providerLeagues:providerRows.filter((x)=>x.season===r.season).length }); if (detail && detail.season === selectedSeason && bySeason.has(detail.season)) { const s = bySeason.get(detail.season)!; s.processed=detail.summary.processed_jobs; s.total=detail.summary.total_jobs; s.archived=detail.summary.archived_successes; s.active=detail.summary.active_jobs; s.failed=detail.summary.failed_jobs; s.completeness=detail.summary.archive_completeness*100; s.status=detail.summary.data_status; } return [...bySeason.values()].filter((s)=>s.total>0 || s.archived>0).sort((a,b)=>b.season-a.season) }, [snapshot, rows, options, detail, selectedSeason])
+  const filteredRows = useMemo(() => { const q=query.trim().toLowerCase(); return rows.filter((r)=>(seasonFilter===ALL || String(r.season)===seasonFilter) && (!q || [r.season_label,r.country_name,r.league_name,r.dataset_type,r.provider,r.status,r.worker_status].some((v)=>String(v??'').toLowerCase().includes(q)))) }, [rows,query,seasonFilter])
+  const pageCount=Math.max(1,Math.ceil(filteredRows.length/PAGE_SIZE)); const pagedRows=filteredRows.slice((page-1)*PAGE_SIZE,page*PAGE_SIZE)
+  const summary=detail?.summary; const apiCoverage=summary ? summary.api_coverage*100 : 0; const archiveCompleteness=summary ? summary.archive_completeness*100 : 0
 
-  const rows = useMemo<ArchiveRow[]>(() => (snapshot?.campaigns ?? []).map((campaign) => ({
-    ...campaign,
-    country_name: countryById.get(campaign.country_id ?? '')?.name ?? campaign.country_id ?? '—',
-    league_name: competitionById.get(campaign.competition_id ?? '')?.name ?? campaign.competition_id ?? '—',
-    season_label: seasonLabel(campaign.season),
-  })), [snapshot, countryById, competitionById])
+  return <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-5 px-density-xl py-density-xl">
+    <header className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between"><div><div className="flex items-center gap-2"><Database className="h-5 w-5" /><h1 className="text-2xl font-semibold tracking-tight">Archive &amp; Retrieval</h1></div><p className="mt-1 max-w-3xl text-sm text-muted-foreground">Authoritative archive view: API-Sports coverage, completeness, gaps, archived datasets, and stored artifacts.</p></div><Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button></header>
+    {error && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-4 text-sm text-destructive">{error}</div>}
+    <section className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5"><Metric label="API-Sports coverage" value={pct(apiCoverage)} hint="Successful API units / expected units" /><Metric label="Archive completeness" value={pct(archiveCompleteness)} hint="Archived expected units / expected units" /><Metric label="Open gaps" value={summary?.open_gaps ?? '—'} hint="Open or blocked data gaps" /><Metric label="Archived rows" value={summary?.archived_rows?.toLocaleString() ?? '—'} hint="Rows stored in archive" /><Metric label="Requests used" value={summary?.requests_used?.toLocaleString() ?? '—'} hint="Provider requests" /></section>
 
-  const seasons = useMemo<SeasonCard[]>(() => {
-    const providerRows = options?.registered_seasons ?? []
-    const bySeason = new Map<number, SeasonCard>()
-    const historicalRows = historical?.seasons ?? []
+    <section className="rounded-xl border border-border bg-card p-5 shadow-retool-sm"><div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-sm font-semibold">Archive seasons</h2><p className="mt-1 text-xs text-muted-foreground">Select a season to inspect its completeness and every dataset.</p></div><Select value={seasonFilter} onValueChange={(v)=>{setSeasonFilter(v); const s=Number(v); if(Number.isInteger(s)) void openSeason(s)}}><SelectTrigger className="w-40"><SelectValue placeholder="Season" /></SelectTrigger><SelectContent><SelectItem value={ALL}>All seasons</SelectItem>{seasons.map((s)=><SelectItem key={s.season} value={String(s.season)}>{s.label}</SelectItem>)}</SelectContent></Select></div><div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5">{seasons.map((s)=><button key={s.season} type="button" onClick={()=>void openSeason(s.season)} className={`rounded-lg border p-4 text-left transition-colors ${selectedSeason===s.season?'border-foreground bg-muted/35':'border-border hover:bg-muted/20'}`}><div className="flex items-center justify-between gap-2"><span className="font-semibold">{s.label}</span><StatusPill status={s.status}/></div><div className="mt-3 flex justify-between text-[11px] text-muted-foreground"><span>{s.archived.toLocaleString()} / {s.total.toLocaleString()} archived</span><span>{pct(s.completeness)}</span></div><div className="mt-2"><ProgressBar value={s.completeness} size="sm"/></div><div className="mt-3 grid grid-cols-2 gap-1.5 text-[10px] text-muted-foreground"><span>{s.processed.toLocaleString()} processed</span><span>{s.active.toLocaleString()} active</span><span>{s.failed.toLocaleString()} failed</span><span>{s.providerLeagues.toLocaleString()} provider leagues</span></div></button>)}</div></section>
 
-    for (const item of historicalRows) {
-      const capabilityCount = providerRows.filter((entry) => entry.season === item.season).length
-      const archiveRecords = rows.filter((row) => row.season === item.season).length
-      bySeason.set(item.season, cardFromHistorical(item, Math.max(Number(item.provider_leagues ?? 0), capabilityCount), archiveRecords))
-    }
+    {selectedSeason != null && <section className="rounded-xl border border-border bg-card shadow-retool-sm"><div className="border-b border-border p-5"><div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between"><div><div className="flex items-center gap-2"><h2 className="text-lg font-semibold">Season {seasonLabel(selectedSeason)}</h2>{summary && <StatusPill status={summary.data_status}/>}</div><p className="mt-1 text-xs text-muted-foreground">COMPLETE means every expected API unit succeeded, there are no open gaps, and every expected unit is archived.</p></div>{detailLoading && <span className="text-xs text-muted-foreground">Refreshing season…</span>}</div></div>{!summary ? <div className="p-6 text-sm text-muted-foreground">Loading season detail…</div> : <div className="p-5"><div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-8"><Metric label="API coverage" value={pct(apiCoverage)}/><Metric label="Archive" value={pct(archiveCompleteness)}/><Metric label="Processed" value={`${summary.processed_jobs.toLocaleString()} / ${summary.total_jobs.toLocaleString()}`}/><Metric label="Active" value={summary.active_jobs.toLocaleString()}/><Metric label="Failed" value={summary.failed_jobs.toLocaleString()}/><Metric label="Open gaps" value={summary.open_gaps.toLocaleString()}/><Metric label="Archived rows" value={summary.archived_rows.toLocaleString()}/><Metric label="Requests" value={summary.requests_used.toLocaleString()}/></div><div className="mt-5 grid gap-5 lg:grid-cols-[1fr,320px]"><div><h3 className="text-sm font-semibold">Dataset completeness</h3><div className="mt-3 overflow-hidden rounded-lg border border-border"><table className="w-full text-sm"><thead className="bg-muted/30"><tr><Th>Dataset</Th><Th>Total</Th><Th>Processed</Th><Th>Archived</Th><Th>API coverage</Th><Th>Archive</Th><Th>Gaps</Th><Th>Status</Th></tr></thead><tbody>{detail?.datasets.map((d)=><tr key={d.dataset_type} className="border-t border-border/70"><Td className="font-medium">{d.dataset_type}</Td><Td>{d.total_jobs.toLocaleString()}</Td><Td>{d.processed_jobs.toLocaleString()}</Td><Td>{d.archived_jobs.toLocaleString()}</Td><Td className="min-w-[120px]"><ProgressBar value={d.coverage_percent} size="sm"/><div className="mt-1 text-[10px] text-muted-foreground">{pct(d.coverage_percent)}</div></Td><Td className="min-w-[120px]"><ProgressBar value={d.archive_percent} size="sm"/><div className="mt-1 text-[10px] text-muted-foreground">{pct(d.archive_percent)}</div></Td><Td>{d.open_gaps.toLocaleString()}</Td><Td><StatusPill status={d.status}/></Td></tr>)}</tbody></table></div></div><div className="rounded-lg border border-border p-4"><h3 className="text-sm font-semibold">Campaign</h3><div className="mt-3 space-y-3 text-xs"><KeyValue label="Status" value={String((detail?.campaign as any)?.status ?? '—')}/><KeyValue label="Started" value={formatDate(String((detail?.campaign as any)?.planned_start_at ?? ''))}/><KeyValue label="Target end" value={formatDate(String((detail?.campaign as any)?.minimum_target_end_at ?? ''))}/><KeyValue label="Requests" value={String((detail?.campaign as any)?.requests_used ?? summary.requests_used)}/><KeyValue label="Campaign ID" value={String((detail?.campaign as any)?.campaign_id ?? '—')} mono/></div></div></div><div className="mt-5 grid gap-5 lg:grid-cols-2"><div><h3 className="text-sm font-semibold">Data gaps</h3><div className="mt-3 overflow-hidden rounded-lg border border-border"><table className="w-full text-sm"><thead className="bg-muted/30"><tr><Th>Dataset</Th><Th>Status</Th><Th>Reason</Th><Th>Observed</Th></tr></thead><tbody>{detail?.gaps.length ? detail.gaps.map((g)=><tr key={g.gap_id} className="border-t border-border/70"><Td>{g.dataset_type}</Td><Td><StatusPill status={g.status}/></Td><Td>{g.reason_code ?? g.detail ?? '—'}</Td><Td>{formatDate(g.observed_at)}</Td></tr>) : <tr><td colSpan={4} className="p-5 text-center text-xs text-muted-foreground">No recorded gaps for this season.</td></tr>}</tbody></table></div></div><div><h3 className="text-sm font-semibold">Archive artifacts</h3><div className="mt-3 overflow-hidden rounded-lg border border-border"><table className="w-full text-sm"><thead className="bg-muted/30"><tr><Th>Dataset</Th><Th>Rows</Th><Th>Completeness</Th><Th>Created</Th></tr></thead><tbody>{detail?.artifacts.slice(0,20).map((a,i)=><tr key={String(a.manifest_id ?? i)} className="border-t border-border/70"><Td>{String(a.dataset_type ?? '—')}</Td><Td>{Number(a.row_count ?? 0).toLocaleString()}</Td><Td>{pct(Number(a.completeness_score ?? 0)*100)}</Td><Td>{formatDate(String(a.created_at ?? ''))}</Td></tr>)}{!detail?.artifacts.length && <tr><td colSpan={4} className="p-5 text-center text-xs text-muted-foreground">No archive artifacts yet.</td></tr>}</tbody></table></div></div></div></div>}</section>}
 
-    for (const item of providerRows) {
-      const capabilityCount = providerRows.filter((entry) => entry.season === item.season).length
-      if (item.season == null) continue
-      if (!bySeason.has(item.season)) {
-        bySeason.set(item.season, {
-          season: item.season,
-          label: seasonLabel(item.season),
-          totalJobs: 0,
-          processedJobs: 0,
-          archivedJobs: 0,
-          activeJobs: 0,
-          failedJobs: 0,
-          completeness: 0,
-          status: 'PENDING',
-          providerLeagues: capabilityCount,
-          archiveRecords: rows.filter((row) => row.season === item.season).length,
-        })
-      }
-    }
-
-    for (const item of snapshot?.seasons ?? []) {
-      if (!bySeason.has(item.season)) {
-        bySeason.set(item.season, {
-          season: item.season,
-          label: seasonLabel(item.season),
-          totalJobs: item.campaigns,
-          processedJobs: item.succeeded + item.failed,
-          archivedJobs: item.succeeded,
-          activeJobs: item.active,
-          failedJobs: item.failed,
-          completeness: Number(item.avg_completeness ?? 0),
-          status: item.failed > 0 ? 'BLOCKED' : item.active > 0 ? 'RUNNING' : item.succeeded > 0 ? 'READY_FOR_ARCHIVE' : 'PENDING',
-          providerLeagues: providerRows.filter((entry) => entry.season === item.season).length,
-          archiveRecords: item.campaigns,
-        })
-      }
-    }
-
-    for (const row of rows) {
-      if (!bySeason.has(row.season)) {
-        bySeason.set(row.season, {
-          season: row.season,
-          label: row.season_label,
-          totalJobs: 0,
-          processedJobs: 0,
-          archivedJobs: 0,
-          activeJobs: 0,
-          failedJobs: 0,
-          completeness: 0,
-          status: 'PENDING',
-          providerLeagues: 0,
-          archiveRecords: rows.filter((item) => item.season === row.season).length,
-        })
-      }
-    }
-
-    return [...bySeason.values()].sort((a, b) => b.season - a.season)
-  }, [historical, options, rows, snapshot])
-
-  const filteredRows = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    return rows.filter((row) => {
-      if (seasonFilter !== ALL && String(row.season) !== seasonFilter) return false
-      if (!needle) return true
-      return [row.season_label, row.country_name, row.league_name, row.dataset_type, row.provider, row.status, row.worker_status, row.manifest_id, row.object_uri, row.checksum]
-        .some((value) => String(value ?? '').toLowerCase().includes(needle))
-    })
-  }, [rows, query, seasonFilter])
-
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE))
-  const pagedRows = filteredRows.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
-  const selectedSeasonRows = useMemo(() => selectedSeason == null ? [] : rows.filter((row) => row.season === selectedSeason), [rows, selectedSeason])
-  const registeredForSeason = useMemo<ArchiveRegisteredSeasonOption[]>(() => selectedSeason == null ? [] : (options?.registered_seasons ?? []).filter((row) => row.season === selectedSeason), [options, selectedSeason])
-  const summary = useMemo(() => ({
-    total: rows.length,
-    succeeded: rows.filter((row) => row.status === 'SUCCEEDED').length,
-    active: rows.filter((row) => ['READY', 'QUEUED', 'RUNNING'].includes(row.status)).length,
-    failed: rows.filter((row) => row.status === 'FAILED').length,
-  }), [rows])
-
-  function selectSeason(season: number) {
-    setSelectedSeason(season)
-    setSeasonFilter(String(season))
-    setPage(1)
-  }
-
-  return (
-    <div className="mx-auto w-full max-w-[1600px] px-density-xl py-density-xl">
-      <div className="flex flex-col gap-density-lg">
-        <div className="mb-density-xl flex flex-col gap-density-sm">
-          <div className="flex flex-wrap items-start justify-between gap-density-md">
-            <div className="flex flex-col gap-1">
-              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Archive &amp; Retrieval</h1>
-              <p className="max-w-3xl text-sm text-muted-foreground">Historical campaign progress and archived output by season. Cards show execution progress; the table shows the actual archive records.</p>
-            </div>
-            <Button variant="outline" onClick={() => void load()} disabled={loading}><RefreshCw className="h-4 w-4" /> Refresh</Button>
-          </div>
-        </div>
-
-        {error && <div className="rounded-lg border border-destructive/40 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
-
-        <div className="grid grid-cols-2 gap-density-sm sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-          {seasons.map((season) => (
-            <button key={season.season} type="button" onClick={() => selectSeason(season.season)} className={`flex flex-col gap-2 rounded-lg border p-density-md text-left transition-colors ${selectedSeason === season.season ? 'border-foreground bg-muted/40' : 'border-border bg-card hover:bg-muted/25'}`}>
-              <div className="flex items-start justify-between gap-2"><span className="text-sm font-semibold text-foreground">{season.label}</span><StatusBadge status={season.status} dense /></div>
-              <div className="flex items-center justify-between text-[11px] text-muted-foreground"><span>{season.processedJobs.toLocaleString()} / {season.totalJobs.toLocaleString()} processed</span><span>{season.completeness.toFixed(1)}%</span></div>
-              <ProgressBar value={season.completeness} size="sm" />
-              <div className="grid grid-cols-2 gap-2 text-[10px] text-muted-foreground"><span>{season.archivedJobs.toLocaleString()} archived</span><span>{season.activeJobs.toLocaleString()} active</span><span>{season.failedJobs.toLocaleString()} failed</span><span>{season.providerLeagues.toLocaleString()} leagues</span></div>
-            </button>
-          ))}
-        </div>
-
-        <div className="flex flex-col gap-density-md">
-          <div className="flex flex-wrap items-center gap-density-sm">
-            <div className="relative w-full max-w-xs"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" /><Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search archive (country, league, dataset)…" className="pl-9" /></div>
-            <Select value={seasonFilter} onValueChange={setSeasonFilter}><SelectTrigger className="w-40"><SelectValue placeholder="All seasons" /></SelectTrigger><SelectContent><SelectItem value={ALL}>All seasons</SelectItem>{seasons.map((season) => <SelectItem key={season.season} value={String(season.season)}>{season.label}</SelectItem>)}</SelectContent></Select>
-            <div className="ml-auto flex items-center gap-density-sm"><Button variant="outline" onClick={() => exportCsv(filteredRows)}><Download className="h-4 w-4" /> Export</Button>{(query || seasonFilter !== ALL) && <Button variant="ghost" onClick={() => { setQuery(''); setSeasonFilter(ALL); setSelectedSeason(null) }}><X className="h-4 w-4" /> Clear</Button>}</div>
-          </div>
-
-          <div className="rounded-lg border border-border bg-card shadow-retool-sm"><div className="relative w-full overflow-auto"><table className="w-full caption-bottom text-sm"><thead className="sticky top-0 z-10 bg-card [&_tr]:border-b"><tr className="border-b transition-colors"><Th>Season</Th><Th>Country</Th><Th>League</Th><Th>Dataset</Th><Th>Rows</Th><Th>Completeness</Th><Th>Status</Th><Th>Created</Th></tr></thead><tbody>
-            {pagedRows.map((row) => <tr key={row.campaign_id} onClick={() => setSelected(row)} className="cursor-pointer border-b transition-colors hover:bg-muted/50"><Td>{row.season_label}</Td><Td>{row.country_name}</Td><Td>{row.league_name}</Td><Td>{row.dataset_type}</Td><Td>{Number(row.row_count ?? 0).toLocaleString()}</Td><Td><ProgressBar value={Number(row.completeness_score ?? 0) * 100} size="sm" /></Td><Td><StatusBadge status={row.status} /></Td><Td>{formatDate(row.created_at)}</Td></tr>)}
-            {!pagedRows.length && <tr><td colSpan={8} className="p-density-xl text-center text-sm text-muted-foreground">No live archive records match the current filters.</td></tr>}
-          </tbody></table></div></div>
-
-          <div className="flex flex-wrap items-center justify-between text-sm text-muted-foreground"><span>{filteredRows.length} records · Page {page} of {pageCount}</span><div className="flex items-center gap-density-sm"><Button variant="outline" onClick={() => setPage((value) => Math.max(1, value - 1))} disabled={page <= 1}><ChevronLeft className="h-4 w-4" /> Previous</Button><Button variant="outline" onClick={() => setPage((value) => Math.min(pageCount, value + 1))} disabled={page >= pageCount}>Next <ChevronRight className="h-4 w-4" /></Button></div><span>{summary.succeeded} complete · {summary.active} active · {summary.failed} failed</span></div>
-        </div>
-      </div>
-
-      <DetailDrawer open={!!selected} onOpenChange={(open) => !open && setSelected(null)} title={selected ? `${selected.season_label} · ${selected.league_name}` : ''} description={selected?.campaign_id}>{selected && <div className="flex flex-col gap-density-md text-sm"><Row label="Season" value={selected.season_label} /><Row label="Country" value={selected.country_name} /><Row label="League" value={selected.league_name} /><Row label="Dataset" value={selected.dataset_type} /><Row label="Provider" value={selected.provider} /><Row label="Campaign status" value={<StatusBadge status={selected.status} />} /><Row label="Worker status" value={<StatusBadge status={String(selected.worker_status ?? '—')} dense />} /><Row label="Scope" value={selected.scope_state} /><Row label="Completeness" value={`${(Number(selected.completeness_score ?? 0) * 100).toFixed(2)}%`} /><Row label="Rows" value={Number(selected.row_count ?? 0).toLocaleString()} /><Row label="Attempts" value={String(selected.attempts)} /><Row label="Started" value={formatDate(selected.started_at)} /><Row label="Finished" value={formatDate(selected.finished_at)} /><Row label="Created" value={formatDate(selected.created_at)} /><Row label="Updated" value={formatDate(selected.updated_at)} /></div>}</DetailDrawer>
-
-      {selectedSeason != null && <DetailDrawer open onOpenChange={(open) => !open && setSelectedSeason(null)} title={`Season ${seasonLabel(selectedSeason)} · summary`} description="Historical execution progress and archive output"><div className="flex flex-col gap-density-lg text-sm"><section className="rounded-md border border-border p-density-md"><h3 className="mb-density-sm font-semibold">Season summary</h3><div className="grid grid-cols-2 gap-density-sm"><Fact label="Provider leagues" value={String(seasons.find((item) => item.season === selectedSeason)?.providerLeagues ?? 0)} /><Fact label="Archive records" value={String(seasons.find((item) => item.season === selectedSeason)?.archiveRecords ?? selectedSeasonRows.length)} /><Fact label="Processed" value={String(seasons.find((item) => item.season === selectedSeason)?.processedJobs ?? 0)} /><Fact label="Archived" value={String(seasons.find((item) => item.season === selectedSeason)?.archivedJobs ?? 0)} /></div><div className="mt-4"><ProgressBar value={seasons.find((item) => item.season === selectedSeason)?.completeness ?? 0} /></div></section><section className="rounded-md border border-border p-density-md"><h3 className="mb-density-sm font-semibold">Provider capabilities</h3>{registeredForSeason.length ? registeredForSeason.map((item) => <div key={`${item.provider}-${item.competition_id}-${item.endpoint}-${item.market ?? ''}`} className="flex items-center justify-between gap-3 border-b border-border/60 py-2 last:border-0"><span>{item.provider} · {item.endpoint}{item.market ? ` · ${item.market}` : ''}</span><StatusBadge status={item.status} dense /></div>) : <span className="text-muted-foreground">No provider capability records for this season.</span>}</section></div></DetailDrawer>}
-    </div>
-  )
+    <section className="rounded-xl border border-border bg-card shadow-retool-sm"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-border p-5"><div><h2 className="text-sm font-semibold">Archive records</h2><p className="mt-1 text-xs text-muted-foreground">Live archived outputs. These records are separate from season completeness.</p></div><Button variant="outline" onClick={()=>exportCsv(filteredRows)}><Download className="h-4 w-4"/> Export</Button></div><div className="border-b border-border p-4"><div className="flex flex-wrap items-center gap-3"><div className="relative w-full max-w-xs"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"/><Input value={query} onChange={(e)=>setQuery(e.target.value)} placeholder="Search country, league, dataset…" className="pl-9"/></div>{(query || seasonFilter!==ALL)&&<Button variant="ghost" onClick={()=>{setQuery('');setSeasonFilter(ALL);setSelectedSeason(null)}}><X className="h-4 w-4"/> Clear</Button>}</div></div><div className="overflow-auto"><table className="w-full text-sm"><thead className="bg-muted/30"><tr><Th>Season</Th><Th>Country</Th><Th>League</Th><Th>Dataset</Th><Th>Rows</Th><Th>Completeness</Th><Th>Status</Th><Th>Created</Th></tr></thead><tbody>{pagedRows.map((r)=><tr key={r.campaign_id} className="border-t border-border/70 hover:bg-muted/20"><Td>{r.season_label}</Td><Td>{r.country_name}</Td><Td>{r.league_name}</Td><Td>{r.dataset_type}</Td><Td>{Number(r.row_count ?? 0).toLocaleString()}</Td><Td className="min-w-[140px]"><ProgressBar value={Number(r.completeness_score ?? 0)*100} size="sm"/></Td><Td><StatusPill status={r.status}/></Td><Td>{formatDate(r.created_at)}</Td></tr>)}{!pagedRows.length&&<tr><td colSpan={8} className="p-8 text-center text-xs text-muted-foreground">No archive records match the current filters.</td></tr>}</tbody></table></div><div className="flex flex-wrap items-center justify-between gap-3 border-t border-border p-4 text-xs text-muted-foreground"><span>{filteredRows.length} records · page {page} / {pageCount}</span><div className="flex items-center gap-2"><Button variant="outline" size="sm" onClick={()=>setPage((p)=>Math.max(1,p-1))} disabled={page<=1}><ChevronLeft className="h-4 w-4"/> Previous</Button><Button variant="outline" size="sm" onClick={()=>setPage((p)=>Math.min(pageCount,p+1))} disabled={page>=pageCount}>Next <ChevronRight className="h-4 w-4"/></Button></div></div></section>
+  </div>
 }
 
-function Th({ children }: { children: ReactNode }) { return <th scope="col" className="h-12 px-density-lg text-left align-middle font-medium text-muted-foreground">{children}</th> }
-function Td({ children }: { children: ReactNode }) { return <td className="p-density-lg align-middle">{children}</td> }
-function Fact({ label, value }: { label: string; value: string }) { return <div><div className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</div><div className="mt-1 text-sm font-semibold">{value}</div></div> }
-function Row({ label, value }: { label: string; value: ReactNode }) { return <div className="grid grid-cols-[120px_1fr] gap-3 border-b border-border/60 py-2 last:border-0"><span className="text-muted-foreground">{label}</span><span className="min-w-0 break-words">{value}</span></div> }
-
-function exportCsv(rows: ArchiveRow[]) {
-  const header = ['season','country','league','dataset','rows','completeness','status','created_at']
-  const body = rows.map((row) => [row.season_label,row.country_name,row.league_name,row.dataset_type,row.row_count ?? 0,Number(row.completeness_score ?? 0),row.status,row.created_at])
-  const csv = [header, ...body].map((line) => line.map((value) => `"${String(value ?? '').replaceAll('"','""')}"`).join(',')).join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = 'archive.csv'
-  a.click()
-  URL.revokeObjectURL(url)
-}
+function KeyValue({ label, value, mono=false }: { label:string; value:string; mono?:boolean }) { return <div className="flex items-center justify-between gap-3 border-b border-border/60 pb-2 last:border-0"><span className="text-muted-foreground">{label}</span><span className={mono?'font-mono text-[10px] break-all':'font-medium'}>{value}</span></div> }

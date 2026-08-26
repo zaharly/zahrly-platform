@@ -1,55 +1,44 @@
-import { Database, Globe2, Trophy, Layers3 } from 'lucide-react'
-
-const stats = [
-  { label: 'Countries', value: '171', icon: Globe2, tone: 'Provider master catalog' },
-  { label: 'Leagues', value: '1,241', icon: Trophy, tone: 'Provider master catalog' },
-  { label: 'Season records', value: '8,669', icon: Layers3, tone: 'Metadata only — not a backfill' },
-]
+import { useEffect, useState } from 'react'
+import { Database, Globe2, Layers3, RefreshCw, Trophy } from 'lucide-react'
+import { PageHeader } from '../../components/layout/PageHeader'
+import { MetricCard } from '../../components/dashboard/MetricCard'
+import { Button } from '../../lib/shadcn/button'
+import { fetchProviderCatalogSnapshot, type ProviderCatalogSnapshot } from '../../lib/adminLive'
 
 export default function ProviderCatalog() {
+  const [snapshot, setSnapshot] = useState<ProviderCatalogSnapshot | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = () => {
+    setError(null)
+    fetchProviderCatalogSnapshot().then(setSnapshot).catch((e) => setError(e instanceof Error ? e.message : 'Unable to load provider catalog'))
+  }
+
+  useEffect(load, [])
+
   return (
     <div className="space-y-density-xl">
-      <div>
-        <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          <Database className="h-4 w-4" /> Provider Catalog
-        </div>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">API-Football master catalog</h1>
-        <p className="mt-1 max-w-3xl text-sm text-muted-foreground">
-          This page describes what the provider offers. It never decides what Zahrly should ingest.
-          Countries, leagues, and season coverage are synchronized independently from backfill campaigns.
-        </p>
-      </div>
-
-      <div className="grid gap-density-md md:grid-cols-3">
-        {stats.map(({ label, value, icon: Icon, tone }) => (
-          <div key={label} className="rounded-lg border border-border bg-card p-density-lg">
-            <div className="flex items-center justify-between">
-              <Icon className="h-5 w-5 text-muted-foreground" />
-              <span className="text-2xl font-semibold">{value}</span>
-            </div>
-            <div className="mt-4 text-sm font-medium">{label}</div>
-            <div className="mt-1 text-xs text-muted-foreground">{tone}</div>
+      <PageHeader title="Provider Catalog" description="Live API-Football catalog metadata. Catalog data describes provider availability; it does not decide Zahrly ingestion scope." />
+      <div className="flex justify-end"><Button variant="outline" size="sm" onClick={load}><RefreshCw className="h-3.5 w-3.5" /> Refresh</Button></div>
+      {error && <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-density-md text-sm text-destructive">{error}</div>}
+      {snapshot && (
+        <>
+          <div className="grid gap-density-md md:grid-cols-3">
+            <MetricCard label="Countries" value={snapshot.countries.toLocaleString()} icon={Globe2} tone="info" />
+            <MetricCard label="Leagues" value={snapshot.competitions.toLocaleString()} icon={Trophy} tone="info" />
+            <MetricCard label="Season records" value={snapshot.seasons.toLocaleString()} icon={Layers3} tone="info" />
           </div>
-        ))}
-      </div>
-
-      <section className="rounded-lg border border-border bg-card p-density-lg">
-        <h2 className="text-sm font-semibold">Separation of responsibilities</h2>
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <div className="rounded-md border border-border p-4">
-            <div className="text-sm font-medium">Catalog</div>
-            <p className="mt-1 text-xs text-muted-foreground">What API-Football knows and exposes.</p>
+          <div className="grid gap-density-md md:grid-cols-2">
+            <MetricCard label="Current season rows" value={snapshot.current_seasons.toLocaleString()} icon={Database} />
+            <MetricCard label="Available season rows" value={snapshot.available_seasons.toLocaleString()} icon={Database} />
           </div>
-          <div className="rounded-md border border-border p-4">
-            <div className="text-sm font-medium">Ingestion Controls</div>
-            <p className="mt-1 text-xs text-muted-foreground">What Zahrly chooses to ingest.</p>
-          </div>
-          <div className="rounded-md border border-border p-4">
-            <div className="text-sm font-medium">Season Campaigns</div>
-            <p className="mt-1 text-xs text-muted-foreground">Which season to ingest from the enabled scope.</p>
-          </div>
-        </div>
-      </section>
+          <section className="rounded-lg border border-border bg-card p-density-lg shadow-retool-sm">
+            <h2 className="text-sm font-semibold">Synchronization state</h2>
+            <p className="mt-1 text-xs text-muted-foreground">Read-only status from the provider catalog sync ledger.</p>
+            <pre className="mt-4 max-h-72 overflow-auto rounded-md border border-border bg-muted/20 p-4 text-xs">{JSON.stringify(snapshot.sync_state, null, 2)}</pre>
+          </section>
+        </>
+      )}
     </div>
   )
 }

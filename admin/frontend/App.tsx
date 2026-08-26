@@ -25,7 +25,7 @@ import Consistency from './pages/predictions/Consistency'
 import Simulation from './pages/predictions/Simulation'
 import Markets from './pages/markets/Markets'
 import ProvidersPage from './pages/providers/ProvidersPage'
-import QueuesPage from './pages/workers/QueuesPage'
+import WorkerControlLivePage from './pages/workers/WorkerControlLivePage'
 import WorkersPage from './pages/workers/WorkersPage'
 import DeadLetterQueue from './pages/workers/DeadLetterQueue'
 import ModelRegistry from './pages/models/ModelRegistry'
@@ -72,10 +72,10 @@ export default function App() {
             <Route path="/providers/capabilities" element={<ProvidersPage />} />
             <Route path="/providers/schema-drift" element={<ProvidersPage />} />
             <Route path="/providers/conflicts" element={<ProvidersPage />} />
-            <Route path="/workers/queues" element={<QueuesPage />} />
-            <Route path="/workers/jobs" element={<QueuesPage />} />
-            <Route path="/workers/scheduler" element={<QueuesPage />} />
-            <Route path="/workers/cron" element={<QueuesPage />} />
+            <Route path="/workers/queues" element={<WorkerControlLivePage />} />
+            <Route path="/workers/jobs" element={<WorkerControlLivePage />} />
+            <Route path="/workers/scheduler" element={<WorkerControlLivePage />} />
+            <Route path="/workers/cron" element={<WorkerControlLivePage />} />
             <Route path="/workers" element={<WorkersPage />} />
             <Route path="/workers/dlq" element={<DeadLetterQueue />} />
             <Route path="/models" element={<ModelRegistry />} />

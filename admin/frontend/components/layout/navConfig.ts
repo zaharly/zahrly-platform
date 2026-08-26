@@ -4,7 +4,7 @@ import {
   Activity, ListTree, Layers, FileClock, CheckSquare, Dices, Server, Radio, Coins, Grid3x3, FileDiff,
   ListOrdered, Cpu, ClipboardList, Inbox, Clock, Repeat, Boxes, Star, FlaskConical, Eye, BarChart3,
   TrendingUp, SlidersHorizontal, Undo2, Users, KeyRound, ScrollText, Lock, Timer, MapPin, HeartHandshake,
-  Settings, Flag, Cloud, BookOpen, Database, Sliders,
+  Settings, Flag, Cloud, BookOpen,
 } from 'lucide-react'
 
 export interface NavItem {
@@ -27,12 +27,6 @@ export const NAV_GROUPS: NavGroup[] = [
     id: 'command-center', label: 'Command Center', items: [
       { label: 'Dashboard', path: '/', icon: LayoutDashboard },
       { label: 'Incidents', path: '/incidents', icon: Siren, badgeKey: 'incidents' },
-    ],
-  },
-  {
-    id: 'provider-control-plane', label: 'Provider Control Plane', items: [
-      { label: 'Provider Catalog', path: '/providers/catalog', icon: Database },
-      { label: 'Ingestion Controls', path: '/data/ingestion-controls', icon: Sliders },
     ],
   },
   {

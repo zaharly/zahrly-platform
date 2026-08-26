@@ -42,42 +42,11 @@ export interface ArchiveSeasonLive {
 
 export interface ArchiveLiveSnapshot { campaigns: ArchiveCampaignLive[]; seasons: ArchiveSeasonLive[] }
 
-export interface ArchiveCampaignCountryOption {
-  id: string
-  code: string
-  name: string
-  status: string
-}
-
-export interface ArchiveCampaignCompetitionOption {
-  id: string
-  country_id: string | null
-  name: string
-  status: string
-}
-
-export interface ArchiveCampaignRuleOption {
-  dataset_type: string
-  policy_version: string
-  required_threshold: number
-}
-
-export interface ArchiveRegisteredSeasonOption {
-  provider: string
-  competition_id: string | null
-  season: number | null
-  endpoint: string
-  market: string | null
-  status: string
-  checked_at: string | null
-}
-
-export interface ArchiveCampaignOptions {
-  countries: ArchiveCampaignCountryOption[]
-  competitions: ArchiveCampaignCompetitionOption[]
-  rules: ArchiveCampaignRuleOption[]
-  registered_seasons: ArchiveRegisteredSeasonOption[]
-}
+export interface ArchiveCampaignCountryOption { id: string; code: string; name: string; status: string }
+export interface ArchiveCampaignCompetitionOption { id: string; country_id: string | null; name: string; status: string }
+export interface ArchiveCampaignRuleOption { dataset_type: string; policy_version: string; required_threshold: number }
+export interface ArchiveRegisteredSeasonOption { provider: string; competition_id: string | null; season: number | null; endpoint: string; market: string | null; status: string; checked_at: string | null }
+export interface ArchiveCampaignOptions { countries: ArchiveCampaignCountryOption[]; competitions: ArchiveCampaignCompetitionOption[]; rules: ArchiveCampaignRuleOption[]; registered_seasons: ArchiveRegisteredSeasonOption[] }
 
 export interface HistoricalCampaignLive {
   campaign_id: string
@@ -129,6 +98,41 @@ export interface HistoricalSeasonPrepareResult {
   jobs_total: number
   dataset_type: string
   status: 'PREPARED' | 'BLOCKED'
+  planned_start_at?: string
+  minimum_target_end_at?: string
+  gaps?: number
+}
+
+export interface HistoricalCampaignPlan {
+  season: number
+  planned_start_at: string
+  target_end_at: string
+  days: number
+  enabled_country_count: number
+  enabled_league_count: number
+  available_league_count: number
+  estimated_jobs: number
+  estimated_requests: number
+  estimated_requests_per_day: number
+  estimated_jobs_per_day: number
+  required_requests_per_minute: number
+  provider_rate_limit_per_minute: number
+  daily_budget: number
+  quota_available_now: number
+  fits_daily_budget: boolean
+  fits_provider_rate_limit: boolean
+  dataset_plan: Array<{
+    dataset_key: string
+    label: string
+    category: string
+    endpoint: string
+    required_for_archive: boolean
+    execution_supported: boolean
+    available_count: number
+    scope_count: number
+    estimated_requests_per_job: number
+    estimated_requests: number
+  }>
 }
 
 export interface ProviderSeasonTriggerResult { accepted: true; season: number; workflow: string }
@@ -157,55 +161,37 @@ async function rpc<T>(name: string, body: Record<string, unknown>): Promise<T> {
   return response.json() as Promise<T>
 }
 
-/** Live archive execution state: campaigns plus season aggregates. */
-export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> {
-  return rpc<ArchiveLiveSnapshot>('admin_archive_snapshot', {})
-}
+export async function fetchArchiveLive(): Promise<ArchiveLiveSnapshot> { return rpc<ArchiveLiveSnapshot>('admin_archive_snapshot', {}) }
+export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> { return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {}) }
+export async function queueBackfillSeason(competitionId: string, season: number, datasetType = 'evaluation_metrics', priority = 100): Promise<Record<string, unknown>> { return rpc<Record<string, unknown>>('admin_queue_backfill_season', { p_competition_id: competitionId, p_season: season, p_dataset_type: datasetType, p_priority: priority }) }
+export async function fetchHistoricalBootstrapSnapshot(): Promise<HistoricalBootstrapSnapshot> { return rpc('admin_historical_bootstrap_snapshot', {}) }
 
-/** Canonical archive selectors and registered provider seasons. */
-export async function fetchArchiveCampaignOptions(): Promise<ArchiveCampaignOptions> {
-  return rpc<ArchiveCampaignOptions>('admin_archive_campaign_options', {})
-}
-
-/** Queue one provider-backed historical season for the requested dataset. */
-export async function queueBackfillSeason(
-  competitionId: string,
-  season: number,
-  datasetType = 'evaluation_metrics',
-  priority = 100,
-): Promise<Record<string, unknown>> {
-  return rpc<Record<string, unknown>>('admin_queue_backfill_season', {
-    p_competition_id: competitionId,
-    p_season: season,
-    p_dataset_type: datasetType,
-    p_priority: priority,
+export async function startHistoricalCampaign(startSeason: number, endSeason: number, plannedStartAt?: string, targetEndAt?: string): Promise<HistoricalCampaignLive & { created?: boolean }> {
+  return rpc('admin_start_historical_campaign', {
+    p_start_season: startSeason,
+    p_end_season: endSeason,
+    ...(plannedStartAt ? { p_planned_start_at: plannedStartAt } : {}),
+    ...(targetEndAt ? { p_target_end_at: targetEndAt } : {}),
   })
 }
 
-export async function fetchHistoricalBootstrapSnapshot(): Promise<HistoricalBootstrapSnapshot> {
-  return rpc('admin_historical_bootstrap_snapshot', {})
+export async function prepareHistoricalSeason(season: number, priority = 100, plannedStartAt?: string, targetEndAt?: string): Promise<HistoricalSeasonPrepareResult> {
+  return rpc('admin_prepare_historical_season', {
+    p_season: season,
+    p_priority: priority,
+    ...(plannedStartAt ? { p_planned_start_at: plannedStartAt } : {}),
+    ...(targetEndAt ? { p_target_end_at: targetEndAt } : {}),
+  })
 }
 
-export async function startHistoricalCampaign(startSeason: number, endSeason: number): Promise<HistoricalCampaignLive & { created?: boolean }> {
-  return rpc('admin_start_historical_campaign', { p_start_season: startSeason, p_end_season: endSeason })
-}
-
-export async function prepareHistoricalSeason(season: number, priority = 100): Promise<HistoricalSeasonPrepareResult> {
-  return rpc('admin_prepare_historical_season', { p_season: season, p_priority: priority })
+export async function fetchHistoricalCampaignPlan(season: number, plannedStartAt: string, targetEndAt: string): Promise<HistoricalCampaignPlan> {
+  return rpc('admin_historical_campaign_plan', { p_season: season, p_planned_start_at: plannedStartAt, p_target_end_at: targetEndAt })
 }
 
 export async function triggerProviderSeason(season: number): Promise<ProviderSeasonTriggerResult> {
   const accessToken = await getAccessToken()
-  const response = await fetch('/api/provider-season', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', Authorization: `Bearer ${accessToken}` },
-    credentials: 'include',
-    body: JSON.stringify({ season }),
-  })
+  const response = await fetch('/api/provider-season', { method: 'POST', headers: { 'content-type': 'application/json', Authorization: `Bearer ${accessToken}` }, credentials: 'include', body: JSON.stringify({ season }) })
   const detail = await response.text().catch(() => '')
   if (!response.ok) throw new Error(detail || `Provider season trigger failed (${response.status})`)
   return JSON.parse(detail) as ProviderSeasonTriggerResult
 }
-
-// Keep the archive integration exports in the canonical admin/frontend/integrations path.
-// Consumers must import this module via ../../integrations/archiveLive.

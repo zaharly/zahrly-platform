@@ -54,10 +54,10 @@ def fetch_fixture_manifests(conn, min_completeness: float = 1.0) -> list[Archive
              where dataset_type = 'fixtures'
                and provider = 'api-football'
                and completeness_score >= %s
-               and object_uri like 's3://%%'
+               and object_uri like %s
              order by coalesce(date_start, created_at), manifest_id
             """,
-            (min_completeness,),
+            (min_completeness, "s3://%"),
         )
         return [ArchiveManifest(**row) for row in cur.fetchall()]
 

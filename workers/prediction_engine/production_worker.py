@@ -5,8 +5,10 @@ from __future__ import annotations
 Hard boundaries:
 - Reads only scheduled canonical fixtures inside the current 7-day horizon.
 - Never reads rolling fixtures as training data.
-- Requires an ACTIVE/PRODUCTION model version with a verified S3 artifact.
-- Writes immutable prediction baseline state only after all checks pass.
+- Requires the exact model version pinned on the queued job and a valid S3 artifact.
+- Writes the immutable prediction baseline only after all gates pass.
+- Consumes the existing PGMQ prediction_queue; enqueue_due_predictions remains the
+  canonical control-plane producer.
 """
 
 import hashlib
@@ -74,27 +76,29 @@ def s3_client():
 def _read_json_s3(client, uri: str) -> Any:
     parsed = urlparse(uri)
     if parsed.scheme != "s3" or not parsed.netloc or not parsed.path.lstrip("/"):
-        raise PredictionGateError("invalid model artifact URI")
+        raise PredictionGateError("invalid_model_artifact_uri")
     return json.loads(client.get_object(Bucket=parsed.netloc, Key=parsed.path.lstrip("/"))["Body"].read())
 
 
-def load_active_model(conn) -> tuple[dict[str, Any], str]:
+def load_model_for_job(conn, model_version_id: str) -> ModelState:
     with conn.cursor() as cur:
         cur.execute(
             """
-            select id::text, family, version, status, artifact_uri, training_cutoff
+            select id::text, status, artifact_uri, training_cutoff
               from public.model_versions
-             where upper(status) in ('ACTIVE','PRODUCTION','PRODUCTION_ENABLED')
+             where id=%s
+               and upper(status) in ('ACTIVE','PRODUCTION','PRODUCTION_ENABLED')
                and artifact_uri is not null
                and training_cutoff is not null
-             order by created_at desc
              limit 1
-            """
+            """,
+            (model_version_id,),
         )
         row = cur.fetchone()
     if not row:
-        raise PredictionGateError("no_validated_production_model")
-    return dict(row), str(row["id"])
+        raise PredictionGateError("queued_model_not_production_enabled")
+    document = _read_json_s3(s3_client(), str(row["artifact_uri"]))
+    return parse_model_state(document, model_version_id, row["training_cutoff"])
 
 
 def parse_model_state(document: Any, model_version_id: str, training_cutoff: datetime) -> ModelState:
@@ -152,46 +156,68 @@ def baseline_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def claim_prediction_jobs(conn, limit: int = 25) -> list[dict[str, Any]]:
+def claim_pgmq_messages(conn, limit: int = 25) -> list[dict[str, Any]]:
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id, pj.worker_job_id,
-                       f.kickoff_at, f.home_team_id, f.away_team_id
-                  from internal.prediction_jobs pj
-                  join public.fixtures f on f.id=pj.fixture_id
-                 where pj.status='QUEUED'
-                   and lower(f.status)='scheduled'
-                   and f.kickoff_at >= now()
-                   and f.kickoff_at < now() + interval '7 days'
-                 order by f.kickoff_at, pj.created_at
-                 limit %s
-                 for update of pj skip locked
-                """,
-                (limit,),
-            )
+            cur.execute("select msg_id, message from pgmq.read(%s,%s,%s,%s)", ("prediction_queue", 300, limit, "{}"))
             rows = cur.fetchall()
-            ids = [row["job_id"] for row in rows]
-            if ids:
-                cur.execute("update internal.prediction_jobs set status='RUNNING', started_at=now() where job_id = any(%s)", (ids,))
-            return [dict(r) for r in rows]
+    return [{"msg_id": int(r["msg_id"]), **dict(r["message"])} for r in rows]
+
+
+def mark_job_running(conn, job_id: str) -> None:
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("update internal.worker_jobs set status='RUNNING', started_at=coalesce(started_at,now()), worker_id=coalesce(worker_id,'prediction_worker') where job_id=%s", (job_id,))
+            cur.execute("update internal.prediction_jobs set status='RUNNING', started_at=coalesce(started_at,now()) where job_id=%s and status in ('QUEUED','FAILED')", (job_id,))
+
+
+def delete_message(conn, msg_id: int) -> None:
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute("select pgmq.delete(%s,%s)", ("prediction_queue", msg_id))
 
 
 def run_once(limit: int = 25) -> dict[str, Any]:
     conn = db_connect()
     try:
-        model_row, model_id = load_active_model(conn)
-        model = parse_model_state(_read_json_s3(s3_client(), str(model_row["artifact_uri"])), model_id, model_row["training_cutoff"])
-        jobs = claim_prediction_jobs(conn, limit=limit)
+        messages = claim_pgmq_messages(conn, limit)
         succeeded = failed = abstained = 0
-        for job in jobs:
+        for msg in messages:
+            job_id = str(msg.get("job_id"))
             try:
-                kickoff = job["kickoff_at"].astimezone(timezone.utc)
+                if not job_id:
+                    raise PredictionGateError("queue_message_missing_job_id")
+                mark_job_running(conn, job_id)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id,
+                               f.kickoff_at, f.home_team_id, f.away_team_id, f.status as fixture_status, fe.episode_status
+                          from internal.prediction_jobs pj
+                          join public.fixtures f on f.id=pj.fixture_id
+                          join public.fixture_episodes fe on fe.id=pj.episode_id
+                         where pj.job_id=%s
+                         limit 1
+                        """,
+                        (job_id,),
+                    )
+                    job = cur.fetchone()
+                if not job:
+                    raise PredictionGateError("prediction_job_not_found")
+                if str(job["fixture_status"]).lower() != "scheduled" or str(job["episode_status"]).upper() != "ACTIVE":
+                    raise PredictionGateError("fixture_not_prediction_eligible")
                 now = datetime.now(timezone.utc)
+                kickoff = job["kickoff_at"].astimezone(timezone.utc)
                 if kickoff < now or kickoff >= now + timedelta(days=7):
                     raise PredictionGateError("fixture_outside_7d_horizon")
-                probs = _predict(job, model)
+                if msg.get("fixture_id") and str(msg["fixture_id"]) != str(job["fixture_id"]):
+                    raise PredictionGateError("queue_fixture_identity_mismatch")
+                if msg.get("episode_id") and str(msg["episode_id"]) != str(job["episode_id"]):
+                    raise PredictionGateError("queue_episode_identity_mismatch")
+                if msg.get("model_version_id") and str(msg["model_version_id"]) != str(job["model_version_id"]):
+                    raise PredictionGateError("queue_model_identity_mismatch")
+                model = load_model_for_job(conn, str(job["model_version_id"]))
+                probs = _predict(dict(job), model)
                 pick, pick_probability = baseline_pick(probs[:3])
                 payload = {
                     "schema_version": "zahrly-production-prediction-v1",
@@ -216,21 +242,22 @@ def run_once(limit: int = 25) -> dict[str, Any]:
                             """,
                             (job["episode_id"], model.model_version_id, job["policy_bundle_id"], pick, pick_probability, digest),
                         )
-                        cur.execute("update internal.prediction_jobs set status='SUCCEEDED', finished_at=now(), error_code=null, error_message=null where job_id=%s", (job["job_id"],))
-                        if job["worker_job_id"]:
-                            cur.execute("update internal.worker_jobs set status='SUCCEEDED', finished_at=now(), lease_expires_at=null where job_id=%s", (job["worker_job_id"],))
+                        cur.execute("update internal.prediction_jobs set status='SUCCEEDED', finished_at=now(), error_code=null, error_message=null where job_id=%s", (job_id,))
+                        cur.execute("update internal.worker_jobs set status='SUCCEEDED', finished_at=now(), lease_expires_at=null, error_code=null, error_message=null where job_id=%s", (job["worker_job_id"],))
+                delete_message(conn, int(msg["msg_id"]))
                 succeeded += 1
             except PredictionGateError as exc:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        cur.execute("update internal.prediction_jobs set status='ABSTAINED', finished_at=now(), error_code='PREDICTION_GATE', error_message=%s where job_id=%s", (str(exc)[:2000], job["job_id"]))
+                        cur.execute("update internal.prediction_jobs set status='ABSTAINED', finished_at=now(), error_code='PREDICTION_GATE', error_message=%s where job_id=%s", (str(exc)[:2000], job_id))
+                delete_message(conn, int(msg["msg_id"]))
                 abstained += 1
             except Exception as exc:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        cur.execute("update internal.prediction_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_WORKER_FAILED', error_message=%s where job_id=%s", (str(exc)[:2000], job["job_id"]))
+                        cur.execute("update internal.prediction_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_WORKER_FAILED', error_message=%s where job_id=%s", (str(exc)[:2000], job_id))
                 failed += 1
-        return {"status": "OK", "model_version_id": model_id, "jobs_claimed": len(jobs), "succeeded": succeeded, "failed": failed, "abstained": abstained}
+        return {"status": "OK", "jobs_claimed": len(messages), "succeeded": succeeded, "failed": failed, "abstained": abstained}
     finally:
         conn.close()
 

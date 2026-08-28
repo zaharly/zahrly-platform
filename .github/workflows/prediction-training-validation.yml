@@ -1,0 +1,90 @@
+name: Zahrly P0 Prediction Training Validation
+
+on:
+  push:
+    branches: [p0-prediction-engine-foundation]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zahrly-p0-training-validation
+  cancel-in-progress: true
+
+jobs:
+  walk-forward:
+    name: Historical S3 walk-forward validation
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
+      SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
+      SUPABASE_POOLER_PORT: "5432"
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
+      S3_REGION: eu-north-1
+      S3_BUCKET: zahrly-community-storage
+      S3_PREFIX: ${{ secrets.S3_PREFIX }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Validate secrets and normalize PostgreSQL URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SUPABASE_DB_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do
+            test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }
+          done
+          if [ -z "${S3_PREFIX:-}" ]; then
+            echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"
+          fi
+          python - <<'PY'
+          import os
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+          raw=os.environ['SUPABASE_DB_URL'].strip()
+          p=urlsplit(raw)
+          if p.scheme not in {'postgres','postgresql'} or not p.hostname or p.password is None:
+              raise SystemExit('SUPABASE_DB_URL must be a valid PostgreSQL URL with a password')
+          host=p.hostname.lower().rstrip('.')
+          user=unquote(p.username or 'postgres')
+          password=quote(unquote(p.password),safe='')
+          project=os.environ['SUPABASE_PROJECT_REF']
+          if host.endswith('.pooler.supabase.com'):
+              selected_host=host; selected_port=p.port or int(os.environ['SUPABASE_POOLER_PORT'])
+              if '.' not in user: user=f'postgres.{project}'
+          elif host == f'db.{project}.supabase.co':
+              selected_host=os.environ['SUPABASE_POOLER_HOST']; selected_port=int(os.environ['SUPABASE_POOLER_PORT'])
+              if user == 'postgres': user=f'postgres.{project}'
+          else:
+              raise SystemExit(f'unsupported Supabase host: {host}')
+          query=p.query or ''
+          if 'sslmode=' not in query: query=(query+'&' if query else '')+'sslmode=require'
+          normalized=urlunsplit(('postgresql',f'{quote(user,safe="")}:{password}@{selected_host}:{selected_port}',p.path or '/postgres',query,''))
+          with open(os.environ['GITHUB_ENV'],'a') as f: f.write(f'SUPABASE_DB_URL={normalized}\n')
+          PY
+
+      - name: Install prediction-engine dependencies
+        run: python -m pip install --upgrade pip && pip install -r workers/archive_worker/requirements.txt
+
+      - name: Run historical walk-forward validation
+        run: python -m workers.prediction_engine.train
+
+      - name: Reconcile migration and training source health
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ['SUPABASE_DB_URL']) as conn:
+              with conn.cursor() as cur:
+                  cur.execute("select count(*) from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score >= 1 and object_uri like 's3://%'")
+                  manifests=cur.fetchone()[0]
+                  cur.execute("select count(*) from internal.prediction_training_runs")
+                  runs=cur.fetchone()[0]
+          print(f'eligible_fixture_manifests={manifests}')
+          print(f'prediction_training_runs={runs}')
+          if manifests <= 0:
+              raise SystemExit('no eligible fixture manifests')
+          PY

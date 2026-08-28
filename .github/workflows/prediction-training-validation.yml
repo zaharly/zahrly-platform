@@ -3,6 +3,9 @@ name: Zahrly P0 Prediction Training Validation
 on:
   push:
     branches: [p0-prediction-engine-foundation]
+  pull_request:
+    types: [synchronize]
+    branches: [p0-prediction-engine-foundation]
   workflow_dispatch:
 
 permissions:

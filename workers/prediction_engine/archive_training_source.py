@@ -100,43 +100,124 @@ def _as_datetime(value: Any) -> datetime:
 
 
 def _extract_rows(document: Any) -> Iterable[dict[str, Any]]:
-    if isinstance(document, dict):
-        if isinstance(document.get("response"), list):
-            yield from (x for x in document["response"] if isinstance(x, dict))
+    """Yield API-Football fixture records through common archive/provider wrappers."""
+    seen: set[int] = set()
+
+    def walk(value: Any) -> Iterable[dict[str, Any]]:
+        if isinstance(value, list):
+            for item in value:
+                yield from walk(item)
             return
-        if isinstance(document.get("rows"), list):
-            yield from (x for x in document["rows"] if isinstance(x, dict))
+        if not isinstance(value, dict):
             return
-        yield document
-        return
-    if isinstance(document, list):
-        yield from (x for x in document if isinstance(x, dict))
+
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+
+        fixture = value.get("fixture")
+        teams = value.get("teams")
+        if isinstance(fixture, dict) and isinstance(teams, dict):
+            yield value
+            return
+
+        if "provider_fixture_id" in value or "match_id" in value:
+            yield value
+            return
+
+        for key in ("response", "rows", "results", "data", "payload", "body"):
+            child = value.get(key)
+            if child is not None:
+                yield from walk(child)
+
+    yield from walk(document)
+
+
+def _number(value: Any) -> int | None:
+    """Accept integral JSON numbers/numeric strings; reject null, bool, or fractional values."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value) if value.is_integer() else None
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        try:
+            parsed = float(raw)
+        except ValueError:
+            return None
+        return int(parsed) if parsed.is_integer() else None
+    return None
+
+
+def _value_from_paths(row: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> Any:
+    for path in paths:
+        current: Any = row
+        for key in path:
+            if not isinstance(current, dict) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current is not None:
+            return current
+    return None
 
 
 def _to_match(row: dict[str, Any]) -> Match | None:
-    fixture = row.get("fixture") if isinstance(row.get("fixture"), dict) else row
-    teams = row.get("teams") if isinstance(row.get("teams"), dict) else {}
-    goals = row.get("goals") if isinstance(row.get("goals"), dict) else {}
+    """Normalize raw API-Football or canonical fixture rows into a training Match."""
+    status = _value_from_paths(
+        row,
+        (("status", "short"), ("fixture", "status", "short"), ("status",)),
+    )
+    if isinstance(status, dict):
+        status = status.get("short")
+    if status is not None and str(status).upper() not in {"FT", "AET", "PEN"}:
+        return None
 
-    match_id = row.get("provider_fixture_id") or fixture.get("id") or row.get("match_id")
-    played_at = row.get("played_at") or row.get("kickoff_at") or fixture.get("date")
-    home_team_id = row.get("home_team_id") or (teams.get("home") or {}).get("id")
-    away_team_id = row.get("away_team_id") or (teams.get("away") or {}).get("id")
-    home_goals = row.get("home_goals", goals.get("home"))
-    away_goals = row.get("away_goals", goals.get("away"))
+    match_id = _value_from_paths(
+        row,
+        (("provider_fixture_id",), ("match_id",), ("fixture", "id"), ("id",)),
+    )
+    played_at = _value_from_paths(
+        row,
+        (("played_at",), ("kickoff_at",), ("fixture", "date"), ("date",)),
+    )
+    home_team_id = _value_from_paths(
+        row,
+        (("home_team_id",), ("teams", "home", "id"), ("home", "id")),
+    )
+    away_team_id = _value_from_paths(
+        row,
+        (("away_team_id",), ("teams", "away", "id"), ("away", "id")),
+    )
+    home_goals_raw = _value_from_paths(
+        row,
+        (("home_goals",), ("goals", "home"), ("score", "fulltime", "home")),
+    )
+    away_goals_raw = _value_from_paths(
+        row,
+        (("away_goals",), ("goals", "away"), ("score", "fulltime", "away")),
+    )
 
+    home_goals = _number(home_goals_raw)
+    away_goals = _number(away_goals_raw)
     if match_id is None or played_at is None or home_team_id is None or away_team_id is None:
         return None
-    if home_goals is None or away_goals is None:
+    if home_goals is None or away_goals is None or home_goals < 0 or away_goals < 0:
         return None
-    if not isinstance(home_goals, int) or not isinstance(away_goals, int):
-        return None
-    if home_goals < 0 or away_goals < 0:
+
+    try:
+        played = _as_datetime(played_at)
+    except (TypeError, ValueError, OverflowError):
         return None
 
     return Match(
         str(match_id),
-        _as_datetime(played_at),
+        played,
         str(home_team_id),
         str(away_team_id),
         home_goals,
@@ -145,7 +226,7 @@ def _to_match(row: dict[str, Any]) -> Match | None:
 
 
 def load_settled_matches(conn, as_of: datetime | None = None) -> list[Match]:
-    """Load completed matches strictly from archived fixture manifests."""
+    """Load settled results strictly from the existing S3 fixture archive."""
     manifests = fetch_fixture_manifests(conn)
     if not manifests:
         raise RuntimeError("prediction_training_source_unavailable: no fixture manifests")
@@ -153,15 +234,22 @@ def load_settled_matches(conn, as_of: datetime | None = None) -> list[Match]:
     client = _s3_client()
     cutoff = _as_datetime(as_of or datetime.now(timezone.utc))
     by_id: dict[str, Match] = {}
+    discovered = accepted_before_cutoff = 0
     for manifest in manifests:
         document = load_manifest_json(client, manifest)
         for row in _extract_rows(document):
+            discovered += 1
             match = _to_match(row)
             if match is None or match.played_at >= cutoff:
                 continue
+            accepted_before_cutoff += 1
             by_id[match.match_id] = match
 
     matches = sorted(by_id.values(), key=lambda m: (m.played_at, m.match_id))
     if not matches:
-        raise RuntimeError("prediction_training_source_unavailable: no settled fixture results")
+        raise RuntimeError(
+            "prediction_training_source_unavailable: no settled fixture results "
+            f"(archive_rows_discovered={discovered}, accepted_before_cutoff={accepted_before_cutoff}, "
+            f"manifests={len(manifests)})"
+        )
     return matches

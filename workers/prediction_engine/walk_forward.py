@@ -88,7 +88,6 @@ def predict_with_state(
     home_defense = defense.get(match.home_team_id, 1.0)
     away_defense = defense.get(match.away_team_id, 1.0)
 
-    # P0 baseline: multiplicative representation of the documented log-rate equation.
     home_lambda = max(0.05, league_rate * exp(dc_policy.home_advantage) * home_attack / max(away_defense, 0.05) * (0.75 + 0.5 * elo_factor))
     away_lambda = max(0.05, league_rate * away_attack / max(home_defense, 0.05) * (1.25 - 0.5 * elo_factor))
     matrix = probability_matrix(home_lambda, away_lambda, dc_policy.rho, dc_policy.max_goals)
@@ -96,7 +95,18 @@ def predict_with_state(
     return Prediction(match.match_id, match.home_team_id, match.away_team_id, p_home, p_draw, p_away, home_lambda, away_lambda)
 
 
-def run_fold(train: Sequence[Match], test: Sequence[Match], cutoff: datetime, elo_policy: EloPolicy = EloPolicy(), dc_policy: DixonColesPolicy = DixonColesPolicy()) -> list[Prediction]:
+def run_fold(
+    train: Sequence[Match],
+    test: Sequence[Match],
+    cutoff: datetime,
+    elo_policy: EloPolicy = EloPolicy(),
+    dc_policy: DixonColesPolicy = DixonColesPolicy(),
+) -> list[Prediction]:
+    """Evaluate chronologically: predict each test match, then update Elo with its settled result.
+
+    Test outcomes never influence their own prediction. They may influence later test
+    predictions, matching the production Elo state machine without leaking future data.
+    """
     cutoff = _utc(cutoff)
     train = sorted(train, key=lambda m: _utc(m.played_at))
     test = sorted(test, key=lambda m: _utc(m.played_at))
@@ -113,19 +123,36 @@ def run_fold(train: Sequence[Match], test: Sequence[Match], cutoff: datetime, el
         ratings[m.home_team_id] = h2
         ratings[m.away_team_id] = a2
 
-    return [predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy) for m in test]
+    predictions: list[Prediction] = []
+    for m in test:
+        predictions.append(predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy))
+        h = ratings.get(m.home_team_id, EloState(elo_policy.initial_rating))
+        a = ratings.get(m.away_team_id, EloState(elo_policy.initial_rating))
+        h2, a2, _ = update_elo(h, a, m.home_goals, m.away_goals, elo_policy)
+        ratings[m.home_team_id] = h2
+        ratings[m.away_team_id] = a2
+    return predictions
 
 
-def build_walk_forward_folds(matches: Iterable[Match], cutoffs: Sequence[datetime], test_window_days: int = 30) -> list[tuple[list[Match], list[Match], datetime]]:
+def build_walk_forward_folds(
+    matches: Iterable[Match],
+    cutoffs: Sequence[datetime],
+    test_window_days: int = 365,
+) -> list[tuple[list[Match], list[Match], datetime]]:
+    """Build non-overlapping calendar-year OOS folds.
+
+    Each cutoff is the UTC start of a calendar year. Training contains only matches
+    strictly before that cutoff; test contains that entire calendar year. The final
+    partial/current year is included only when the supplied cutoff represents it.
+    """
     if test_window_days <= 0:
         raise ValueError("test_window_days must be positive")
     ordered = sorted(matches, key=lambda m: _utc(m.played_at))
     folds: list[tuple[list[Match], list[Match], datetime]] = []
     for cutoff_raw in cutoffs:
         cutoff = _utc(cutoff_raw)
-        end = cutoff.timestamp() + test_window_days * 86400.0
-        test_end = datetime.fromtimestamp(end, timezone.utc)
+        next_year = datetime(cutoff.year + 1, 1, 1, tzinfo=timezone.utc)
         train = [m for m in ordered if _utc(m.played_at) < cutoff]
-        test = [m for m in ordered if cutoff <= _utc(m.played_at) < test_end]
+        test = [m for m in ordered if cutoff <= _utc(m.played_at) < next_year]
         folds.append((train, test, cutoff))
     return folds

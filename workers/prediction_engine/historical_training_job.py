@@ -86,6 +86,8 @@ def _upload_artifact(payload, version):
         's3',
         region_name=os.environ.get('S3_REGION', 'eu-north-1'),
         endpoint_url=os.environ.get('S3_ENDPOINT_URL') or None,
+        aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'],
+        aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY'],
     )
     key = f'zahrly/models/prediction_engine/{version}.json'
     s3.put_object(

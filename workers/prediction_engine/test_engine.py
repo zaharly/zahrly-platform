@@ -1,8 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
-from dixon_coles import probability_matrix, result_probabilities
-from elo import EloPolicy, EloState, update_elo
-from walk_forward import LeakageError, Match, run_fold
+from workers.prediction_engine.dixon_coles import probability_matrix, result_probabilities
+from workers.prediction_engine.elo import EloPolicy, EloState, update_elo
+from workers.prediction_engine.walk_forward import LeakageError, Match, run_fold
 
 
 def test_dc_probabilities_sum_to_one() -> None:

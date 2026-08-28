@@ -13,7 +13,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -102,7 +102,6 @@ def parse_model_state(document: Any, model_version_id: str, training_cutoff: dat
         raise PredictionGateError("unsupported_model_artifact_schema")
     if str(document.get("model_version_id")) != model_version_id:
         raise PredictionGateError("model_artifact_identity_mismatch")
-
     try:
         elo = document["elo"]
         dc = document["dixon_coles"]
@@ -136,8 +135,8 @@ def _predict(fixture: dict[str, Any], model: ModelState) -> tuple[float, float, 
     aa = model.away_attack.get(away_id, 1.0)
     hd = model.home_defense.get(home_id, 1.0)
     ad = model.away_defense.get(away_id, 1.0)
-    home_lambda = max(0.05, model.league_rate * pow(max(ha, 0.05) / max(ad, 0.05), 0.5) * (0.75 + 0.5 * elo_factor))
-    away_lambda = max(0.05, model.league_rate * pow(max(aa, 0.05) / max(hd, 0.05), 0.5) * (1.25 - 0.5 * elo_factor))
+    home_lambda = max(0.05, model.league_rate * (max(ha, 0.05) / max(ad, 0.05)) ** 0.5 * (0.75 + 0.5 * elo_factor))
+    away_lambda = max(0.05, model.league_rate * (max(aa, 0.05) / max(hd, 0.05)) ** 0.5 * (1.25 - 0.5 * elo_factor))
     matrix = probability_matrix(home_lambda, away_lambda, model.rho, model.max_goals)
     return (*result_probabilities(matrix), home_lambda, away_lambda)
 
@@ -154,29 +153,11 @@ def baseline_hash(payload: dict[str, Any]) -> str:
 
 
 def claim_prediction_jobs(conn, limit: int = 25) -> list[dict[str, Any]]:
-    now = datetime.now(timezone.utc)
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(
                 """
-                select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id,
-                       f.kickoff_at, f.home_team_id, f.away_team_id
-                  from internal.prediction_jobs pj
-                  join public.fixtures f on f.id=pj.fixture_id
-                 where pj.status='QUEUED'
-                   and lower(f.status)='scheduled'
-                   and f.kickoff_at >= %s
-                   and f.kickoff_at < %s
-                 order by f.kickoff_at, pj.created_at
-                 limit %s
-                 for update of pj skip locked
-                """,
-                (now, now.replace() if False else now, limit),
-            )
-            # The same query is intentionally replaced below because the upper bound
-            # must be +7 days; keeping the transaction boundary explicit avoids races.
-            cur.execute("""
-                select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id,
+                select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id, pj.worker_job_id,
                        f.kickoff_at, f.home_team_id, f.away_team_id
                   from internal.prediction_jobs pj
                   join public.fixtures f on f.id=pj.fixture_id
@@ -185,8 +166,11 @@ def claim_prediction_jobs(conn, limit: int = 25) -> list[dict[str, Any]]:
                    and f.kickoff_at >= now()
                    and f.kickoff_at < now() + interval '7 days'
                  order by f.kickoff_at, pj.created_at
-                 limit %s for update of pj skip locked
-            """, (limit,))
+                 limit %s
+                 for update of pj skip locked
+                """,
+                (limit,),
+            )
             rows = cur.fetchall()
             ids = [row["job_id"] for row in rows]
             if ids:
@@ -198,15 +182,14 @@ def run_once(limit: int = 25) -> dict[str, Any]:
     conn = db_connect()
     try:
         model_row, model_id = load_active_model(conn)
-        artifact = _read_json_s3(s3_client(), str(model_row["artifact_uri"]))
-        model = parse_model_state(artifact, model_id, model_row["training_cutoff"])
+        model = parse_model_state(_read_json_s3(s3_client(), str(model_row["artifact_uri"])), model_id, model_row["training_cutoff"])
         jobs = claim_prediction_jobs(conn, limit=limit)
         succeeded = failed = abstained = 0
         for job in jobs:
             try:
                 kickoff = job["kickoff_at"].astimezone(timezone.utc)
                 now = datetime.now(timezone.utc)
-                if kickoff < now or kickoff >= now + __import__("datetime").timedelta(days=7):
+                if kickoff < now or kickoff >= now + timedelta(days=7):
                     raise PredictionGateError("fixture_outside_7d_horizon")
                 probs = _predict(job, model)
                 pick, pick_probability = baseline_pick(probs[:3])
@@ -234,7 +217,7 @@ def run_once(limit: int = 25) -> dict[str, Any]:
                             (job["episode_id"], model.model_version_id, job["policy_bundle_id"], pick, pick_probability, digest),
                         )
                         cur.execute("update internal.prediction_jobs set status='SUCCEEDED', finished_at=now(), error_code=null, error_message=null where job_id=%s", (job["job_id"],))
-                        if job.get("worker_job_id"):
+                        if job["worker_job_id"]:
                             cur.execute("update internal.worker_jobs set status='SUCCEEDED', finished_at=now(), lease_expires_at=null where job_id=%s", (job["worker_job_id"],))
                 succeeded += 1
             except PredictionGateError as exc:

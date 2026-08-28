@@ -7,7 +7,7 @@ Hard boundaries:
 - Never reads rolling fixtures as training data.
 - Requires the exact model version pinned on the queued job and a valid S3 artifact.
 - Writes the immutable prediction baseline only after all gates pass.
-- Consumes the existing PGMQ prediction_queue; enqueue_due_predictions remains the
+- Consumes the existing PGMQ prediction_queue; enqueue_due_predictions is the
   canonical control-plane producer.
 """
 
@@ -164,11 +164,31 @@ def claim_pgmq_messages(conn, limit: int = 25) -> list[dict[str, Any]]:
     return [{"msg_id": int(r["msg_id"]), **dict(r["message"])} for r in rows]
 
 
-def mark_job_running(conn, job_id: str) -> None:
+def load_job_by_worker_id(conn, worker_job_id: str) -> dict[str, Any] | None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id,
+                   pj.worker_job_id, pj.status as prediction_status,
+                   f.kickoff_at, f.home_team_id, f.away_team_id, f.status as fixture_status,
+                   fe.episode_status
+              from internal.prediction_jobs pj
+              join public.fixtures f on f.id=pj.fixture_id
+              join public.fixture_episodes fe on fe.id=pj.episode_id
+             where pj.worker_job_id=%s
+             limit 1
+            """,
+            (worker_job_id,),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def mark_job_running(conn, worker_job_id: str, prediction_job_id: str) -> None:
     with conn.transaction():
         with conn.cursor() as cur:
-            cur.execute("update internal.worker_jobs set status='RUNNING', started_at=coalesce(started_at,now()), worker_id=coalesce(worker_id,'prediction_worker') where job_id=%s", (job_id,))
-            cur.execute("update internal.prediction_jobs set status='RUNNING', started_at=coalesce(started_at,now()) where job_id=%s and status in ('QUEUED','FAILED')", (job_id,))
+            cur.execute("update internal.worker_jobs set status='RUNNING', started_at=coalesce(started_at,now()), worker_id=coalesce(worker_id,'prediction_worker') where job_id=%s", (worker_job_id,))
+            cur.execute("update internal.prediction_jobs set status='RUNNING', started_at=coalesce(started_at,now()) where job_id=%s and status in ('QUEUED','FAILED')", (prediction_job_id,))
 
 
 def delete_message(conn, msg_id: int) -> None:
@@ -183,41 +203,29 @@ def run_once(limit: int = 25) -> dict[str, Any]:
         messages = claim_pgmq_messages(conn, limit)
         succeeded = failed = abstained = 0
         for msg in messages:
-            job_id = str(msg.get("job_id"))
+            worker_job_id = str(msg.get("job_id"))
+            prediction_job_id = None
             try:
-                if not job_id:
+                if not worker_job_id:
                     raise PredictionGateError("queue_message_missing_job_id")
-                mark_job_running(conn, job_id)
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        select pj.job_id, pj.fixture_id, pj.episode_id, pj.model_version_id, pj.policy_bundle_id,
-                               f.kickoff_at, f.home_team_id, f.away_team_id, f.status as fixture_status, fe.episode_status
-                          from internal.prediction_jobs pj
-                          join public.fixtures f on f.id=pj.fixture_id
-                          join public.fixture_episodes fe on fe.id=pj.episode_id
-                         where pj.job_id=%s
-                         limit 1
-                        """,
-                        (job_id,),
-                    )
-                    job = cur.fetchone()
+                job = load_job_by_worker_id(conn, worker_job_id)
                 if not job:
                     raise PredictionGateError("prediction_job_not_found")
+                prediction_job_id = str(job["job_id"])
+                mark_job_running(conn, worker_job_id, prediction_job_id)
                 if str(job["fixture_status"]).lower() != "scheduled" or str(job["episode_status"]).upper() != "ACTIVE":
                     raise PredictionGateError("fixture_not_prediction_eligible")
                 now = datetime.now(timezone.utc)
                 kickoff = job["kickoff_at"].astimezone(timezone.utc)
                 if kickoff < now or kickoff >= now + timedelta(days=7):
                     raise PredictionGateError("fixture_outside_7d_horizon")
-                if msg.get("fixture_id") and str(msg["fixture_id"]) != str(job["fixture_id"]):
-                    raise PredictionGateError("queue_fixture_identity_mismatch")
-                if msg.get("episode_id") and str(msg["episode_id"]) != str(job["episode_id"]):
-                    raise PredictionGateError("queue_episode_identity_mismatch")
-                if msg.get("model_version_id") and str(msg["model_version_id"]) != str(job["model_version_id"]):
-                    raise PredictionGateError("queue_model_identity_mismatch")
+                for field, error_code in (("fixture_id", "queue_fixture_identity_mismatch"), ("episode_id", "queue_episode_identity_mismatch"), ("model_version_id", "queue_model_identity_mismatch"), ("policy_bundle_id", "queue_policy_identity_mismatch")):
+                    if msg.get(field) and str(msg[field]) != str(job[field]):
+                        raise PredictionGateError(error_code)
                 model = load_model_for_job(conn, str(job["model_version_id"]))
-                probs = _predict(dict(job), model)
+                if model.training_cutoff >= kickoff:
+                    raise PredictionGateError("model_training_cutoff_not_before_fixture")
+                probs = _predict(job, model)
                 pick, pick_probability = baseline_pick(probs[:3])
                 payload = {
                     "schema_version": "zahrly-production-prediction-v1",
@@ -242,20 +250,24 @@ def run_once(limit: int = 25) -> dict[str, Any]:
                             """,
                             (job["episode_id"], model.model_version_id, job["policy_bundle_id"], pick, pick_probability, digest),
                         )
-                        cur.execute("update internal.prediction_jobs set status='SUCCEEDED', finished_at=now(), error_code=null, error_message=null where job_id=%s", (job_id,))
-                        cur.execute("update internal.worker_jobs set status='SUCCEEDED', finished_at=now(), lease_expires_at=null, error_code=null, error_message=null where job_id=%s", (job["worker_job_id"],))
+                        cur.execute("update internal.prediction_jobs set status='SUCCEEDED', finished_at=now(), error_code=null, error_message=null where job_id=%s", (prediction_job_id,))
+                        cur.execute("update internal.worker_jobs set status='SUCCEEDED', finished_at=now(), lease_expires_at=null, error_code=null, error_message=null where job_id=%s", (worker_job_id,))
                 delete_message(conn, int(msg["msg_id"]))
                 succeeded += 1
             except PredictionGateError as exc:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        cur.execute("update internal.prediction_jobs set status='ABSTAINED', finished_at=now(), error_code='PREDICTION_GATE', error_message=%s where job_id=%s", (str(exc)[:2000], job_id))
+                        if prediction_job_id:
+                            cur.execute("update internal.prediction_jobs set status='ABSTAINED', finished_at=now(), error_code='PREDICTION_GATE', error_message=%s where job_id=%s", (str(exc)[:2000], prediction_job_id))
+                        cur.execute("update internal.worker_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_GATE', error_message=%s where job_id=%s", (str(exc)[:2000], worker_job_id))
                 delete_message(conn, int(msg["msg_id"]))
                 abstained += 1
             except Exception as exc:
                 with conn.transaction():
                     with conn.cursor() as cur:
-                        cur.execute("update internal.prediction_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_WORKER_FAILED', error_message=%s where job_id=%s", (str(exc)[:2000], job_id))
+                        if prediction_job_id:
+                            cur.execute("update internal.prediction_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_WORKER_FAILED', error_message=%s where job_id=%s", (str(exc)[:2000], prediction_job_id))
+                        cur.execute("update internal.worker_jobs set status='FAILED', finished_at=now(), error_code='PREDICTION_WORKER_FAILED', error_message=%s where job_id=%s", (str(exc)[:2000], worker_job_id))
                 failed += 1
         return {"status": "OK", "jobs_claimed": len(messages), "succeeded": succeeded, "failed": failed, "abstained": abstained}
     finally:

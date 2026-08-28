@@ -6,7 +6,7 @@ from math import exp
 from typing import Iterable, Sequence
 
 from .dixon_coles import DixonColesPolicy, probability_matrix, result_probabilities, time_decay_weight
-from .elo import EloPolicy, EloState, expected_score, update_elo
+from .elo import EloPolicy, EloState, update_elo
 
 
 @dataclass(frozen=True)
@@ -53,18 +53,16 @@ def _team_rates(train: Sequence[Match], cutoff: datetime, policy: DixonColesPoli
             raise LeakageError(f"training row {m.match_id} is not before cutoff")
         days = (cutoff - played).total_seconds() / 86400.0
         w = time_decay_weight(days, policy.decay_half_life_days)
-        for team, gf, ga in (
-            (m.home_team_id, m.home_goals, m.away_goals),
-            (m.away_team_id, m.away_goals, m.home_goals),
-        ):
+        for team, gf, ga in ((m.home_team_id, m.home_goals, m.away_goals), (m.away_team_id, m.away_goals, m.home_goals)):
             goals_for[team] = goals_for.get(team, 0.0) + w * gf
             goals_against[team] = goals_against.get(team, 0.0) + w * ga
         total_weight += 2.0 * w
         total_goals += w * (m.home_goals + m.away_goals)
 
     league_goal_rate = total_goals / max(total_weight, 1e-12)
-    attack = {team: (goals_for.get(team, 0.0) / max(total_weight / 2.0, 1e-12)) / max(league_goal_rate, 1e-12) for team in goals_for}
-    defense = {team: (goals_against.get(team, 0.0) / max(total_weight / 2.0, 1e-12)) / max(league_goal_rate, 1e-12) for team in goals_against}
+    per_team_weight = max(total_weight / 2.0, 1e-12)
+    attack = {team: (gf / per_team_weight) / max(league_goal_rate, 1e-12) for team, gf in goals_for.items()}
+    defense = {team: (ga / per_team_weight) / max(league_goal_rate, 1e-12) for team, ga in goals_against.items()}
     return attack, defense, max(league_goal_rate, 1e-6)
 
 
@@ -75,7 +73,7 @@ def predict_with_state(
     cutoff: datetime,
     elo_policy: EloPolicy = EloPolicy(),
     dc_policy: DixonColesPolicy = DixonColesPolicy(),
-) -> tuple[Prediction, dict[str, EloState]]:
+) -> Prediction:
     if _utc(match.played_at) < _utc(cutoff):
         raise LeakageError("test match must be at or after the fold cutoff")
 
@@ -90,11 +88,12 @@ def predict_with_state(
     home_defense = defense.get(match.home_team_id, 1.0)
     away_defense = defense.get(match.away_team_id, 1.0)
 
-    home_lambda = max(0.05, league_rate * dc_policy.home_advantage * home_attack / max(away_defense, 0.05) * (0.75 + 0.5 * elo_factor))
+    # P0 baseline: multiplicative representation of the documented log-rate equation.
+    home_lambda = max(0.05, league_rate * exp(dc_policy.home_advantage) * home_attack / max(away_defense, 0.05) * (0.75 + 0.5 * elo_factor))
     away_lambda = max(0.05, league_rate * away_attack / max(home_defense, 0.05) * (1.25 - 0.5 * elo_factor))
     matrix = probability_matrix(home_lambda, away_lambda, dc_policy.rho, dc_policy.max_goals)
     p_home, p_draw, p_away = result_probabilities(matrix)
-    return Prediction(match.match_id, match.home_team_id, match.away_team_id, p_home, p_draw, p_away, home_lambda, away_lambda), ratings
+    return Prediction(match.match_id, match.home_team_id, match.away_team_id, p_home, p_draw, p_away, home_lambda, away_lambda)
 
 
 def run_fold(train: Sequence[Match], test: Sequence[Match], cutoff: datetime, elo_policy: EloPolicy = EloPolicy(), dc_policy: DixonColesPolicy = DixonColesPolicy()) -> list[Prediction]:
@@ -114,16 +113,19 @@ def run_fold(train: Sequence[Match], test: Sequence[Match], cutoff: datetime, el
         ratings[m.home_team_id] = h2
         ratings[m.away_team_id] = a2
 
-    return [predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy)[0] for m in test]
+    return [predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy) for m in test]
 
 
 def build_walk_forward_folds(matches: Iterable[Match], cutoffs: Sequence[datetime], test_window_days: int = 30) -> list[tuple[list[Match], list[Match], datetime]]:
+    if test_window_days <= 0:
+        raise ValueError("test_window_days must be positive")
     ordered = sorted(matches, key=lambda m: _utc(m.played_at))
     folds: list[tuple[list[Match], list[Match], datetime]] = []
     for cutoff_raw in cutoffs:
         cutoff = _utc(cutoff_raw)
         end = cutoff.timestamp() + test_window_days * 86400.0
+        test_end = datetime.fromtimestamp(end, timezone.utc)
         train = [m for m in ordered if _utc(m.played_at) < cutoff]
-        test = [m for m in ordered if cutoff <= _utc(m.played_at) < datetime.fromtimestamp(end, timezone.utc)]
+        test = [m for m in ordered if cutoff <= _utc(m.played_at) < test_end]
         folds.append((train, test, cutoff))
     return folds

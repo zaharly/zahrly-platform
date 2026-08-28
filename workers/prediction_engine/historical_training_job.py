@@ -20,9 +20,9 @@ def main():
         cutoff=cs[-1]
         with conn.transaction():
             with conn.cursor() as c:
-                c.execute("insert into public.model_versions(family,version,status,training_cutoff) values (%s,%s,'SHADOW',%s) returning id::text",('prediction_engine',version,cutoff))
+                c.execute("insert into public.model_versions(family,version,status,training_cutoff) values (%s,%s,'SHADOW',%s) returning id::text as id",('prediction_engine',version,cutoff))
                 mid=c.fetchone()['id']
-                c.execute("insert into internal.prediction_training_runs(model_version_id,status,requested_cutoff,started_at,metrics) values (%s,'RUNNING',%s,%s,%s) returning id::text",(mid,cutoff,started,json.dumps({'source':'s3_fixture_archive','settled_matches':len(matches)})))
+                c.execute("insert into internal.prediction_training_runs(model_version_id,status,requested_cutoff,started_at,metrics) values (%s,'RUNNING',%s,%s,%s) returning id::text as id",(mid,cutoff,started,json.dumps({'source':'s3_fixture_archive','settled_matches':len(matches)})))
                 rid=c.fetchone()['id']
         try:
             fs=build_walk_forward_folds(matches,cs,test_window_days=30)
@@ -41,7 +41,8 @@ def main():
                     with conn.cursor() as c:
                         c.execute("insert into internal.prediction_training_folds(training_run_id,fold_no,train_cutoff,test_start,test_end,status,metrics) values (%s,%s,%s,%s,%s,%s,%s)",(rid,no,co,co,co+timedelta(days=30),status,json.dumps(sm)))
 
-            metrics={'settled_matches':len(matches),'folds':summaries,'predictions':total,'mean_brier_1x2':sum(bs)/len(bs) if bs else None}
+            if not bs: raise RuntimeError('prediction_training_gate_failed:no_successful_folds')
+            metrics={'settled_matches':len(matches),'folds':len(summaries),'successful_folds':sum(1 for s in summaries if s['status']=='SUCCEEDED'),'predictions':total,'brier_1x2_mean':sum(bs)/len(bs),'folds_detail':summaries}
             artifact=json.dumps({'schema_version':'zahrly-prediction-model-v1','model_version_id':mid,'family':'prediction_engine','training_cutoff':cutoff.isoformat(),'training_source':'s3_fixture_archive','metrics':metrics},sort_keys=True)
             digest=hashlib.sha256(artifact.encode()).hexdigest()
             key=f"zahrly/prediction/models/{version}.json"
@@ -51,7 +52,7 @@ def main():
             with conn.transaction():
                 with conn.cursor() as c:
                     c.execute("update internal.prediction_training_runs set status='SUCCEEDED',finished_at=%s,metrics=%s where id=%s",(datetime.now(timezone.utc),json.dumps(metrics),rid))
-                    c.execute("update public.model_versions set artifact_uri=%s,artifact_sha256=%s where id=%s",(key,digest,mid))
+                    c.execute("update public.model_versions set artifact_uri=%s,artifact_sha256=%s,status='SHADOW' where id=%s",(f"s3://{os.environ['S3_BUCKET']}/{key}",digest,mid))
             print(json.dumps({'training_run_id':rid,'model_version_id':mid,'settled_matches':len(matches),'folds':summaries,'artifact_uri':key,'artifact_sha256':digest},sort_keys=True))
         except Exception as exc:
             with conn.transaction():

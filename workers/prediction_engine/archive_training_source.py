@@ -62,6 +62,21 @@ def fetch_fixture_manifests(conn, min_completeness: float = 1.0) -> list[Archive
         return [ArchiveManifest(**row) for row in cur.fetchall()]
 
 
+def fetch_team_identity_map(conn) -> dict[str, str]:
+    """Map API-Football external team IDs to canonical Zahrly team UUIDs."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            select external_team_id, team_id::text as team_id
+              from public.team_aliases
+             where provider = 'api-football'
+               and external_team_id is not null
+               and team_id is not null
+            """
+        )
+        return {str(row["external_team_id"]): str(row["team_id"]) for row in cur.fetchall()}
+
+
 def _s3_client():
     endpoint = os.environ.get("S3_ENDPOINT_URL", "").strip() or None
     kwargs: dict[str, Any] = {
@@ -167,7 +182,16 @@ def _value_from_paths(row: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -
     return None
 
 
-def _to_match(row: dict[str, Any]) -> Match | None:
+def _canonical_team_id(raw: Any, team_identity_map: dict[str, str]) -> str | None:
+    if raw is None:
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    return team_identity_map.get(value, value)
+
+
+def _to_match(row: dict[str, Any], team_identity_map: dict[str, str]) -> Match | None:
     """Normalize raw API-Football or canonical fixture rows into a training Match."""
     status = _value_from_paths(
         row,
@@ -186,14 +210,16 @@ def _to_match(row: dict[str, Any]) -> Match | None:
         row,
         (("played_at",), ("kickoff_at",), ("fixture", "date"), ("date",)),
     )
-    home_team_id = _value_from_paths(
+    home_raw = _value_from_paths(
         row,
         (("home_team_id",), ("teams", "home", "id"), ("home", "id")),
     )
-    away_team_id = _value_from_paths(
+    away_raw = _value_from_paths(
         row,
         (("away_team_id",), ("teams", "away", "id"), ("away", "id")),
     )
+    home_team_id = _canonical_team_id(home_raw, team_identity_map)
+    away_team_id = _canonical_team_id(away_raw, team_identity_map)
     home_goals_raw = _value_from_paths(
         row,
         (("home_goals",), ("goals", "home"), ("score", "fulltime", "home")),
@@ -218,28 +244,33 @@ def _to_match(row: dict[str, Any]) -> Match | None:
     return Match(
         str(match_id),
         played,
-        str(home_team_id),
-        str(away_team_id),
+        home_team_id,
+        away_team_id,
         home_goals,
         away_goals,
     )
 
 
 def load_settled_matches(conn, as_of: datetime | None = None) -> list[Match]:
-    """Load settled results strictly from the existing S3 fixture archive."""
+    """Load settled results strictly from the existing S3 fixture archive with canonical team IDs."""
     manifests = fetch_fixture_manifests(conn)
     if not manifests:
         raise RuntimeError("prediction_training_source_unavailable: no fixture manifests")
 
+    team_identity_map = fetch_team_identity_map(conn)
     client = _s3_client()
     cutoff = _as_datetime(as_of or datetime.now(timezone.utc))
     by_id: dict[str, Match] = {}
-    discovered = accepted_before_cutoff = 0
+    discovered = accepted_before_cutoff = canonicalized_teams = 0
     for manifest in manifests:
         document = load_manifest_json(client, manifest)
         for row in _extract_rows(document):
             discovered += 1
-            match = _to_match(row)
+            raw_home = _value_from_paths(row, (("home_team_id",), ("teams", "home", "id"), ("home", "id")))
+            raw_away = _value_from_paths(row, (("away_team_id",), ("teams", "away", "id"), ("away", "id")))
+            if str(raw_home) in team_identity_map and str(raw_away) in team_identity_map:
+                canonicalized_teams += 1
+            match = _to_match(row, team_identity_map)
             if match is None or match.played_at >= cutoff:
                 continue
             accepted_before_cutoff += 1
@@ -250,6 +281,7 @@ def load_settled_matches(conn, as_of: datetime | None = None) -> list[Match]:
         raise RuntimeError(
             "prediction_training_source_unavailable: no settled fixture results "
             f"(archive_rows_discovered={discovered}, accepted_before_cutoff={accepted_before_cutoff}, "
+            f"team_rows_canonicalized={canonicalized_teams}, team_aliases={len(team_identity_map)}, "
             f"manifests={len(manifests)})"
         )
     return matches

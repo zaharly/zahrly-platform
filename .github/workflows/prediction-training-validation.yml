@@ -10,12 +10,13 @@ permissions:
 
 concurrency:
   group: zahrly-p0-training-validation
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   walk-forward:
     name: Historical S3 walk-forward validation
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     env:
       SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
       SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com

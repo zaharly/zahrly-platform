@@ -8,13 +8,23 @@ on:
 permissions:
   contents: read
 
+# Only one scheduled worker batch may run at a time. This prevents two
+# workflow runs from competing for the same provider quota window.
+concurrency:
+  group: historical-backfill-canonical
+  cancel-in-progress: false
+
 env:
   PROVIDER_FIXTURE_PERSISTENCE_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-fixture-persistence
 
 jobs:
   historical-backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3, 4]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -31,6 +41,7 @@ jobs:
           S3_BUCKET: ${{ secrets.S3_BUCKET }}
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+          S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
         run: |
           set -euo pipefail
           SUPABASE_DB_URL="$(printf '%s' "${SUPABASE_DB_URL}" | tr -d '\r\n')"
@@ -40,11 +51,11 @@ jobs:
           S3_BUCKET="$(printf '%s' "${S3_BUCKET}" | tr -d '\r\n')"
           S3_ACCESS_KEY_ID="$(printf '%s' "${S3_ACCESS_KEY_ID}" | tr -d '\r\n')"
           S3_SECRET_ACCESS_KEY="$(printf '%s' "${S3_SECRET_ACCESS_KEY}" | tr -d '\r\n')"
+          S3_ENDPOINT_URL="$(printf '%s' "${S3_ENDPOINT_URL:-}" | tr -d '\r\n')"
           export SUPABASE_DB_URL API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET PROVIDER_FIXTURE_PERSISTENCE_URL
-          export S3_REGION S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY
+          export S3_REGION S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_ENDPOINT_URL
           test -n "${SUPABASE_DB_URL}"
           test -n "${API_FOOTBALL_KEY}"
-          test -n "${PROVIDER_GATEWAY_SECRET}"
           test -n "${S3_REGION}"
           test -n "${S3_BUCKET}"
           test -n "${S3_ACCESS_KEY_ID}"
@@ -59,8 +70,9 @@ jobs:
             -e S3_BUCKET \
             -e S3_ACCESS_KEY_ID \
             -e S3_SECRET_ACCESS_KEY \
+            -e S3_ENDPOINT_URL \
             -e BATCH_SIZE=10 \
             zahrly-historical-backfill:ci \
-            python -m workers.historical_backfill.worker > historical_backfill.json
+            python -m workers.historical_backfill.worker > historical_backfill-${{ matrix.slot }}.json
 
-          cat historical_backfill.json
+          cat historical_backfill-${{ matrix.slot }}.json

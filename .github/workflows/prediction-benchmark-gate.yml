@@ -1,0 +1,66 @@
+name: Zahrly P0 Prediction Benchmark Gate
+
+on:
+  workflow_run:
+    workflows: ["Zahrly P0 Prediction Training Validation"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zahrly-p0-benchmark-gate
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    name: Historical OOS benchmark and threshold gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      SUPABASE_PROJECT_REF: qosvqlwkexrhswcuakib
+      SUPABASE_POOLER_HOST: aws-0-eu-central-1.pooler.supabase.com
+      SUPABASE_POOLER_PORT: "5432"
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
+      S3_REGION: eu-north-1
+      S3_BUCKET: zahrly-community-storage
+      S3_PREFIX: ${{ secrets.S3_PREFIX }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout tested revision
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Validate secrets and normalize PostgreSQL URL
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SUPABASE_DB_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY; do test -n "${!v}" || { echo "missing GitHub secret: $v"; exit 1; }; done
+          if [ -z "${S3_PREFIX:-}" ]; then echo "S3_PREFIX=zahrly/archive" >> "$GITHUB_ENV"; fi
+          python - <<'PY'
+          import os
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+          raw=os.environ['SUPABASE_DB_URL'].strip(); p=urlsplit(raw)
+          if p.scheme not in {'postgres','postgresql'} or not p.hostname or p.password is None: raise SystemExit('invalid SUPABASE_DB_URL')
+          host=p.hostname.lower().rstrip('.'); user=unquote(p.username or 'postgres'); password=quote(unquote(p.password), safe=''); project=os.environ['SUPABASE_PROJECT_REF']
+          if host.endswith('.pooler.supabase.com'):
+              selected_host=host; selected_port=p.port or int(os.environ['SUPABASE_POOLER_PORT'])
+              if '.' not in user: user=f'postgres.{project}'
+          elif host == f'db.{project}.supabase.co':
+              selected_host=os.environ['SUPABASE_POOLER_HOST']; selected_port=int(os.environ['SUPABASE_POOLER_PORT'])
+              if user == 'postgres': user=f'postgres.{project}'
+          else: raise SystemExit(f'unsupported Supabase host: {host}')
+          query=p.query or ''
+          if 'sslmode=' not in query: query=(query+'&' if query else '')+'sslmode=require'
+          normalized=urlunsplit(('postgresql',f'{quote(user,safe="")}:{password}@{selected_host}:{selected_port}',p.path or '/postgres',query,''))
+          with open(os.environ['GITHUB_ENV'],'a') as f: f.write(f'SUPABASE_DB_URL={normalized}\n')
+          PY
+      - name: Install prediction-engine dependencies
+        run: python -m pip install --upgrade pip && pip install -r workers/archive_worker/requirements.txt
+      - name: Refresh fixed historical OOS benchmark dataset
+        run: python -m workers.prediction_engine.oos_benchmark
+      - name: Evaluate empirical and market threshold gate
+        run: python -m workers.prediction_engine.benchmark_gate

@@ -62,7 +62,9 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r workers/archive_worker/requirements.txt
       - name: Run historical walk-forward validation and publish SHADOW artifact
         run: python -m workers.prediction_engine.historical_training_job
-      - name: Reconcile persisted training state
+      - name: Build fixed historical OOS benchmark dataset
+        run: python -m workers.prediction_engine.oos_benchmark
+      - name: Reconcile persisted training state and enforce promotion gates
         shell: bash
         run: |
           python - <<'PY'
@@ -94,6 +96,8 @@ jobs:
               folds = cur.fetchone()[0]
               cur.execute("select count(*) from public.model_versions where upper(status)='SHADOW' and artifact_uri is not null")
               models = cur.fetchone()[0]
+              cur.execute("select count(*) from internal.prediction_oos_benchmark where training_run_id=(select id from internal.prediction_training_runs order by started_at desc limit 1)")
+              benchmark_rows = cur.fetchone()[0]
 
           if not latest:
               raise SystemExit('training persistence gate failed: no training run')
@@ -102,6 +106,10 @@ jobs:
           validation_status = metrics.get('validation_status', 'UNKNOWN')
           validation_eligible = bool(metrics.get('validation_eligible', False))
           promotion_blocked = bool(metrics.get('promotion_blocked', True))
+          benchmark = metrics.get('benchmark') or {}
+          model_scores = benchmark.get('model') or {}
+          empirical = benchmark.get('empirical_baseline') or {}
+          market = benchmark.get('market') or {}
 
           print(f'latest_training_run={run_id}')
           print(f'latest_training_status={run_status}')
@@ -115,9 +123,19 @@ jobs:
           print(f'successful_training_runs={runs}')
           print(f'successful_training_folds={folds}')
           print(f'shadow_models_with_artifacts={models}')
+          print(f'benchmark_rows={benchmark_rows}')
+          print(f'model_brier={model_scores.get("brier")}')
+          print(f'empirical_brier={empirical.get("brier")}')
+          print(f'market_rows={market.get("n", 0)}')
+          print(f'market_brier={market.get("brier")}')
 
           if run_status != 'SUCCEEDED': raise SystemExit('training persistence gate failed: latest run not succeeded')
           if model_status.upper() != 'SHADOW' or not artifact_uri: raise SystemExit('training persistence gate failed: latest model is not SHADOW with artifact')
           if manifests <= 0: raise SystemExit('training persistence gate failed: no eligible archive manifests')
+          if benchmark_rows <= 0: raise SystemExit('benchmark gate failed: no fixed OOS benchmark rows')
           if not promotion_blocked and not validation_eligible: raise SystemExit('training persistence gate failed: inconsistent validation state')
+          if not validation_eligible and validation_status != 'INSUFFICIENT_HISTORY': raise SystemExit('training persistence gate failed: unexpected validation state')
+
+          print('promotion_gate=BLOCKED unless validation_eligible=true')
+          print('benchmark_thresholds: brier>=3%, log_loss>=2%, rps>=2%, ece regression<=0.01, seasons>=3, oos>=3000')
           PY

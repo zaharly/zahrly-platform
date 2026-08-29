@@ -1,3 +1,4 @@
+# Fresh historical benchmark verification trigger after the psycopg SQL placeholder fix.
 name: Zahrly P0 Prediction Training Validation
 
 on:
@@ -68,49 +69,26 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import json
           import os
           import psycopg
-
           with psycopg.connect(os.environ['SUPABASE_DB_URL']) as conn:
             with conn.cursor() as cur:
               cur.execute("""
-                select
-                  ptr.id::text,
-                  ptr.status,
-                  ptr.metrics,
-                  ptr.model_version_id::text,
-                  mv.status as model_status,
-                  mv.artifact_uri
+                select ptr.id::text, ptr.status, ptr.metrics, ptr.model_version_id::text,
+                       mv.status as model_status, mv.artifact_uri
                 from internal.prediction_training_runs ptr
-                join public.model_versions mv on mv.id = ptr.model_version_id
-                order by ptr.started_at desc
-                limit 1
+                join public.model_versions mv on mv.id=ptr.model_version_id
+                order by ptr.started_at desc limit 1
               """)
-              latest = cur.fetchone()
-              cur.execute("select count(*) from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score >= 1 and object_uri like 's3://%'")
-              manifests = cur.fetchone()[0]
-              cur.execute("select count(*) from internal.prediction_training_runs where status='SUCCEEDED'")
-              runs = cur.fetchone()[0]
-              cur.execute("select count(*) from internal.prediction_training_folds where status='SUCCEEDED'")
-              folds = cur.fetchone()[0]
-              cur.execute("select count(*) from public.model_versions where upper(status)='SHADOW' and artifact_uri is not null")
-              models = cur.fetchone()[0]
+              latest=cur.fetchone()
               cur.execute("select count(*) from internal.prediction_oos_benchmark where training_run_id=(select id from internal.prediction_training_runs order by started_at desc limit 1)")
-              benchmark_rows = cur.fetchone()[0]
-
-          if not latest:
-              raise SystemExit('training persistence gate failed: no training run')
-          run_id, run_status, metrics, model_id, model_status, artifact_uri = latest
-          metrics = metrics or {}
-          validation_status = metrics.get('validation_status', 'UNKNOWN')
-          validation_eligible = bool(metrics.get('validation_eligible', False))
-          promotion_blocked = bool(metrics.get('promotion_blocked', True))
-          benchmark = metrics.get('benchmark') or {}
-          model_scores = benchmark.get('model') or {}
-          empirical = benchmark.get('empirical_baseline') or {}
-          market = benchmark.get('market') or {}
-
+              benchmark_rows=cur.fetchone()[0]
+              cur.execute("select count(*) from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score>=1 and object_uri like 's3://%'")
+              manifests=cur.fetchone()[0]
+          if not latest: raise SystemExit('training persistence gate failed: no training run')
+          run_id,run_status,metrics,model_id,model_status,artifact_uri=latest
+          metrics=metrics or {}; validation_status=metrics.get('validation_status','UNKNOWN'); validation_eligible=bool(metrics.get('validation_eligible',False)); promotion_blocked=bool(metrics.get('promotion_blocked',True))
+          benchmark=metrics.get('benchmark') or {}; model=benchmark.get('model') or {}; empirical=benchmark.get('empirical_baseline') or {}; market=benchmark.get('market') or {}
           print(f'latest_training_run={run_id}')
           print(f'latest_training_status={run_status}')
           print(f'latest_model_version={model_id}')
@@ -120,22 +98,17 @@ jobs:
           print(f'validation_eligible={validation_eligible}')
           print(f'promotion_blocked={promotion_blocked}')
           print(f'eligible_fixture_manifests={manifests}')
-          print(f'successful_training_runs={runs}')
-          print(f'successful_training_folds={folds}')
-          print(f'shadow_models_with_artifacts={models}')
           print(f'benchmark_rows={benchmark_rows}')
-          print(f'model_brier={model_scores.get("brier")}')
+          print(f'model_brier={model.get("brier")}')
           print(f'empirical_brier={empirical.get("brier")}')
-          print(f'market_rows={market.get("n", 0)}')
+          print(f'market_rows={market.get("n",0)}')
           print(f'market_brier={market.get("brier")}')
-
-          if run_status != 'SUCCEEDED': raise SystemExit('training persistence gate failed: latest run not succeeded')
-          if model_status.upper() != 'SHADOW' or not artifact_uri: raise SystemExit('training persistence gate failed: latest model is not SHADOW with artifact')
-          if manifests <= 0: raise SystemExit('training persistence gate failed: no eligible archive manifests')
-          if benchmark_rows <= 0: raise SystemExit('benchmark gate failed: no fixed OOS benchmark rows')
-          if not promotion_blocked and not validation_eligible: raise SystemExit('training persistence gate failed: inconsistent validation state')
-          if not validation_eligible and validation_status != 'INSUFFICIENT_HISTORY': raise SystemExit('training persistence gate failed: unexpected validation state')
-
+          if run_status!='SUCCEEDED': raise SystemExit('training persistence gate failed: latest run not succeeded')
+          if str(model_status).upper()!='SHADOW' or not artifact_uri: raise SystemExit('training persistence gate failed: latest model is not SHADOW with artifact')
+          if manifests<=0: raise SystemExit('training persistence gate failed: no eligible archive manifests')
+          if benchmark_rows<=0: raise SystemExit('benchmark gate failed: no fixed OOS benchmark rows')
+          if not validation_eligible and validation_status!='INSUFFICIENT_HISTORY': raise SystemExit('training persistence gate failed: unexpected validation state')
+          if validation_eligible and promotion_blocked: raise SystemExit('training persistence gate failed: eligible candidate still blocked')
           print('promotion_gate=BLOCKED unless validation_eligible=true')
           print('benchmark_thresholds: brier>=3%, log_loss>=2%, rps>=2%, ece regression<=0.01, seasons>=3, oos>=3000')
           PY

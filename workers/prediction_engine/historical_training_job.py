@@ -168,9 +168,6 @@ def main():
             raise RuntimeError(f'prediction_training_gate_failed:settled_matches={len(matches)}')
 
         cutoffs = build_cutoffs(matches[0].played_at, matches[-1].played_at)
-        if not cutoffs:
-            raise RuntimeError('prediction_training_gate_failed:no_complete_calendar_folds')
-
         version = 'p0-shadow-' + started.strftime('%Y%m%d%H%M%S')
         cutoff = started
         with conn.transaction():
@@ -181,7 +178,7 @@ def main():
                 run_id = cur.fetchone()['id']
 
         try:
-            folds = build_walk_forward_folds(matches, cutoffs)
+            folds = build_walk_forward_folds(matches, cutoffs) if cutoffs else []
             summaries = []
             total_predictions = 0
             total_brier = total_logloss = total_rps = 0.0
@@ -219,10 +216,8 @@ def main():
 
             successful_folds = [s for s in summaries if s['status'] == 'SUCCEEDED']
             complete_seasons = len(set(fold_years))
-            if total_predictions < MIN_OOS_SAMPLES:
-                raise RuntimeError(f'prediction_training_gate_failed:oos_predictions={total_predictions}')
-            if complete_seasons < MIN_COMPLETE_SEASONS:
-                raise RuntimeError(f'prediction_training_gate_failed:complete_oos_seasons={complete_seasons}')
+            validation_eligible = total_predictions >= MIN_OOS_SAMPLES and complete_seasons >= MIN_COMPLETE_SEASONS
+            validation_status = 'ELIGIBLE' if validation_eligible else 'INSUFFICIENT_HISTORY'
 
             elo_policy = EloPolicy()
             glicko_policy = GlickoPolicy()
@@ -237,10 +232,13 @@ def main():
                 'successful_folds': len(successful_folds),
                 'complete_oos_seasons': complete_seasons,
                 'predictions': total_predictions,
-                'brier_1x2_mean': total_brier / total_predictions,
-                'log_loss_1x2_mean': total_logloss / total_predictions,
-                'rps_1x2_mean': total_rps / total_predictions,
+                'brier_1x2_mean': total_brier / total_predictions if total_predictions else None,
+                'log_loss_1x2_mean': total_logloss / total_predictions if total_predictions else None,
+                'rps_1x2_mean': total_rps / total_predictions if total_predictions else None,
                 'folds_detail': summaries,
+                'validation_status': validation_status,
+                'validation_eligible': validation_eligible,
+                'promotion_blocked': not validation_eligible,
                 'gates': {'min_oos_samples': MIN_OOS_SAMPLES, 'min_complete_seasons': MIN_COMPLETE_SEASONS},
             }
             artifact = _build_artifact(model_id, cutoff, metrics, final_elo, final_glicko, elo_policy, glicko_policy, league_rate, attack, defense, dc_policy)
@@ -253,7 +251,7 @@ def main():
                     cur.execute("update internal.prediction_training_runs set status='SUCCEEDED',finished_at=%s,metrics=%s where id=%s", (datetime.now(timezone.utc), json.dumps(metrics), run_id))
                     cur.execute("update public.model_versions set artifact_uri=%s where id=%s", (artifact_uri, model_id))
 
-            print(json.dumps({'training_run_id': run_id, 'model_version_id': model_id, 'version': version, **{k: metrics[k] for k in ('settled_matches','successful_folds','complete_oos_seasons','predictions','brier_1x2_mean','log_loss_1x2_mean','rps_1x2_mean','artifact_uri','artifact_sha256')}}, sort_keys=True))
+            print(json.dumps({'training_run_id': run_id, 'model_version_id': model_id, 'version': version, **{k: metrics[k] for k in ('settled_matches','successful_folds','complete_oos_seasons','predictions','brier_1x2_mean','log_loss_1x2_mean','rps_1x2_mean','validation_status','validation_eligible','artifact_uri','artifact_sha256')}}, sort_keys=True))
         except Exception as exc:
             with conn.transaction():
                 with conn.cursor() as cur:

@@ -8,8 +8,6 @@ on:
 permissions:
   contents: read
 
-# Only one scheduled worker batch may run at a time. This prevents two
-# workflow runs from competing for the same provider quota window.
 concurrency:
   group: historical-backfill-canonical
   cancel-in-progress: false
@@ -72,7 +70,8 @@ jobs:
             -e S3_SECRET_ACCESS_KEY \
             -e S3_ENDPOINT_URL \
             -e BATCH_SIZE=10 \
+            -e WORKER_RATE_LIMIT_PER_MINUTE=12 \
             zahrly-historical-backfill:ci \
-            python -m workers.historical_backfill.worker > historical_backfill-${{ matrix.slot }}.json
+            python -c "import os; from workers.historical_backfill import worker; worker.LIMITER.limit=int(os.getenv('WORKER_RATE_LIMIT_PER_MINUTE','12')); raise SystemExit(worker.main())" > historical_backfill-${{ matrix.slot }}.json
 
           cat historical_backfill-${{ matrix.slot }}.json

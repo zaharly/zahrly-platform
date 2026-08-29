@@ -1,4 +1,5 @@
 # Fresh historical benchmark verification trigger after the psycopg SQL placeholder fix.
+# Manual re-run trigger marker: 2026-08-29T13:18Z
 name: Zahrly P0 Prediction Training Validation
 
 on:

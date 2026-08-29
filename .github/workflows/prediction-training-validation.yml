@@ -66,20 +66,58 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import os, psycopg
+          import json
+          import os
+          import psycopg
+
           with psycopg.connect(os.environ['SUPABASE_DB_URL']) as conn:
             with conn.cursor() as cur:
+              cur.execute("""
+                select
+                  ptr.id::text,
+                  ptr.status,
+                  ptr.metrics,
+                  ptr.model_version_id::text,
+                  mv.status as model_status,
+                  mv.artifact_uri
+                from internal.prediction_training_runs ptr
+                join public.model_versions mv on mv.id = ptr.model_version_id
+                order by ptr.started_at desc
+                limit 1
+              """)
+              latest = cur.fetchone()
               cur.execute("select count(*) from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score >= 1 and object_uri like 's3://%'")
-              manifests=cur.fetchone()[0]
+              manifests = cur.fetchone()[0]
               cur.execute("select count(*) from internal.prediction_training_runs where status='SUCCEEDED'")
-              runs=cur.fetchone()[0]
+              runs = cur.fetchone()[0]
               cur.execute("select count(*) from internal.prediction_training_folds where status='SUCCEEDED'")
-              folds=cur.fetchone()[0]
+              folds = cur.fetchone()[0]
               cur.execute("select count(*) from public.model_versions where upper(status)='SHADOW' and artifact_uri is not null")
-              models=cur.fetchone()[0]
+              models = cur.fetchone()[0]
+
+          if not latest:
+              raise SystemExit('training persistence gate failed: no training run')
+          run_id, run_status, metrics, model_id, model_status, artifact_uri = latest
+          metrics = metrics or {}
+          validation_status = metrics.get('validation_status', 'UNKNOWN')
+          validation_eligible = bool(metrics.get('validation_eligible', False))
+          promotion_blocked = bool(metrics.get('promotion_blocked', True))
+
+          print(f'latest_training_run={run_id}')
+          print(f'latest_training_status={run_status}')
+          print(f'latest_model_version={model_id}')
+          print(f'latest_model_status={model_status}')
+          print(f'latest_artifact_uri={artifact_uri}')
+          print(f'validation_status={validation_status}')
+          print(f'validation_eligible={validation_eligible}')
+          print(f'promotion_blocked={promotion_blocked}')
           print(f'eligible_fixture_manifests={manifests}')
           print(f'successful_training_runs={runs}')
           print(f'successful_training_folds={folds}')
           print(f'shadow_models_with_artifacts={models}')
-          if manifests <= 0 or runs <= 0 or folds <= 0 or models <= 0: raise SystemExit('training persistence gate failed')
+
+          if run_status != 'SUCCEEDED': raise SystemExit('training persistence gate failed: latest run not succeeded')
+          if model_status.upper() != 'SHADOW' or not artifact_uri: raise SystemExit('training persistence gate failed: latest model is not SHADOW with artifact')
+          if manifests <= 0: raise SystemExit('training persistence gate failed: no eligible archive manifests')
+          if not promotion_blocked and not validation_eligible: raise SystemExit('training persistence gate failed: inconsistent validation state')
           PY

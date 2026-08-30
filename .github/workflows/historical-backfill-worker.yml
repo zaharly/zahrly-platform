@@ -2,18 +2,16 @@ name: historical-backfill-worker
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '* * * * *'
 
 permissions:
   contents: read
 
+# Historical backfill is executed by the Supabase cron -> pgmq -> Edge worker
+# path. This workflow remains manual-only for diagnostics and emergency runs so
+# GitHub Actions cannot create a second competing execution owner.
 concurrency:
-  group: historical-backfill-canonical
+  group: historical-backfill-manual
   cancel-in-progress: false
-
-env:
-  PROVIDER_FIXTURE_PERSISTENCE_URL: https://qosvqlwkexrhswcuakib.supabase.co/functions/v1/provider-fixture-persistence
 
 jobs:
   historical-backfill:
@@ -43,21 +41,18 @@ jobs:
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          export SUPABASE_DB_URL API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET PROVIDER_FIXTURE_PERSISTENCE_URL
+          export SUPABASE_DB_URL API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET
           export S3_REGION S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_ENDPOINT_URL
-
           test -n "${SUPABASE_DB_URL}"
           test -n "${API_FOOTBALL_KEY}"
           test -n "${S3_REGION}"
           test -n "${S3_BUCKET}"
           test -n "${S3_ACCESS_KEY_ID}"
           test -n "${S3_SECRET_ACCESS_KEY}"
-
           docker run --rm \
             -e SUPABASE_DB_URL \
             -e API_FOOTBALL_KEY \
             -e PROVIDER_GATEWAY_SECRET \
-            -e PROVIDER_FIXTURE_PERSISTENCE_URL \
             -e S3_REGION \
             -e S3_BUCKET \
             -e S3_ACCESS_KEY_ID \
@@ -69,7 +64,4 @@ jobs:
             -e RETRY_SLEEP_SECONDS=30 \
             -e MAX_RUNTIME_SECONDS=2700 \
             zahrly-historical-backfill:ci \
-            python -m workers.historical_backfill.continuous_runner \
-            > historical_backfill-${{ matrix.slot }}.json
-
-          cat historical_backfill-${{ matrix.slot }}.json
+            python -m workers.historical_backfill.continuous_runner

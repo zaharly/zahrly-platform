@@ -8,8 +8,6 @@ on:
 permissions:
   contents: read
 
-# One scheduled run at a time, with four independent worker slots inside the run.
-# The worker pool is intentionally bounded below the provider safety cap.
 concurrency:
   group: historical-backfill-canonical
   cancel-in-progress: false
@@ -55,9 +53,6 @@ jobs:
           test -n "${S3_ACCESS_KEY_ID}"
           test -n "${S3_SECRET_ACCESS_KEY}"
 
-          # Each slot owns a disjoint DB claim. The DB row lock/idempotency key
-          # prevents duplicate work; the per-process limiter keeps aggregate
-          # traffic at <= 48 requests/minute across four slots.
           docker run --rm \
             -e SUPABASE_DB_URL \
             -e API_FOOTBALL_KEY \
@@ -70,8 +65,10 @@ jobs:
             -e S3_ENDPOINT_URL \
             -e BATCH_SIZE=25 \
             -e WORKER_RATE_LIMIT_PER_MINUTE=12 \
+            -e IDLE_SLEEP_SECONDS=10 \
+            -e RETRY_SLEEP_SECONDS=30 \
             zahrly-historical-backfill:ci \
-            python -c "import os; from workers.historical_backfill import worker; worker.LIMITER.limit=int(os.getenv('WORKER_RATE_LIMIT_PER_MINUTE','12')); raise SystemExit(worker.main())" \
+            python -m workers.historical_backfill.continuous_runner \
             > historical_backfill-${{ matrix.slot }}.json
 
           cat historical_backfill-${{ matrix.slot }}.json

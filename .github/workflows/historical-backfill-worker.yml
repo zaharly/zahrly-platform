@@ -43,6 +43,7 @@ jobs:
           S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
           S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
+          WORKER_SLOT: ${{ matrix.slot }}
         run: |
           set -euo pipefail
           test -n "${SUPABASE_DB_URL}"
@@ -60,10 +61,10 @@ jobs:
             -e S3_ACCESS_KEY_ID \
             -e S3_SECRET_ACCESS_KEY \
             -e S3_ENDPOINT_URL \
+            -e WORKER_SLOT \
             -e BATCH_SIZE=25 \
             -e WORKER_RATE_LIMIT_PER_MINUTE=12 \
             -e IDLE_SLEEP_SECONDS=10 \
-            -e RETRY_SLEEP_SECONDS=30 \
             -e MAX_RUNTIME_SECONDS=2700 \
             zahrly-historical-backfill:ci \
             python -m workers.historical_backfill.continuous_runner

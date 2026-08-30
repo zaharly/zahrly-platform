@@ -3,7 +3,7 @@ name: historical-backfill-worker
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
 
 permissions:
   contents: read
@@ -67,6 +67,7 @@ jobs:
             -e WORKER_RATE_LIMIT_PER_MINUTE=12 \
             -e IDLE_SLEEP_SECONDS=10 \
             -e RETRY_SLEEP_SECONDS=30 \
+            -e MAX_RUNTIME_SECONDS=2700 \
             zahrly-historical-backfill:ci \
             python -m workers.historical_backfill.continuous_runner \
             > historical_backfill-${{ matrix.slot }}.json

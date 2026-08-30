@@ -8,6 +8,8 @@ on:
 permissions:
   contents: read
 
+# One scheduled run at a time, with four independent worker slots inside the run.
+# The worker pool is intentionally bounded below the provider safety cap.
 concurrency:
   group: historical-backfill-canonical
   cancel-in-progress: false
@@ -21,6 +23,7 @@ jobs:
     timeout-minutes: 50
     strategy:
       fail-fast: false
+      max-parallel: 4
       matrix:
         slot: [1, 2, 3, 4]
     steps:
@@ -42,16 +45,9 @@ jobs:
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          SUPABASE_DB_URL="$(printf '%s' "${SUPABASE_DB_URL}" | tr -d '\r\n')"
-          API_FOOTBALL_KEY="$(printf '%s' "${API_FOOTBALL_KEY}" | tr -d '\r\n')"
-          PROVIDER_GATEWAY_SECRET="$(printf '%s' "${PROVIDER_GATEWAY_SECRET}" | tr -d '\r\n')"
-          S3_REGION="$(printf '%s' "${S3_REGION}" | tr -d '\r\n')"
-          S3_BUCKET="$(printf '%s' "${S3_BUCKET}" | tr -d '\r\n')"
-          S3_ACCESS_KEY_ID="$(printf '%s' "${S3_ACCESS_KEY_ID}" | tr -d '\r\n')"
-          S3_SECRET_ACCESS_KEY="$(printf '%s' "${S3_SECRET_ACCESS_KEY}" | tr -d '\r\n')"
-          S3_ENDPOINT_URL="$(printf '%s' "${S3_ENDPOINT_URL:-}" | tr -d '\r\n')"
           export SUPABASE_DB_URL API_FOOTBALL_KEY PROVIDER_GATEWAY_SECRET PROVIDER_FIXTURE_PERSISTENCE_URL
           export S3_REGION S3_BUCKET S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_ENDPOINT_URL
+
           test -n "${SUPABASE_DB_URL}"
           test -n "${API_FOOTBALL_KEY}"
           test -n "${S3_REGION}"
@@ -59,6 +55,9 @@ jobs:
           test -n "${S3_ACCESS_KEY_ID}"
           test -n "${S3_SECRET_ACCESS_KEY}"
 
+          # Each slot owns a disjoint DB claim. The DB row lock/idempotency key
+          # prevents duplicate work; the per-process limiter keeps aggregate
+          # traffic at <= 48 requests/minute across four slots.
           docker run --rm \
             -e SUPABASE_DB_URL \
             -e API_FOOTBALL_KEY \
@@ -69,9 +68,10 @@ jobs:
             -e S3_ACCESS_KEY_ID \
             -e S3_SECRET_ACCESS_KEY \
             -e S3_ENDPOINT_URL \
-            -e BATCH_SIZE=10 \
+            -e BATCH_SIZE=25 \
             -e WORKER_RATE_LIMIT_PER_MINUTE=12 \
             zahrly-historical-backfill:ci \
-            python -c "import os; from workers.historical_backfill import worker; worker.LIMITER.limit=int(os.getenv('WORKER_RATE_LIMIT_PER_MINUTE','12')); raise SystemExit(worker.main())" > historical_backfill-${{ matrix.slot }}.json
+            python -c "import os; from workers.historical_backfill import worker; worker.LIMITER.limit=int(os.getenv('WORKER_RATE_LIMIT_PER_MINUTE','12')); raise SystemExit(worker.main())" \
+            > historical_backfill-${{ matrix.slot }}.json
 
           cat historical_backfill-${{ matrix.slot }}.json

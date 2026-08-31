@@ -34,7 +34,7 @@ import SecurityPage from './pages/security/SecurityPage'
 import AuditLog from './pages/security/AuditLog'
 import Jurisdiction from './pages/security/Jurisdiction'
 import SettingsPage from './pages/settings/SettingsPage'
-import { BonusesPage, BonusEditor, GiveawaysPage, GiveawayEditor, PickRushPage, PickRushEditor, PrizePoolPage, PrizePoolEditor, BookmakersRadarPage, BookmakerEditor, LeaderboardsPage, LeaderboardBotEditor } from './pages/rewards/CampaignManagement'
+import { BonusesPage, BonusEditor, GiveawaysPage, GiveawayEditor, PickRushPage, PickRushEditor, PrizePoolPage, PrizePoolEditor, BookmakersRadarPage, BookmakerEditor, LeaderboardsPage, LeaderboardBotEditor } from './pages/rewards/RewardsAdmin'
 
 export default function App() {
   return <AdminAuthGate><StoreProvider><AppShell><Routes>
@@ -48,8 +48,8 @@ export default function App() {
     <Route path="/settings" element={<SettingsPage/>}/><Route path="/settings/feature-flags" element={<SettingsPage/>}/><Route path="/settings/environment" element={<SettingsPage/>}/><Route path="/settings/docs" element={<SettingsPage/>}/>
     <Route path="/bonuses" element={<BonusesPage/>}/><Route path="/bonuses/new" element={<BonusEditor/>}/><Route path="/bonuses/:id/edit" element={<BonusEditor/>}/>
     <Route path="/giveaways" element={<GiveawaysPage/>}/><Route path="/giveaways/new" element={<GiveawayEditor/>}/><Route path="/giveaways/:id/edit" element={<GiveawayEditor/>}/>
-    <Route path="/pickrush" element={<PickRushPage/>}/><Route path="/pickrush/new" element={<PickRushEditor/>}/>
-    <Route path="/prizepool" element={<PrizePoolPage/>}/><Route path="/prizepool/new" element={<PrizePoolEditor/>}/>
+    <Route path="/pickrush" element={<PickRushPage/>}/><Route path="/pickrush/new" element={<PickRushEditor/>}/><Route path="/pickrush/:id/edit" element={<PickRushEditor/>}/>
+    <Route path="/prizepool" element={<PrizePoolPage/>}/><Route path="/prizepool/new" element={<PrizePoolEditor/>}/><Route path="/prizepool/:id/edit" element={<PrizePoolEditor/>}/>
     <Route path="/bookmakersradar" element={<BookmakersRadarPage/>}/><Route path="/bookmakersradar/new" element={<BookmakerEditor/>}/><Route path="/bookmakersradar/:id/edit" element={<BookmakerEditor/>}/>
     <Route path="/leaderboards" element={<LeaderboardsPage/>}/><Route path="/leaderboards/new" element={<LeaderboardBotEditor/>}/><Route path="/leaderboards/:id/edit" element={<LeaderboardBotEditor/>}/>
     <Route path="*" element={<Dashboard/>}/>

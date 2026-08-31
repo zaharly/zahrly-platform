@@ -3,7 +3,6 @@ import './appTheme.css'
 import { AppShell } from './components/layout/AppShell'
 import { StoreProvider } from './state/StoreContext'
 import AdminAuthGate from './components/auth/AdminAuthGate'
-
 import Dashboard from './pages/Dashboard'
 import IncidentCenter from './pages/incidents/IncidentCenter'
 import HistoricalBootstrap from './pages/bootstrap/HistoricalBootstrapLive'
@@ -35,6 +34,7 @@ import SecurityPage from './pages/security/SecurityPage'
 import AuditLog from './pages/security/AuditLog'
 import Jurisdiction from './pages/security/Jurisdiction'
 import SettingsPage from './pages/settings/SettingsPage'
+import { BonusesPage, GiveawaysPage, PickRushPage, PrizePoolPage, BookmakersRadarPage, LeaderboardsPage } from './pages/rewards/CampaignManagement'
 
 export default function App() {
   return (
@@ -93,6 +93,12 @@ export default function App() {
             <Route path="/settings/feature-flags" element={<SettingsPage />} />
             <Route path="/settings/environment" element={<SettingsPage />} />
             <Route path="/settings/docs" element={<SettingsPage />} />
+            <Route path="/bonuses" element={<BonusesPage />} />
+            <Route path="/giveaways" element={<GiveawaysPage />} />
+            <Route path="/pickrush" element={<PickRushPage />} />
+            <Route path="/prizepool" element={<PrizePoolPage />} />
+            <Route path="/bookmakersradar" element={<BookmakersRadarPage />} />
+            <Route path="/leaderboards" element={<LeaderboardsPage />} />
             <Route path="*" element={<Dashboard />} />
           </Routes>
         </AppShell>

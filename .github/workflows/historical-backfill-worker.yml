@@ -52,6 +52,14 @@ jobs:
           test -n "${S3_ACCESS_KEY_ID}"
           test -n "${S3_SECRET_ACCESS_KEY}"
 
+      - name: Validate Python imports
+        env:
+          PYTHONPATH: .
+        run: |
+          set -euo pipefail
+          python -m py_compile workers/historical_backfill/safe_entrypoint.py workers/historical_backfill/canonical_runner.py workers/historical_backfill/worker.py workers/historical_backfill/archive_metadata.py
+          python -c "from workers.historical_backfill import safe_entrypoint, canonical_runner, worker; print('historical worker import preflight: OK')"
+
       - name: Run canonical historical worker
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
@@ -67,4 +75,4 @@ jobs:
           MAX_CLAIM_SCAN: '50'
         run: |
           set -euo pipefail
-          python -m workers.historical_backfill.canonical_runner
+          python -m workers.historical_backfill.safe_entrypoint

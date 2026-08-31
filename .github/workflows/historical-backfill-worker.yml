@@ -1,5 +1,8 @@
 name: historical-backfill-worker
 
+# Canonical Historical execution: Python worker only.
+# This comment intentionally forces a new GitHub Actions run after runtime fixes.
+
 on:
   push:
     paths:

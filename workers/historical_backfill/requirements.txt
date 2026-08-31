@@ -1,1 +1,3 @@
+boto3==1.40.20
+botocore==1.40.20
 psycopg[binary]==3.2.9

@@ -12,28 +12,9 @@ export interface HistoricalCampaignLive { campaign_id: string; target_start_seas
 export interface HistoricalSeasonProgress { season: number; supported_leagues: number; provider_leagues: number; backfill_jobs: number; backfill_succeeded: number; backfill_active: number; backfill_failed: number; backfill_progress: number; archive_campaigns: number; archive_succeeded: number; archive_completeness: number; gate_state: string; ready_for_archive: boolean }
 export interface HistoricalBootstrapSnapshot { campaign: HistoricalCampaignLive | Record<string, never>; seasons: HistoricalSeasonProgress[]; tranche_queue: Array<Record<string, unknown>>; blocked_scopes: Array<Record<string, unknown>>; archive_output: Array<Record<string, unknown>>; quota: Record<string, unknown> }
 export interface HistoricalSeasonPrepareResult { season: number; historical_campaign_id: string; provider_competitions: number; jobs_created: number; jobs_existing: number; jobs_total: number; dataset_type: string; status: 'PREPARED' | 'BLOCKED'; planned_start_at?: string; minimum_target_end_at?: string; gaps?: number }
-export interface HistoricalCampaignPlan {
-  season: number
-  planned_start_at: string
-  target_end_at: string
-  days: number
-  enabled_country_count: number
-  enabled_league_count: number
-  available_league_count: number
-  existing_campaign?: { campaign_id?: string; status?: string; planned_start_at?: string; minimum_target_end_at?: string; requests_used?: number; completeness_score?: number | null }
-  estimated_jobs: number
-  estimated_requests: number
-  estimated_requests_per_day: number
-  estimated_jobs_per_day: number
-  required_requests_per_minute: number
-  provider_rate_limit_per_minute: number
-  daily_budget: number
-  quota_available_now: number
-  fits_daily_budget: boolean
-  fits_provider_rate_limit: boolean
-  dataset_plan: Array<{ dataset_key: string; label: string; category: string; endpoint: string; required_for_archive: boolean; execution_supported: boolean; available_count: number; scope_count: number; estimated_requests_per_job: number; estimated_requests: number }>
-}
-export interface HistoricalCampaignScheduleCheck { feasible: boolean; reason: string; campaign_id?: string; remaining_jobs?: number; avg_requests_per_job?: number; estimated_requests?: number; available_days?: number; required_requests_per_day?: number; required_requests_per_minute?: number; daily_budget?: number; backfill_budget?: number; safety_rate_limit_per_minute?: number; provider_rate_limit_per_minute?: number; minimum_target_end_at?: string; target_end_at?: string }
+export interface HistoricalCampaignPlan { season: number; planned_start_at: string; target_end_at: string; days: number; enabled_country_count: number; enabled_league_count: number; available_league_count: number; existing_campaign?: { campaign_id?: string; status?: string; planned_start_at?: string; minimum_target_end_at?: string; requests_used?: number; completeness_score?: number | null }; estimated_jobs: number; estimated_requests: number; estimated_requests_per_day: number; estimated_jobs_per_day: number; required_requests_per_minute: number; provider_rate_limit_per_minute: number; daily_budget: number; quota_available_now: number; fits_daily_budget: boolean; fits_provider_rate_limit: boolean; dataset_plan: Array<{ dataset_key: string; label: string; category: string; endpoint: string; required_for_archive: boolean; execution_supported: boolean; available_count: number; scope_count: number; estimated_requests_per_job: number; estimated_requests: number }> }
+export type HistoricalScheduleClassification = 'FEASIBLE' | 'TIGHT' | 'NOT_FEASIBLE'
+export interface HistoricalCampaignScheduleCheck { feasible: boolean; can_save?: boolean; classification?: HistoricalScheduleClassification; reason: string; campaign_id?: string; remaining_jobs?: number; avg_requests_per_job?: number; estimated_requests?: number; available_days?: number; required_requests_per_day?: number; required_requests_per_minute?: number; daily_budget?: number; backfill_budget?: number; safety_rate_limit_per_minute?: number; provider_rate_limit_per_minute?: number; capacity_requests_per_minute?: number; expected_finish_at?: string | null; safe_finish_at?: string | null; target_margin_minutes?: number | null; remaining_requests_p50?: number | null; remaining_requests_p90?: number | null; remaining_today_capacity?: number | null; future_daily_capacity?: number | null; completed_request_samples?: number | null; forecast_quality?: string | null; recommended_target_end_at?: string | null; minimum_target_end_at?: string | null; target_end_at?: string | null; blocking_reasons?: string[] }
 export interface HistoricalCampaignScheduleUpdate { updated: boolean; campaign: HistoricalCampaignLive; schedule_check: HistoricalCampaignScheduleCheck }
 export interface ArchiveSeasonDetailSummary { total_jobs: number; processed_jobs: number; succeeded_jobs: number; failed_jobs: number; active_jobs: number; requests_used: number; archive_campaigns: number; archived_successes: number; archive_failures: number; archived_rows: number; archive_completeness: number; api_coverage: number; open_gaps: number; patched_gaps: number; data_complete: boolean; data_status: 'NO_DATA' | 'GAPS' | 'COMPLETE' | 'IN_PROGRESS' | 'PARTIAL' }
 export interface ArchiveSeasonDatasetDetail { dataset_type: string; total_jobs: number; processed_jobs: number; succeeded_jobs: number; failed_jobs: number; active_jobs: number; archived_jobs: number; archived_rows: number; open_gaps: number; patched_gaps: number; coverage_percent: number; archive_percent: number; status: 'COMPLETE' | 'GAPS' | 'IN_PROGRESS' | 'PARTIAL' }

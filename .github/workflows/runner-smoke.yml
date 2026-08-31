@@ -1,0 +1,17 @@
+name: runner-smoke
+on:
+  push:
+    paths:
+      - '.github/workflows/runner-smoke.yml'
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Runner smoke test
+        run: |
+          set -euo pipefail
+          echo "runner=${RUNNER_NAME}"
+          uname -a
+          python3 --version

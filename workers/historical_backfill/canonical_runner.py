@@ -26,7 +26,8 @@ from workers.historical_backfill import worker
 
 DB_URL = os.environ["SUPABASE_DB_URL"]
 QUEUE_NAME = "backfill_queue"
-WORKER_ID = f"historical-canonical:{socket.gethostname()}:{os.getpid()}"
+WORKER_SLOT = os.getenv("WORKER_SLOT", "0")
+WORKER_ID = f"historical-canonical:{WORKER_SLOT}:{socket.gethostname()}:{os.getpid()}"
 PROVIDER = "api-football"
 MAX_RUNTIME_SECONDS = int(os.getenv("MAX_RUNTIME_SECONDS", "840"))
 IDLE_SLEEP_SECONDS = float(os.getenv("IDLE_SLEEP_SECONDS", "5"))
@@ -36,6 +37,7 @@ _CONTEXT: dict[str, object] | None = None
 _ORIGINAL_API_JSON = worker.api_json
 _ORIGINAL_MARK_SUCCEEDED = worker.mark_succeeded
 
+# The DB reservation governor is authoritative across all workers.
 worker.LIMITER.limit = 10**9
 
 
@@ -113,20 +115,22 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
         return _ORIGINAL_API_JSON(path, params, timeout)
     conn = ctx["conn"]
     job = ctx["job"]
-    attempt_no = ctx["attempt_no"]
+    attempt_id = ctx["attempt_id"]
+    attempt_no = int(ctx["attempt_no"])
+    request_url = _request_url(path, params)
 
     while True:
         try:
             row = _db_exec(
                 conn,
-                "select internal.begin_provider_request(%s,%s,%s,%s,%s,%s) as request_id",
-                (PROVIDER, 1, job["job_id"], job["worker_job_id"], attempt_no, path),
+                "select internal.reserve_provider_request(%s,%s,%s,%s,%s) as request_id",
+                (attempt_id, PROVIDER, path, request_url, 1),
             )
             request_id = row["request_id"]
             break
         except Exception as exc:
             text = str(exc)
-            if "BACKFILL_OR_RATE_QUOTA_EXHAUSTED" in text or "PROVIDER_REQUEST" in text:
+            if "BACKFILL_OR_RATE_QUOTA_EXHAUSTED" in text or "PROVIDER_RATE_GATE_UNTIL" in text:
                 time.sleep(2)
                 continue
             raise
@@ -139,6 +143,12 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
             conn,
             "select internal.finalize_provider_request(%s,%s,%s,%s,%s,%s)",
             (request_id, "SUCCEEDED", 200, rows, None, None),
+        )
+        # Keep the attempt lease alive while long datasets continue.
+        _db_exec(
+            conn,
+            "select internal.touch_backfill_attempt(%s::uuid)",
+            (attempt_id,),
         )
         return body
     except worker.ProviderRateLimit as exc:

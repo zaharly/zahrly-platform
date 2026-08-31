@@ -32,6 +32,9 @@ PROVIDER = "api-football"
 MAX_RUNTIME_SECONDS = int(os.getenv("MAX_RUNTIME_SECONDS", "840"))
 IDLE_SLEEP_SECONDS = float(os.getenv("IDLE_SLEEP_SECONDS", "5"))
 MAX_CLAIM_SCAN = int(os.getenv("MAX_CLAIM_SCAN", "50"))
+QUOTA_WAIT_SECONDS = float(os.getenv("QUOTA_WAIT_SECONDS", "2"))
+MAX_QUOTA_WAIT_SECONDS = float(os.getenv("MAX_QUOTA_WAIT_SECONDS", "30"))
+MAX_CONTINUOUS_QUOTA_WAIT_SECONDS = float(os.getenv("MAX_CONTINUOUS_QUOTA_WAIT_SECONDS", "120"))
 
 _CONTEXT: dict[str, object] | None = None
 _ORIGINAL_API_JSON = worker.api_json
@@ -109,17 +112,68 @@ def _db_exec(conn, sql: str, args):
             return row
 
 
+def _quota_gate_until(conn):
+    """Read the authoritative provider gate timestamp, if the state table exists."""
+    try:
+        row = _db_exec(
+            conn,
+            """
+            select max(gate_until) as gate_until
+              from internal.provider_quota_state
+             where provider = %s
+            """,
+            (PROVIDER,),
+        )
+        return row["gate_until"] if row else None
+    except Exception:
+        return None
+
+
+def _wait_for_quota_or_yield(conn):
+    """Wait briefly for a provider gate, then yield instead of hanging forever."""
+    started = time.monotonic()
+    delay = max(0.1, QUOTA_WAIT_SECONDS)
+    while True:
+        gate_until = _quota_gate_until(conn)
+        now = datetime.now(timezone.utc)
+        if gate_until is None or gate_until <= now:
+            return True
+
+        remaining = max(0.0, (gate_until - now).total_seconds())
+        elapsed = time.monotonic() - started
+        if elapsed >= MAX_CONTINUOUS_QUOTA_WAIT_SECONDS:
+            return False
+
+        sleep_for = min(
+            remaining,
+            delay,
+            MAX_QUOTA_WAIT_SECONDS,
+            MAX_CONTINUOUS_QUOTA_WAIT_SECONDS - elapsed,
+        )
+        if sleep_for <= 0:
+            return True
+        time.sleep(sleep_for)
+        delay = min(MAX_QUOTA_WAIT_SECONDS, delay * 2)
+
+
 def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 90):
     ctx = _CONTEXT
     if not ctx:
         return _ORIGINAL_API_JSON(path, params, timeout)
+
     conn = ctx["conn"]
     job = ctx["job"]
     attempt_id = ctx["attempt_id"]
-    attempt_no = int(ctx["attempt_no"])
     request_url = _request_url(path, params)
 
+    quota_wait_start = time.monotonic()
     while True:
+        if not _wait_for_quota_or_yield(conn):
+            elapsed = int(time.monotonic() - quota_wait_start)
+            raise worker.RetryableProviderError(
+                f"Provider quota gate remained active for {elapsed}s; yielding job for retry."
+            )
+
         try:
             row = _db_exec(
                 conn,
@@ -131,7 +185,12 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
         except Exception as exc:
             text = str(exc)
             if "BACKFILL_OR_RATE_QUOTA_EXHAUSTED" in text or "PROVIDER_RATE_GATE_UNTIL" in text:
-                time.sleep(2)
+                elapsed = time.monotonic() - quota_wait_start
+                if elapsed >= MAX_CONTINUOUS_QUOTA_WAIT_SECONDS:
+                    raise worker.RetryableProviderError(
+                        f"Provider quota gate remained active for {int(elapsed)}s; yielding job for retry."
+                    ) from exc
+                time.sleep(min(MAX_QUOTA_WAIT_SECONDS, max(0.1, QUOTA_WAIT_SECONDS)))
                 continue
             raise
 
@@ -144,12 +203,7 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
             "select internal.finalize_provider_request(%s,%s,%s,%s,%s,%s)",
             (request_id, "SUCCEEDED", 200, rows, None, None),
         )
-        # Keep the attempt lease alive while long datasets continue.
-        _db_exec(
-            conn,
-            "select internal.touch_backfill_attempt(%s::uuid)",
-            (attempt_id,),
-        )
+        _db_exec(conn, "select internal.touch_backfill_attempt(%s::uuid)", (attempt_id,))
         return body
     except worker.ProviderRateLimit as exc:
         _db_exec(
@@ -224,8 +278,6 @@ def mark_succeeded(conn, job, document, object_uri, checksum, row_count, request
                     (uuid.UUID(request_id), object_uri, checksum, row_count, "PERSISTED"),
                 )
 
-    # Idempotent finalization: a retried worker reuses an already committed
-    # manifest for the exact object instead of producing a duplicate manifest.
     with conn.transaction():
         with conn.cursor() as cur:
             cur.execute(

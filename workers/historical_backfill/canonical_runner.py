@@ -36,11 +36,7 @@ _CONTEXT: dict[str, object] | None = None
 _ORIGINAL_API_JSON = worker.api_json
 _ORIGINAL_UPLOAD_S3 = worker.upload_s3
 _ORIGINAL_MARK_SUCCEEDED = worker.mark_succeeded
-_ORIGINAL_MARK_RETRYABLE = worker.mark_retryable
-_ORIGINAL_MARK_FAILED = worker.mark_failed
 
-# The DB governor is authoritative; the process-local limiter is disabled so
-# independent workers cannot accidentally multiply a local 12/min cap.
 worker.LIMITER.limit = 10**9
 
 
@@ -49,20 +45,21 @@ def connect():
 
 
 def _candidate(conn):
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            select b.job_id
-              from internal.backfill_jobs b
-             where b.status in ('QUEUED','RETRYABLE','RETRYING')
-               and (b.next_retry_at is null or b.next_retry_at <= now())
-             order by b.priority desc, b.created_at asc
-             for update of b skip locked
-             limit 1
-            """
-        )
-        row = cur.fetchone()
-        return str(row["job_id"]) if row else None
+    with conn.transaction():
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select b.job_id
+                  from internal.backfill_jobs b
+                 where b.status in ('QUEUED','RETRYABLE','RETRYING')
+                   and (b.next_retry_at is null or b.next_retry_at <= now())
+                 order by b.priority desc, b.created_at asc
+                 for update of b skip locked
+                 limit 1
+                """
+            )
+            row = cur.fetchone()
+            return str(row["job_id"]) if row else None
 
 
 def claim_job(conn):
@@ -70,15 +67,15 @@ def claim_job(conn):
         job_id = _candidate(conn)
         if not job_id:
             return None
-        with conn.cursor() as cur:
-            cur.execute(
-                "select internal.claim_backfill_job(%s,%s) as result",
-                (job_id, WORKER_ID),
-            )
-            result = cur.fetchone()["result"]
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select internal.claim_backfill_job(%s,%s) as result",
+                    (job_id, WORKER_ID),
+                )
+                result = cur.fetchone()["result"]
         if not result.get("ok"):
             continue
-        # Enforce the architecture's five-attempt cap in the canonical path.
         if int(result.get("attempt_no") or 0) > 5:
             with conn.transaction():
                 with conn.cursor() as cur:
@@ -117,12 +114,8 @@ def api_json(path: str, params: dict[str, object] | None = None, timeout: int = 
         return _ORIGINAL_API_JSON(path, params, timeout)
     conn = ctx["conn"]
     job = ctx["job"]
-    attempt_id = ctx["attempt_id"]
     attempt_no = ctx["attempt_no"]
-    request_url = _request_url(path, params)
 
-    # Wait on the authoritative DB quota reservation, never on a process-local
-    # counter.  This coordinates every worker across every GitHub runner.
     while True:
         try:
             row = _db_exec(
@@ -221,8 +214,6 @@ def mark_succeeded(conn, job, document, object_uri, checksum, row_count, request
                     "select internal.register_provider_request_checkpoint(%s,%s,%s,%s,%s)",
                     (uuid.UUID(request_id), object_uri, checksum, row_count, "PERSISTED"),
                 )
-        # The old finalizer chain is deliberately not called.  We have already
-        # supplied the non-null checksum and verified the S3 bytes locally.
     return _ORIGINAL_MARK_SUCCEEDED(conn, job, document, object_uri, checksum, row_count, requests_used)
 
 

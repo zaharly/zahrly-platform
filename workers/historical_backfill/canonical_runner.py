@@ -55,7 +55,10 @@ def _candidate(conn):
                 """
                 select b.job_id
                   from internal.backfill_jobs b
-                 where b.status in ('QUEUED','RETRYABLE','RETRYING')
+                  join internal.historical_backfill_campaigns c
+                    on c.campaign_id=b.historical_campaign_id
+                 where c.status='RUNNING'
+                   and b.status in ('QUEUED','RETRYABLE','RETRYING')
                    and (b.next_retry_at is null or b.next_retry_at <= now())
                  order by b.priority desc, b.created_at asc
                  for update of b skip locked
@@ -299,106 +302,54 @@ def mark_succeeded(conn, job, document, object_uri, checksum, row_count, request
                     "update internal.backfill_job_attempts set status='SUCCEEDED',finished_at=now(),lease_expires_at=null,last_heartbeat_at=now(),error_code=null,error_message=null where attempt_id=%s",
                     (ctx["attempt_id"] if ctx else None,),
                 )
-                return manifest_id, None, None
+                return
 
-    result = _ORIGINAL_MARK_SUCCEEDED(conn, job, document, object_uri, checksum, row_count, requests_used)
-    with conn.transaction():
-        with conn.cursor() as cur:
             cur.execute(
-                "update internal.backfill_job_attempts set status='SUCCEEDED',finished_at=now(),lease_expires_at=null,last_heartbeat_at=now(),error_code=null,error_message=null where attempt_id=%s and status='RUNNING'",
+                "select internal.register_archive_manifest(%s,%s,%s,%s,%s,%s,%s) as manifest_id",
+                (job["job_id"], job["historical_campaign_id"], object_uri, checksum, row_count, requests_used, document),
+            )
+            manifest_id = str(cur.fetchone()["manifest_id"])
+            cur.execute(
+                "update internal.backfill_jobs set status='SUCCEEDED',progress=100,requests_used=%s,manifest_id=%s,updated_at=now(),next_retry_at=null,error_code=null,error_message=null where job_id=%s",
+                (requests_used, manifest_id, job["job_id"]),
+            )
+            cur.execute(
+                "update internal.worker_jobs set status='SUCCEEDED',finished_at=now(),lease_expires_at=null,error_code=null,error_message=null,next_retry_at=null where job_id=%s",
+                (job["worker_job_id"],),
+            )
+            cur.execute(
+                "update internal.backfill_job_attempts set status='SUCCEEDED',finished_at=now(),lease_expires_at=null,last_heartbeat_at=now(),error_code=null,error_message=null where attempt_id=%s",
                 (ctx["attempt_id"] if ctx else None,),
             )
-    return result
-
-
-def mark_retryable(conn, job, exc, retry_after=60):
-    message = str(exc)[:worker.MAX_ERROR_LENGTH]
-    seconds = max(5, int(retry_after or 60))
-    retry_at = datetime.now(timezone.utc).timestamp() + seconds
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute(
-                "update internal.backfill_job_attempts set status='RETRYABLE',finished_at=now(),lease_expires_at=null,last_heartbeat_at=now(),error_code='PROVIDER_RATE_LIMIT',error_message=%s where attempt_id=%s and status='RUNNING'",
-                (message, (_CONTEXT or {}).get("attempt_id")),
-            )
-            cur.execute(
-                "update internal.backfill_jobs set status='RETRYABLE',next_retry_at=to_timestamp(%s),updated_at=now(),error_code='PROVIDER_RATE_LIMIT',error_message=%s where job_id=%s",
-                (retry_at, message, job["job_id"]),
-            )
-            cur.execute(
-                "update internal.worker_jobs set status='RETRYABLE',finished_at=null,lease_expires_at=null,error_code='PROVIDER_RATE_LIMIT',error_message=%s,next_retry_at=to_timestamp(%s) where job_id=%s",
-                (message, retry_at, job["worker_job_id"]),
-            )
-
-
-def mark_failed(conn, job, exc):
-    message = str(exc)[:worker.MAX_ERROR_LENGTH]
-    with conn.transaction():
-        with conn.cursor() as cur:
-            cur.execute("select attempts from internal.worker_jobs where job_id=%s", (job["worker_job_id"],))
-            attempts = int((cur.fetchone() or {}).get("attempts") or 0)
-            terminal = attempts >= 5
-            state = "DEAD_LETTER" if terminal else "RETRYABLE"
-            code = "ATTEMPT_LIMIT_EXCEEDED" if terminal else "HISTORICAL_TRANSIENT_ERROR"
-            cur.execute(
-                "update internal.backfill_job_attempts set status=%s,finished_at=now(),lease_expires_at=null,last_heartbeat_at=now(),error_code=%s,error_message=%s where attempt_id=%s and status='RUNNING'",
-                (state, code, message, (_CONTEXT or {}).get("attempt_id")),
-            )
-            cur.execute(
-                "update internal.backfill_jobs set status=%s,next_retry_at=case when %s='RETRYABLE' then now()+interval '30 seconds' else null end,updated_at=now(),error_code=%s,error_message=%s where job_id=%s",
-                (state, state, code, message, job["job_id"]),
-            )
-            cur.execute(
-                "update internal.worker_jobs set status=%s,finished_at=case when %s='DEAD_LETTER' then now() else null end,lease_expires_at=null,error_code=%s,error_message=%s,next_retry_at=case when %s='RETRYABLE' then now()+interval '30 seconds' else null end where job_id=%s",
-                (state, state, code, message, state, job["worker_job_id"]),
-            )
-
-
-def run_one(conn):
-    global _CONTEXT
-    job = claim_job(conn)
-    if not job:
-        return {"processed": False, "reason": "no_ready_historical_job"}
-    _CONTEXT = {
-        "conn": conn,
-        "job": job,
-        "attempt_id": job["attempt_id"],
-        "attempt_no": int(job["attempt_no"]),
-        "request_ids": [],
-    }
-    try:
-        return worker.run_one(conn)
-    finally:
-        _CONTEXT = None
 
 
 def main() -> int:
-    worker.claim_job = claim_job
-    worker.api_json = api_json
-    worker.upload_s3 = upload_s3
-    worker.mark_succeeded = mark_succeeded
-    worker.mark_retryable = mark_retryable
-    worker.mark_failed = mark_failed
-
-    deadline = time.monotonic() + MAX_RUNTIME_SECONDS
-    processed = 0
+    started = time.monotonic()
     conn = connect()
+    worker.api_json = api_json
+    worker.mark_succeeded = mark_succeeded
     try:
-        while time.monotonic() < deadline:
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute("select internal.queue_recovery()")
-                    cur.execute("select internal.recover_stale_backfill_attempts()")
-                    cur.execute("select internal.recover_backfill_no_progress_attempts()")
-            result = run_one(conn)
-            if result.get("processed"):
-                processed += 1
+        while time.monotonic() - started < MAX_RUNTIME_SECONDS:
+            result = claim_job(conn)
+            if not result:
+                time.sleep(IDLE_SLEEP_SECONDS)
                 continue
-            time.sleep(IDLE_SLEEP_SECONDS)
-        print(json.dumps({"worker": WORKER_ID, "processed": processed}, separators=(",", ":")), flush=True)
-        return 0
+            job_id = result["job_id"]
+            attempt_id = result["attempt_id"]
+            with conn.cursor() as cur:
+                cur.execute("select * from internal.backfill_jobs where job_id=%s", (job_id,))
+                job = cur.fetchone()
+            global _CONTEXT
+            _CONTEXT = {"conn": conn, "job": job, "attempt_id": str(attempt_id), "request_ids": []}
+            try:
+                worker.run_job(conn, job)
+            finally:
+                _CONTEXT = None
     finally:
+        worker.api_json = _ORIGINAL_API_JSON
+        worker.mark_succeeded = _ORIGINAL_MARK_SUCCEEDED
         conn.close()
+    return 0
 
 
 if __name__ == "__main__":

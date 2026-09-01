@@ -7,30 +7,33 @@ from psycopg.rows import dict_row
 from .archive_training_source import load_settled_matches
 from .walk_forward import build_walk_forward_folds,run_fold
 from .feature_layer import build_feature_index_for_matches
-MIN_COMPLETE_SEASONS=3;MIN_OOS_PREDICTIONS=3000;BATCH_SIZE=250
+MIN_COMPLETE_SEASONS=3;MIN_OOS_PREDICTIONS=3000
 INSERT_SQL="""insert into internal.prediction_oos_benchmark(training_run_id,model_version_id,fixture_id,fold_no,played_at,outcome,model_p_home,model_p_draw,model_p_away,empirical_p_home,empirical_p_draw,empirical_p_away,market_p_home,market_p_draw,market_p_away,market_snapshot_at,metrics) values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) on conflict (training_run_id,fold_no,fixture_id) do nothing"""
 def db_connect():
  c=psycopg.connect(os.environ['SUPABASE_DB_URL'],row_factory=dict_row,connect_timeout=20,sslmode='require');c.execute('set session statement_timeout=0');c.execute('set session lock_timeout=0');return c
 def outcome(m):return 'H' if m.home_goals>m.away_goals else ('D' if m.home_goals==m.away_goals else 'A')
-def _market_probs(conn,mid,kick):
- with conn.cursor() as cur:
-  cur.execute("""with cf as(select id from public.fixtures where provider_ids->>'api_football'=%s limit 1),x as(select os.bookmaker_id,os.selection,os.odds,os.captured_at,row_number() over(partition by os.bookmaker_id,os.selection order by os.captured_at desc) rn from public.odds_snapshots os join cf on cf.id=os.fixture_id where os.captured_at<%s and os.market_key in ('1X2','match_result','home_draw_away') and os.odds>1) select bookmaker_id,selection,odds,captured_at from x where rn=1""",(str(mid),kick));close=cur.fetchall()
-  cur.execute("""with cf as(select id from public.fixtures where provider_ids->>'api_football'=%s limit 1),x as(select os.bookmaker_id,os.selection,os.odds,os.captured_at,row_number() over(partition by os.bookmaker_id,os.selection order by os.captured_at asc) rn from public.odds_snapshots os join cf on cf.id=os.fixture_id where os.captured_at<%s and os.market_key in ('1X2','match_result','home_draw_away') and os.odds>1) select bookmaker_id,selection,odds,captured_at from x where rn=1""",(str(mid),kick));opening=cur.fetchall()
- mapping={'HOME':'H','H':'H','1':'H','DRAW':'D','D':'D','X':'D','AWAY':'A','A':'A','2':'A'}
- def group(rows):
-  out={}
-  for r in rows:
-   s=mapping.get(str(r['selection']).strip().upper())
-   try:o=float(r['odds'])
-   except (TypeError,ValueError):continue
-   if s and o>1:out.setdefault(r['bookmaker_id'],{})[s]=(o,r['captured_at'])
-  return out
- op,cp=group(opening),group(close);norm=[];clv=[]
- for bid,c in cp.items():
-  if set(c)!= {'H','D','A'} or bid not in op or set(op[bid])!= {'H','D','A'}:continue
-  inv=[1/c[k][0] for k in ('H','D','A')];sc=sum(inv);p=[x/sc for x in inv];norm.append((p[0],p[1],p[2],c['H'][1],bid));clv.extend((k,op[bid][k][0]/c[k][0]-1) for k in ('H','D','A'))
- if not norm:return None
- return (sum(x[0] for x in norm)/len(norm),sum(x[1] for x in norm)/len(norm),sum(x[2] for x in norm)/len(norm),max(x[3] for x in norm),clv)
+def _market_probs_batch(conn,requested):
+ if not requested:return {}
+ payload=json.dumps([{'match_id':str(mid),'kickoff':kick.isoformat()} for mid,kick in requested.items()],separators=(',',':'))
+ rows=conn.execute("""with requested as(select * from jsonb_to_recordset(%s::jsonb) as x(match_id text,kickoff timestamptz)) select r.match_id,os.bookmaker_id,os.selection,os.odds,os.captured_at from requested r join public.fixtures f on f.provider_ids->>'api_football'=r.match_id join public.odds_snapshots os on os.fixture_id=f.id where os.captured_at<r.kickoff and os.market_key in ('1X2','match_result','home_draw_away') and os.odds>1 order by r.match_id,os.bookmaker_id,os.selection,os.captured_at""",(payload,)).fetchall()
+ mapping={'HOME':'H','H':'H','1':'H','DRAW':'D','D':'D','X':'D','AWAY':'A','A':'A','2':'A'}; grouped={}
+ for r in rows:
+  s=mapping.get(str(r['selection']).strip().upper())
+  try:o=float(r['odds'])
+  except (TypeError,ValueError):continue
+  if not s or o<=1:continue
+  grouped.setdefault(r['match_id'],{}).setdefault(r['bookmaker_id'],{}).setdefault(s,[]).append((o,r['captured_at']))
+ out={}
+ for mid,books in grouped.items():
+  norm=[];clv=[]
+  for bid,selections in books.items():
+   if set(selections)!= {'H','D','A'}:continue
+   opening={k:sorted(selections[k],key=lambda x:x[1])[0] for k in selections};closing={k:sorted(selections[k],key=lambda x:x[1])[-1] for k in selections}
+   inv=[1/closing[k][0] for k in ('H','D','A')];scale=sum(inv);p=[x/scale for x in inv]
+   norm.append((p[0],p[1],p[2],max(closing[k][1] for k in closing)))
+   clv.extend((k,opening[k][0]/closing[k][0]-1) for k in ('H','D','A'))
+  if norm:out[mid]=(sum(x[0] for x in norm)/len(norm),sum(x[1] for x in norm)/len(norm),sum(x[2] for x in norm)/len(norm),max(x[3] for x in norm),clv)
+ return out
 def empirical_probs(train):
  c=Counter(outcome(m) for m in train);n=sum(c.values())+3;return ((c['H']+1)/n,(c['D']+1)/n,(c['A']+1)/n)
 def score(p,y):
@@ -48,22 +51,25 @@ def main(training_run_id=None):
   if row['status']!='SUCCEEDED':raise SystemExit(f"training run is not succeeded:{row['id']}")
   training_run_id=row['id'];model_version_id=row['model_version_id'];matches=load_settled_matches(conn,as_of=datetime.now(timezone.utc));folds=conn.execute("select fold_no,train_cutoff,test_start,test_end,status from internal.prediction_training_folds where training_run_id=%s and status='SUCCEEDED' order by fold_no",(training_run_id,)).fetchall()
   if not folds:raise SystemExit('no succeeded training folds')
-  wf=build_walk_forward_folds(matches,[r['train_cutoff'] for r in folds]);conn.execute('delete from internal.prediction_oos_benchmark where training_run_id=%s',(training_run_id,));conn.execute("delete from internal.evaluation_metrics where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_folds where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS'",(model_version_id,));conn.commit();model_rows=[];emp_rows=[];market_rows=[];clv_values=[];feature_cov=[]
-  eval_run=conn.execute("insert into internal.evaluation_runs(model_version_id,benchmark_type,status,started_at,metadata) values(%s,'WALK_FORWARD_OOS','RUNNING',now(),%s) returning id::text as id",(model_version_id,json.dumps({'training_run_id':training_run_id,'source':'s3_fixture_archive','feature_layer':'enabled'}))).fetchone()['id'];conn.commit()
-  for fd,(train,test,cutoff) in zip(folds,wf):
-   if not train or not test:continue
-   features=build_feature_index_for_matches(conn,test,cutoff);preds=run_fold(train,test,cutoff,features=features);emp=empirical_probs(train);covered=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);feature_cov.append(covered);fold_scores=[]
-   eval_fold=conn.execute("insert into internal.evaluation_folds(run_id,fold_no,train_cutoff,test_start,test_end,status,metadata) values(%s,%s,%s,%s,%s,'RUNNING',%s) returning id::text as id",(eval_run,fd['fold_no'],cutoff,min(m.played_at for m in test),max(m.played_at for m in test),json.dumps({'training_run_id':training_run_id,'feature_covered_fixtures':covered}))).fetchone()['id'];conn.commit()
-   buf=[]
-   for m,p in zip(test,preds):
-    y=outcome(m);ms=score((p.p_home,p.p_draw,p.p_away),y);es=score(emp,y);market=_market_probs(conn,m.match_id,m.played_at);ks=score(market[:3],y) if market else None;model_rows.append({'confidence':ms[3],'correct':ms[4],'score':ms});emp_rows.append({'confidence':es[3],'correct':es[4],'score':es});fold_scores.append(ms)
-    if ks:market_rows.append({'confidence':ks[3],'correct':ks[4],'score':ks})
-    clv=None
-    if market and market[4]:
-     predicted=('H','D','A')[max(range(3),key=lambda i:(p.p_home,p.p_draw,p.p_away)[i])];vals=[v for k,v in market[4] if k==predicted]
-     if vals:clv=sum(vals)/len(vals);clv_values.extend(vals)
-    buf.append((training_run_id,model_version_id,m.match_id,fd['fold_no'],m.played_at,y,p.p_home,p.p_draw,p.p_away,emp[0],emp[1],emp[2],market[0] if market else None,market[1] if market else None,market[2] if market else None,market[3] if market else None,json.dumps({'model':{'brier':ms[0],'log_loss':ms[1],'rps':ms[2]},'feature_sources':list(features[m.match_id].sources),'feature_count':len(features[m.match_id].values),'clv_status':'AVAILABLE' if clv is not None else 'UNAVAILABLE'})))
+  wf=build_walk_forward_folds(matches,[r['train_cutoff'] for r in folds]);usable=[(fd,w) for fd,w in zip(folds,wf) if w[0] and w[1]];all_oos=[m for _,(_,test,_) in usable for m in test];all_features=build_feature_index_for_matches(conn,all_oos,min(w[2] for _,w in usable)) if usable else {};market_requests={m.match_id:m.played_at for m in all_oos};market_by_match=_market_probs_batch(conn,market_requests)
+  conn.execute('delete from internal.prediction_oos_benchmark where training_run_id=%s',(training_run_id,));conn.execute("delete from internal.evaluation_metrics where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_folds where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS'",(model_version_id,));conn.commit();model_rows=[];emp_rows=[];market_rows=[];clv_values=[];feature_cov=[]
+  eval_run=conn.execute("insert into internal.evaluation_runs(model_version_id,benchmark_type,status,started_at,metadata) values(%s,'WALK_FORWARD_OOS','RUNNING',now(),%s) returning id::text as id",(model_version_id,json.dumps({'training_run_id':training_run_id,'source':'s3_fixture_archive','feature_layer':'enabled','market_lookup':'batch'}))).fetchone()['id'];conn.commit()
+  try:
+   for fd,(train,test,cutoff) in usable:
+    features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,cutoff,features=features);emp=empirical_probs(train);covered=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);feature_cov.append(covered);fold_scores=[]
+    eval_fold=conn.execute("insert into internal.evaluation_folds(run_id,fold_no,train_cutoff,test_start,test_end,status,metadata) values(%s,%s,%s,%s,%s,'RUNNING',%s) returning id::text as id",(eval_run,fd['fold_no'],cutoff,min(m.played_at for m in test),max(m.played_at for m in test),json.dumps({'training_run_id':training_run_id,'feature_covered_fixtures':covered}))).fetchone()['id'];conn.commit()
+    buf=[]
+    for m,p in zip(test,preds):
+     y=outcome(m);ms=score((p.p_home,p.p_draw,p.p_away),y);es=score(emp,y);market=market_by_match.get(m.match_id);ks=score(market[:3],y) if market else None;model_rows.append({'confidence':ms[3],'correct':ms[4],'score':ms});emp_rows.append({'confidence':es[3],'correct':es[4],'score':es});fold_scores.append(ms)
+     if ks:market_rows.append({'confidence':ks[3],'correct':ks[4],'score':ks})
+     clv=None
+     if market and market[4]:
+      predicted=('H','D','A')[max(range(3),key=lambda i:(p.p_home,p.p_draw,p.p_away)[i])];vals=[v for k,v in market[4] if k==predicted]
+      if vals:clv=sum(vals)/len(vals);clv_values.extend(vals)
+     fs=features.get(m.match_id);buf.append((training_run_id,model_version_id,m.match_id,fd['fold_no'],m.played_at,y,p.p_home,p.p_draw,p.p_away,emp[0],emp[1],emp[2],market[0] if market else None,market[1] if market else None,market[2] if market else None,market[3] if market else None,json.dumps({'model':{'brier':ms[0],'log_loss':ms[1],'rps':ms[2]},'feature_sources':list(fs.sources) if fs else [],'feature_count':len(fs.values) if fs else 0,'clv_status':'AVAILABLE' if clv is not None else 'UNAVAILABLE'})))
     with conn.cursor() as cur:cur.executemany(INSERT_SQL,buf)
     n=len(fold_scores);fm={'brier':sum(x[0] for x in fold_scores)/n,'log_loss':sum(x[1] for x in fold_scores)/n,'rps':sum(x[2] for x in fold_scores)/n,'n':n,'ece':ece([{'confidence':x[3],'correct':x[4]} for x in fold_scores])};conn.execute("insert into internal.evaluation_metrics(run_id,fold_id,segment,metric_name,metric_value,sample_count,metadata) values(%s,%s,'ALL','Brier',%s,%s,%s),(%s,%s,'ALL','LogLoss',%s,%s,'{}'),(%s,%s,'ALL','RPS',%s,%s,'{}'),(%s,%s,'ALL','ECE',%s,%s,'{}')",(eval_run,eval_fold,fm['brier'],n,json.dumps({'model':'prediction_engine'}),eval_run,eval_fold,fm['log_loss'],n,eval_run,eval_fold,fm['rps'],n,eval_run,eval_fold,fm['ece'],n));conn.execute("update internal.evaluation_folds set status='SUCCEEDED' where id=%s",(eval_fold,));conn.commit()
-  n=len(model_rows);mn=len(market_rows);summary={'oos_n':n,'model':{'n':n,'brier':sum(r['score'][0] for r in model_rows)/n if n else None,'log_loss':sum(r['score'][1] for r in model_rows)/n if n else None,'rps':sum(r['score'][2] for r in model_rows)/n if n else None,'ece':ece(model_rows)},'empirical_baseline':{'n':len(emp_rows),'brier':sum(r['score'][0] for r in emp_rows)/len(emp_rows) if emp_rows else None,'log_loss':sum(r['score'][1] for r in emp_rows)/len(emp_rows) if emp_rows else None,'rps':sum(r['score'][2] for r in emp_rows)/len(emp_rows) if emp_rows else None,'ece':ece(emp_rows)},'market':{'n':mn,'coverage':mn/n if n else 0.,'brier':sum(r['score'][0] for r in market_rows)/mn if mn else None,'log_loss':sum(r['score'][1] for r in market_rows)/mn if mn else None,'rps':sum(r['score'][2] for r in market_rows)/mn if mn else None},'clv':{'n':len(clv_values),'mean':sum(clv_values)/len(clv_values) if clv_values else None,'status':'AVAILABLE' if clv_values else 'UNAVAILABLE_NO_OPEN_CLOSE_SNAPSHOTS'},'feature_layer':{'enabled':True,'covered_fixtures':sum(feature_cov),'feature_coverage':sum(feature_cov)/n if n else 0.,'datasets':'historical_archive'},'history_gate':{'min_oos_predictions':MIN_OOS_PREDICTIONS,'min_complete_oos_seasons':MIN_COMPLETE_SEASONS,'oos_predictions_pass':n>=MIN_OOS_PREDICTIONS,'oos_seasons_pass':len(folds)>=MIN_COMPLETE_SEASONS},'evaluation_run_id':eval_run,'training_run_id':training_run_id,'model_version_id':model_version_id};conn.execute("update internal.evaluation_runs set status='SUCCEEDED',finished_at=now(),metadata=metadata||%s::jsonb where id=%s",(json.dumps({'summary':summary}),eval_run));conn.execute("update internal.prediction_training_runs set metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'benchmark':summary}),training_run_id));conn.commit();print(json.dumps(summary,sort_keys=True));return summary
+   n=len(model_rows);mn=len(market_rows);summary={'oos_n':n,'model':{'n':n,'brier':sum(r['score'][0] for r in model_rows)/n if n else None,'log_loss':sum(r['score'][1] for r in model_rows)/n if n else None,'rps':sum(r['score'][2] for r in model_rows)/n if n else None,'ece':ece(model_rows)},'empirical_baseline':{'n':len(emp_rows),'brier':sum(r['score'][0] for r in emp_rows)/len(emp_rows) if emp_rows else None,'log_loss':sum(r['score'][1] for r in emp_rows)/len(emp_rows) if emp_rows else None,'rps':sum(r['score'][2] for r in emp_rows)/len(emp_rows) if emp_rows else None,'ece':ece(emp_rows)},'market':{'n':mn,'coverage':mn/n if n else 0.,'brier':sum(r['score'][0] for r in market_rows)/mn if mn else None,'log_loss':sum(r['score'][1] for r in market_rows)/mn if mn else None,'rps':sum(r['score'][2] for r in market_rows)/mn if mn else None},'clv':{'n':len(clv_values),'mean':sum(clv_values)/len(clv_values) if clv_values else None,'status':'AVAILABLE' if clv_values else 'UNAVAILABLE_NO_OPEN_CLOSE_SNAPSHOTS'},'feature_layer':{'enabled':True,'covered_fixtures':sum(feature_cov),'feature_coverage':sum(feature_cov)/n if n else 0.,'datasets':'historical_archive'},'history_gate':{'min_oos_predictions':MIN_OOS_PREDICTIONS,'min_complete_oos_seasons':MIN_COMPLETE_SEASONS,'oos_predictions_pass':n>=MIN_OOS_PREDICTIONS,'oos_seasons_pass':len(usable)>=MIN_COMPLETE_SEASONS},'evaluation_run_id':eval_run,'training_run_id':training_run_id,'model_version_id':model_version_id};conn.execute("update internal.evaluation_runs set status='SUCCEEDED',finished_at=now(),metadata=metadata||%s::jsonb where id=%s",(json.dumps({'summary':summary}),eval_run));conn.execute("update internal.prediction_training_runs set metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'benchmark':summary}),training_run_id));conn.commit();print(json.dumps(summary,sort_keys=True));return summary
+  except Exception as exc:
+   conn.execute("update internal.evaluation_runs set status='FAILED',finished_at=now(),metadata=metadata||%s::jsonb where id=%s",(json.dumps({'error':str(exc)[:2000]}),eval_run));conn.commit();raise
 if __name__=='__main__':main()

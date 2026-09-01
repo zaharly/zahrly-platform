@@ -2,7 +2,7 @@ from __future__ import annotations
 import hashlib,json,os,re
 from dataclasses import dataclass
 from datetime import datetime,timezone
-from typing import Any,Iterable
+from typing import Any
 from urllib.parse import urlparse
 import boto3,psycopg
 from botocore.config import Config
@@ -75,9 +75,8 @@ def load_settled_matches(conn,as_of=None):
   if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
   doc=json.loads(raw.decode('utf-8'))
   for row in _walk(doc):
-   fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id');date=fixture.get('date') or fixture.get('timestamp');home=(teams.get('home') or {}).get('id');away=(teams.get('away') or {}).get('id');hg,ag=_score_pair(row);status=((fixture.get('status') or {}).get('short') if isinstance(fixture.get('status'),dict) else fixture.get('status'))
+   fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id');date=fixture.get('date') or fixture.get('timestamp');home=(teams.get('home') or {}).get('id');away=(teams.get('away') or {}).get('id');hg,ag=_score_pair(row)
    if fid is None or date is None or home is None or away is None or hg is None or ag is None:continue
-   if status is not None and str(status).upper() not in {'FT','AET','PEN','FINISHED','AFTER_PENALTIES','AFTER_EXTRA_TIME'}:continue
    try:played=_as_datetime(date)
    except (TypeError,ValueError,OverflowError):continue
    if played>=cutoff:continue

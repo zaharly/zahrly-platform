@@ -40,11 +40,14 @@ def db_connect():
 
 def fetch_fixture_manifests(conn, min_completeness: float = 1.0) -> list[ArchiveManifest]:
     with conn.cursor() as cur:
+        # psycopg uses %s-style parameters; a literal percent in a query must
+        # therefore be escaped as %%. This keeps the S3 URI LIKE predicate
+        # literal while preserving the parameterized completeness threshold.
         cur.execute("""
             select manifest_id::text as manifest_id, object_uri, checksum, row_count, date_start, date_end
               from internal.archive_catalog
              where dataset_type='fixtures' and provider='api-football'
-               and completeness_score >= %s and object_uri like 's3://%'
+               and completeness_score >= %s and object_uri like 's3://%%'
              order by coalesce(date_start, created_at), manifest_id
         """, (min_completeness,))
         return [ArchiveManifest(**row) for row in cur.fetchall()]

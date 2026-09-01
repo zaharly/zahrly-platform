@@ -39,7 +39,11 @@ def _normalized_db_url() -> str:
 
 
 def db_connect():
-    return psycopg.connect(_normalized_db_url(), row_factory=dict_row, connect_timeout=20, sslmode='require')
+    conn = psycopg.connect(_normalized_db_url(), row_factory=dict_row, connect_timeout=20, sslmode='require')
+    # Historical training is isolated batch work. It must not be interrupted
+    # by a short server-side statement timeout while maintaining indexes.
+    conn.execute('set statement_timeout = 0')
+    return conn
 
 
 def _fit_elo_state(matches, cutoff, policy):

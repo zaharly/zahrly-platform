@@ -15,6 +15,9 @@ on:
         description: 'Minimum match rows required for OOS readiness'
         required: false
         default: '3000'
+  push:
+    branches:
+      - 'prediction/training-archive-oos-v2'
 
 jobs:
   archive-preflight:
@@ -29,13 +32,25 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ARCHIVE_SEASONS: ${{ inputs.seasons }}
-      OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons }}
-      OOS_MIN_MATCHES: ${{ inputs.min_oos_matches }}
+      OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
+      OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install -r training/archive_oos/requirements.txt
+      - name: Install dependencies
+        run: pip install -r training/archive_oos/requirements.txt
+      - name: Verify AWS identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws sts get-caller-identity
+      - name: Verify archive bucket access
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws s3api get-bucket-location --bucket zahrly-community-storage
+          aws s3api list-objects-v2 --bucket zahrly-community-storage --prefix zahrly/archive/ --max-items 5
       - name: Validate S3 archive against catalog manifests
         run: python training/archive_oos/run.py

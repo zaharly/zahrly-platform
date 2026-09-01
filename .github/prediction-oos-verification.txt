@@ -1,3 +1,3 @@
-Final OOS verification trigger after historical fold-boundary and psycopg SQL fixes.
+Final OOS verification trigger after historical fold-boundary, psycopg SQL, and OOS batch fixes.
 
 Trigger latest isolated-branch workflow execution.

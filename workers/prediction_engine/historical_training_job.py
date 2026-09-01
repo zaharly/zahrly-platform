@@ -13,7 +13,7 @@ from psycopg.rows import dict_row
 from .archive_training_source import load_settled_matches
 from .dixon_coles import DixonColesPolicy, time_decay_weight
 from .elo import EloPolicy, EloState, update_elo
-from .glicko import GlickoPolicy, GlickoState, initial_state, update_pair
+from .glicko import GlickoPolicy, initial_state, update_pair
 
 MIN_OOS_SAMPLES = 3000
 MIN_COMPLETE_SEASONS = 3
@@ -110,7 +110,9 @@ def _fold_metrics(test, predictions):
 def build_cutoffs(start, end):
     start = start.astimezone(timezone.utc) if start.tzinfo else start.replace(tzinfo=timezone.utc)
     end = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
-    return [datetime(y, 1, 1, tzinfo=timezone.utc) for y in range(start.year + 1, end.year)]
+    # First available season is the warm-up/training season; every subsequent
+    # calendar year up to and including the last observed season gets an OOS fold.
+    return [datetime(y, 1, 1, tzinfo=timezone.utc) for y in range(start.year + 1, end.year + 1)]
 
 
 def main():

@@ -110,6 +110,7 @@ jobs:
           output=/tmp/prediction-training.log
           python -m workers.prediction_engine.historical_training_job 2>&1 | tee "$output"
           rc=${PIPESTATUS[0]}
+          printf 'TRAINING_PROCESS_RC=%s\n' "$rc" >> "$GITHUB_ENV"
           set -e
           python - "$output" <<'PY'
           import json, os, sys
@@ -127,19 +128,16 @@ jobs:
                   if payload.get('status') == 'SUCCEEDED': succeeded=payload
           payload=succeeded or started
           if not payload or not payload.get('training_run_id'):
-              if int(os.environ.get('TRAINING_PROCESS_RC','0')) != 0:
-                  raise SystemExit('historical training failed before publishing a training_run_id')
-              raise SystemExit('historical training produced no lifecycle payload')
+              raise SystemExit('historical training failed before publishing a training_run_id')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write(f"PREDICTION_TRAINING_RUN_ID={payload['training_run_id']}\n")
               if payload.get('model_version_id'):
                   fh.write(f"PREDICTION_MODEL_VERSION_ID={payload['model_version_id']}\n")
           print(f"Bound training lifecycle to training_run_id={payload['training_run_id']}")
-          if succeeded is None or int(os.environ.get('TRAINING_PROCESS_RC','0')) != 0:
+          rc=int(os.environ.get('TRAINING_PROCESS_RC','1'))
+          if succeeded is None or rc != 0:
               raise SystemExit('historical training did not finish successfully')
           PY
-        env:
-          TRAINING_PROCESS_RC: ${{ job.status == 'failure' && '1' || '0' }}
       - name: Finalize failed training run if the process exited abnormally
         if: failure() && env.PREDICTION_TRAINING_RUN_ID != ''
         shell: bash

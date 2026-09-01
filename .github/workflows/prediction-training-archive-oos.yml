@@ -85,26 +85,19 @@ jobs:
           parts = urlsplit(raw)
           if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or not parts.password:
               raise SystemExit('invalid SUPABASE_DB_URL format')
-          project_host = urlsplit(os.environ['SUPABASE_URL']).hostname
-          if not project_host:
-              raise SystemExit('invalid SUPABASE_URL')
-          expected_host = f'db.{project_host.split(".", 1)[0]}.supabase.co'
-          netloc = parts.hostname
-          userinfo = ''
-          if parts.username is not None:
-              userinfo = parts.username
-              if parts.password is not None:
-                  userinfo += ':' + parts.password
-              userinfo += '@'
-          port = parts.port or 5432
-          fixed = urlunsplit((parts.scheme, f'{userinfo}{expected_host}:{port}', parts.path or '/postgres', parts.query, parts.fragment))
-          # Keep the secret out of logs; only export the normalized connection string.
+          project_ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
+          expected_host = f'db.{project_ref}.supabase.co'
+          userinfo = parts.username
+          if parts.password is not None:
+              userinfo += ':' + parts.password
+          fixed = urlunsplit((parts.scheme, f'{userinfo}@{expected_host}:5432', '/postgres', '', ''))
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write('SUPABASE_DB_URL=' + fixed + '\n')
-          with psycopg.connect(fixed, connect_timeout=15, sslmode='require') as conn:
+          with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
               with conn.cursor() as cur:
                   cur.execute('select 1')
-                  assert cur.fetchone()[0] == 1
+                  if cur.fetchone()[0] != 1:
+                      raise SystemExit('Supabase PostgreSQL smoke test returned unexpected value')
           print('Supabase PostgreSQL connectivity: OK')
           PY
       - name: Validate archive manifests and checksums

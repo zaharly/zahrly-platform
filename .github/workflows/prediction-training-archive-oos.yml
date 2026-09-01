@@ -18,11 +18,15 @@ on:
   push:
     branches:
       - 'prediction/training-archive-oos-v2'
+  pull_request:
+    branches:
+      - 'main'
+    types: [opened, synchronize, reopened]
 
 jobs:
   archive-preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     permissions:
       contents: read
     env:
@@ -65,7 +69,7 @@ jobs:
           aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
-      - name: Run existing P0 historical training model
+      - name: Run historical training from S3 archive
         run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints
         run: python -m workers.prediction_engine.rating_checkpoints

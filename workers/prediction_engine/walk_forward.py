@@ -48,12 +48,14 @@ def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy
 def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],test_window_days:int=365):
  if test_window_days<=0:raise ValueError('test_window_days must be positive')
  ordered=sorted(matches,key=lambda m:_utc(m.played_at));seasoned=all(m.season is not None for m in ordered);folds=[]
+ if seasoned:
+  season_starts={s:min(_utc(m.played_at) for m in ordered if m.season==s) for s in sorted({m.season for m in ordered})}
  for raw in cutoffs:
   cutoff=_utc(raw)
   if seasoned:
-   candidates=[m.season for m in ordered if _utc(m.played_at)>=cutoff and m.season is not None]
-   if not candidates:continue
-   season_label=min(candidates);train=[m for m in ordered if m.season<season_label];test=[m for m in ordered if m.season==season_label]
+   labels=[s for s,start in season_starts.items() if start==cutoff]
+   if not labels:continue
+   season_label=labels[0];train=[m for m in ordered if m.season<season_label];test=[m for m in ordered if m.season==season_label]
   else:
    end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
   folds.append((train,test,cutoff))

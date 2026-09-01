@@ -1,5 +1,6 @@
 name: Prediction Training - S3 Archive OOS
 
+# Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 on:
   workflow_dispatch:
     inputs:

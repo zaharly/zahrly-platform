@@ -25,6 +25,13 @@ on:
       - 'main'
     types: [opened, synchronize, reopened]
 
+# Prevent two historical training runs from concurrently inserting/maintaining
+# the same model/evaluation indexes. Do not cancel an active training run;
+# queue the next run instead.
+concurrency:
+  group: prediction-training-archive-oos-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   archive-preflight:
     runs-on: ubuntu-latest

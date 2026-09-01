@@ -5,7 +5,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,28 +32,30 @@ def env(name: str) -> str:
     return value
 
 
-def supabase_sql(sql: str) -> list[dict[str, Any]]:
+def load_catalog() -> list[dict[str, Any]]:
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
-    # The endpoint below is used only for read-only archive metadata queries.
-    response = requests.post(
-        f"{base}/rest/v1/rpc/prediction_training_archive_manifest",
-        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"p_sql": sql},
+    response = requests.get(
+        f"{base}/rest/v1/archive_catalog",
+        headers={"apikey": key, "Authorization": f"Bearer {key}"},
+        params={
+            "select": "manifest_id,season,dataset_type,object_uri,checksum,row_count,completeness_score,schema_version",
+            "provider": "eq.api-football",
+            "order": "season.asc,dataset_type.asc",
+        },
         timeout=60,
     )
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, list):
-        raise RuntimeError("unexpected Supabase RPC response")
+        raise RuntimeError("unexpected archive_catalog response")
     return payload
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
     if not uri.startswith("s3://"):
         raise ValueError(f"invalid S3 URI: {uri}")
-    raw = uri[5:]
-    bucket, _, key = raw.partition("/")
+    bucket, _, key = uri[5:].partition("/")
     if not bucket or not key:
         raise ValueError(f"invalid S3 URI: {uri}")
     return bucket, key
@@ -63,7 +65,7 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def load_artifact(s3, artifact: Artifact) -> dict[str, Any]:
+def load_artifact(s3, artifact: Artifact) -> int:
     bucket, key = parse_s3_uri(artifact.object_uri)
     obj = s3.get_object(Bucket=bucket, Key=key)
     data = obj["Body"].read()
@@ -72,27 +74,18 @@ def load_artifact(s3, artifact: Artifact) -> dict[str, Any]:
         raise RuntimeError(
             f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}"
         )
-    payload = json.loads(data.decode("utf-8"))
-    return {"artifact": artifact, "payload": payload, "sha256": actual}
+    return len(data)
 
 
 def main() -> int:
-    seasons_filter = {
-        int(x.strip()) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()
-    }
+    requested = {int(x) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()}
     min_seasons = int(os.environ.get("OOS_MIN_SEASONS", "3"))
     min_matches = int(os.environ.get("OOS_MIN_MATCHES", "3000"))
 
-    # A dedicated read-only RPC must exist in the database. It exposes archive_catalog
-    # rows without touching production campaign/worker tables.
-    rows = supabase_sql(
-        "select manifest_id, season, dataset_type, object_uri, checksum, row_count, completeness_score, schema_version "
-        "from internal.archive_catalog where provider='api-football' order by season, dataset_type"
-    )
-    artifacts: list[Artifact] = []
-    for row in rows:
+    artifacts = []
+    for row in load_catalog():
         season = int(row["season"])
-        if seasons_filter and season not in seasons_filter:
+        if requested and season not in requested:
             continue
         artifacts.append(
             Artifact(
@@ -106,7 +99,6 @@ def main() -> int:
                 schema_version=str(row["schema_version"]),
             )
         )
-
     if not artifacts:
         raise RuntimeError("archive catalog returned no artifacts")
 
@@ -114,27 +106,25 @@ def main() -> int:
     for artifact in artifacts:
         by_season[artifact.season].append(artifact)
 
-    session = boto3.Session(region_name=os.environ.get("AWS_REGION"))
-    s3 = session.client("s3")
-
-    validated = []
+    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION"))
+    total_bytes = 0
+    validated = 0
     for artifact in artifacts:
-        validated.append(load_artifact(s3, artifact))
+        total_bytes += load_artifact(s3, artifact)
+        validated += 1
 
-    complete_seasons = []
-    for season, items in sorted(by_season.items()):
-        if items and min(a.completeness_score for a in items) >= 1.0:
-            complete_seasons.append(season)
-
+    complete_seasons = [
+        season for season, items in sorted(by_season.items())
+        if items and min(item.completeness_score for item in items) >= 1.0
+    ]
     fixture_like_rows = sum(
-        a.row_count
-        for a in artifacts
-        if a.dataset_type in {"fixtures", "fixture_results", "matches"}
+        item.row_count for item in artifacts if item.dataset_type in {"fixtures", "fixture_results", "matches"}
     )
     report = {
-        "generated_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "internal.archive_catalog -> AWS S3",
-        "validated_artifacts": len(validated),
+        "validated_artifacts": validated,
+        "validated_bytes": total_bytes,
         "complete_seasons": complete_seasons,
         "complete_season_count": len(complete_seasons),
         "fixture_like_rows": fixture_like_rows,
@@ -143,9 +133,9 @@ def main() -> int:
         "oos_ready": len(complete_seasons) >= min_seasons and fixture_like_rows >= min_matches,
         "write_scope": "NO_PRODUCTION_WRITES",
     }
-
-    out = Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json"))
-    out.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json")).write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
     print(json.dumps(report, indent=2))
     return 0
 

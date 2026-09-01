@@ -17,10 +17,9 @@ on:
         description: 'Minimum OOS predictions required'
         required: false
         default: '3000'
-  pull_request:
+  push:
     branches:
-      - 'main'
-    types: [opened, synchronize, reopened]
+      - 'prediction/training-archive-oos-v2'
 
 concurrency:
   group: prediction-training-archive-oos-${{ github.workflow }}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -40,9 +41,6 @@ def db_connect():
 
 def fetch_fixture_manifests(conn, min_completeness: float = 1.0) -> list[ArchiveManifest]:
     with conn.cursor() as cur:
-        # psycopg uses %s-style parameters; a literal percent in a query must
-        # therefore be escaped as %%. This keeps the S3 URI LIKE predicate
-        # literal while preserving the parameterized completeness threshold.
         cur.execute("""
             select manifest_id::text as manifest_id, object_uri, checksum, row_count, date_start, date_end
               from internal.archive_catalog
@@ -61,6 +59,17 @@ def fetch_team_identity_map(conn) -> dict[str, str]:
              where provider='api-football' and external_team_id is not null and team_id is not null
         """)
         return {str(row['external_team_id']): str(row['team_id']) for row in cur.fetchall()}
+
+
+def _historical_team_key(external_id: Any, canonical_id: str | None) -> str | None:
+    if canonical_id:
+        return canonical_id
+    if external_id is None:
+        return None
+    # Historical training must not discard archived fixtures merely because a
+    # provider team has not yet been canonicalized in production. This key is
+    # local to the training namespace and never creates/updates a production team.
+    return f"api-football:{str(external_id)}"
 
 
 def _s3_client():
@@ -132,7 +141,7 @@ def load_settled_matches(conn, as_of: datetime | None=None) -> list[Match]:
     for manifest in manifests:
         bucket,key=_parse_uri(manifest.object_uri)
         raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
-        if __import__('hashlib').sha256(raw).hexdigest()!=manifest.checksum:
+        if hashlib.sha256(raw).hexdigest()!=manifest.checksum:
             raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
         doc=json.loads(raw.decode('utf-8'))
         for row in _walk(doc):
@@ -148,7 +157,8 @@ def load_settled_matches(conn, as_of: datetime | None=None) -> list[Match]:
             try: played=_as_datetime(date)
             except (TypeError,ValueError,OverflowError): continue
             if played>=cutoff: continue
-            home_team=team_map.get(str(home)); away_team=team_map.get(str(away))
+            home_team=_historical_team_key(home, team_map.get(str(home)))
+            away_team=_historical_team_key(away, team_map.get(str(away)))
             if not home_team or not away_team: continue
             by_id[str(fid)]=Match(str(fid),played,home_team,away_team,hg,ag)
     matches=sorted(by_id.values(),key=lambda m:(m.played_at,m.match_id))

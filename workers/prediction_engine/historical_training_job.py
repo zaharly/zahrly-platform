@@ -18,6 +18,7 @@ from .glicko import GlickoPolicy, initial_state, update_pair
 
 MIN_OOS_SAMPLES = 3000
 MIN_COMPLETE_SEASONS = 3
+MODEL_VERSION_ADVISORY_LOCK_KEY = 74123819
 
 
 def _normalized_db_url() -> str:
@@ -40,10 +41,23 @@ def _normalized_db_url() -> str:
 
 def db_connect():
     conn = psycopg.connect(_normalized_db_url(), row_factory=dict_row, connect_timeout=20, sslmode='require')
-    # Historical training is isolated batch work. It must not be interrupted
-    # by a short server-side statement timeout while maintaining indexes.
-    conn.execute('set statement_timeout = 0')
+    # Historical training is an isolated batch workload. Explicitly disable
+    # server-side statement/lock timeouts so index-backed writes are not
+    # cancelled while waiting for another transaction.
+    conn.execute('SET SESSION statement_timeout = 0')
+    conn.execute('SET SESSION lock_timeout = 0')
     return conn
+
+
+def _lock_model_version_creation(conn) -> None:
+    # Serialize model_versions creation across independent training runs.
+    # Session advisory locks survive transaction boundaries and are released
+    # automatically if the worker connection dies.
+    conn.execute('select pg_advisory_lock(%s)', (MODEL_VERSION_ADVISORY_LOCK_KEY,))
+
+
+def _unlock_model_version_creation(conn) -> None:
+    conn.execute('select pg_advisory_unlock(%s)', (MODEL_VERSION_ADVISORY_LOCK_KEY,))
 
 
 def _fit_elo_state(matches, cutoff, policy):
@@ -147,12 +161,21 @@ def main():
             raise RuntimeError('prediction_training_gate_failed:no_valid_cutoffs')
         version = 'p0-shadow-' + started.strftime('%Y%m%d%H%M%S')
         cutoff = started
-        with conn.transaction():
-            with conn.cursor() as cur:
-                cur.execute("insert into public.model_versions(family,version,status,training_cutoff) values (%s,%s,'SHADOW',%s) returning id::text as id", ('prediction_engine', version, cutoff))
-                model_id = cur.fetchone()['id']
-                cur.execute("insert into internal.prediction_training_runs(model_version_id,status,requested_cutoff,started_at,metrics) values (%s,'RUNNING',%s,%s,%s) returning id::text as id", (model_id, cutoff, started, json.dumps({'source': 's3_fixture_archive', 'settled_matches': len(matches)})))
-                run_id = cur.fetchone()['id']
+
+        _lock_model_version_creation(conn)
+        try:
+            # Re-assert the batch policy after the advisory-lock wait.
+            conn.execute('SET SESSION statement_timeout = 0')
+            conn.execute('SET SESSION lock_timeout = 0')
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("insert into public.model_versions(family,version,status,training_cutoff) values (%s,%s,'SHADOW',%s) returning id::text as id", ('prediction_engine', version, cutoff))
+                    model_id = cur.fetchone()['id']
+                    cur.execute("insert into internal.prediction_training_runs(model_version_id,status,requested_cutoff,started_at,metrics) values (%s,'RUNNING',%s,%s,%s) returning id::text as id", (model_id, cutoff, started, json.dumps({'source': 's3_fixture_archive', 'settled_matches': len(matches)})))
+                    run_id = cur.fetchone()['id']
+        finally:
+            _unlock_model_version_creation(conn)
+
         try:
             from .walk_forward import build_walk_forward_folds, run_fold
             folds = build_walk_forward_folds(matches, cutoffs)

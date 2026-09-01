@@ -1,7 +1,7 @@
 name: Prediction Training - S3 Archive OOS
 
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
-# Trigger poke: launch validation/training on the isolated branch.
+# Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 on:
   workflow_dispatch:
     inputs:
@@ -40,7 +40,7 @@ jobs:
       S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
       S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
       SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
-      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ARCHIVE_SEASONS: ${{ inputs.seasons || '' }}
       OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for v in AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SUPABASE_DB_URL SUPABASE_SERVICE_ROLE_KEY S3_BUCKET; do
+          for v in AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SUPABASE_DB_URL_RAW SUPABASE_SERVICE_ROLE_KEY S3_BUCKET; do
             test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
           done
       - name: Verify AWS identity and archive bucket access
@@ -69,7 +69,7 @@ jobs:
           aws sts get-caller-identity
           aws s3api get-bucket-location --bucket "${S3_BUCKET}"
           aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5
-      - name: Validate and normalize Supabase DB connection
+      - name: Configure Supabase IPv4 Session Pooler
         shell: bash
         env:
           SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
@@ -84,14 +84,12 @@ jobs:
           if not raw:
               raise SystemExit('missing runtime value: SUPABASE_DB_URL')
           parts = urlsplit(raw)
-          if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or not parts.password:
-              raise SystemExit('invalid SUPABASE_DB_URL format')
+          if parts.scheme not in {'postgres', 'postgresql'} or not parts.password:
+              raise SystemExit('invalid SUPABASE_DB_URL format: expected postgres URL with password')
           project_ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
-          expected_host = f'db.{project_ref}.supabase.co'
-          userinfo = parts.username
-          if parts.password is not None:
-              userinfo += ':' + parts.password
-          fixed = urlunsplit((parts.scheme, f'{userinfo}@{expected_host}:5432', '/postgres', '', ''))
+          pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+          username = 'postgres.' + project_ref
+          fixed = urlunsplit((parts.scheme, f'{username}:{parts.password}@{pooler_host}:5432', '/postgres', '', ''))
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write('SUPABASE_DB_URL=' + fixed + '\n')
           with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
@@ -99,7 +97,7 @@ jobs:
                   cur.execute('select 1')
                   if cur.fetchone()[0] != 1:
                       raise SystemExit('Supabase PostgreSQL smoke test returned unexpected value')
-          print('Supabase PostgreSQL connectivity: OK')
+          print('Supabase IPv4 Session Pooler connectivity: OK')
           PY
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py

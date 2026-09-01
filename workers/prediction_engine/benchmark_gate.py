@@ -55,7 +55,11 @@ def main():
         eligible=history_pass and empirical_pass and market_pass
         status='PASS' if eligible else ('WAITING_MARKET_DATA' if history_pass and empirical_pass and not market_available else ('INSUFFICIENT_HISTORY' if not history_pass else 'FAIL'))
         gate={'status':status,'history_pass':history_pass,'empirical_pass':empirical_pass,'market_pass':market_pass,'market_available':market_available,'promotion_eligible':eligible,'model':model,'empirical_baseline':empirical,'market':market,'relative_gain_vs_empirical':rg,'market_relative_gain':market_gain,'thresholds':{'brier_relative':BRIER_IMPROVEMENT,'log_loss_relative':LOGLOSS_IMPROVEMENT,'rps_relative':RPS_IMPROVEMENT,'ece_absolute_tolerance':ECE_ABSOLUTE_TOLERANCE,'min_complete_oos_seasons':MIN_COMPLETE_SEASONS,'min_oos_predictions':MIN_OOS_PREDICTIONS},'created_at':datetime.now(timezone.utc).isoformat()}
-        with conn.transaction(): conn.execute("update internal.prediction_training_runs set metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'benchmark_gate':gate}),run['id']))
+        with conn.transaction():
+            conn.execute("update internal.prediction_training_runs set metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'benchmark_gate':gate}),run['id']))
+            conn.execute("update public.model_versions set status=%s where id=%s",('SHADOW',run['model_version_id']))
+            conn.execute("insert into public.model_releases(model_version_id,release_version,status,approval_state,reason) values (%s,%s,'SHADOW','PENDING',%s) on conflict(model_version_id,release_version) do update set status='SHADOW',approval_state='PENDING',reason=excluded.reason",(run['model_version_id'],f"shadow-{run['id']}",f"OOS gate status={status}; production activation is not performed"))
+            conn.execute("insert into public.shadow_evaluations(candidate_model_version_id,incumbent_model_version_id,evaluation_run_id,status,candidate_metrics,incumbent_metrics,comparison,finished_at) select %s, null, (select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS' order by created_at desc limit 1), 'SUCCEEDED', %s, %s, %s, now()",(run['model_version_id'],run['model_version_id'],json.dumps(model),json.dumps(empirical),json.dumps({'relative_gain_vs_empirical':rg,'gate_status':status})))
         print(json.dumps({'training_run_id':run['id'],'model_version_id':run['model_version_id'],'benchmark_gate':gate},sort_keys=True))
 
 if __name__=='__main__': main()

@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from math import log
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import boto3
 import psycopg
@@ -21,23 +21,21 @@ MIN_COMPLETE_SEASONS = 3
 
 
 def _normalized_db_url() -> str:
-    raw = os.environ.get('SUPABASE_DB_URL', '').strip()
+    raw = os.environ.get('SUPABASE_DB_URL_RAW', os.environ.get('SUPABASE_DB_URL', '')).strip()
     if not raw:
         raise RuntimeError('missing required environment variable: SUPABASE_DB_URL')
     parts = urlsplit(raw)
-    if parts.scheme not in {'postgres', 'postgresql'} or not parts.password:
-        raise RuntimeError('invalid SUPABASE_DB_URL format: expected postgres URL with password')
-    project_url = os.environ.get('SUPABASE_URL', '').strip()
-    project_host = urlsplit(project_url).hostname if project_url else None
+    if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
+        raise RuntimeError('invalid SUPABASE_DB_URL format: expected postgres URL with username/password')
+    project_host = urlsplit(os.environ.get('SUPABASE_URL', '').strip()).hostname
     if not project_host:
         raise RuntimeError('invalid SUPABASE_URL')
     project_ref = project_host.split('.', 1)[0]
-    # GitHub Actions runners are IPv4-only. Supabase documents the shared
-    # Supavisor session pooler as the IPv4-compatible alternative to the direct
-    # db.<project>.supabase.co endpoint.
-    pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
-    username = 'postgres.' + project_ref
-    return urlunsplit((parts.scheme, f'{username}:{parts.password}@{pooler_host}:5432', '/postgres', '', ''))
+    region = os.environ.get('SUPABASE_POOLER_REGION', 'eu-central-1')
+    pooler_host = f'aws-0-{region}.pooler.supabase.com'
+    username = quote(f'postgres.{project_ref}', safe='')
+    password = quote(parts.password, safe='')
+    return urlunsplit((parts.scheme, f'{username}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
 
 
 def db_connect():

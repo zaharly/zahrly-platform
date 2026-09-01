@@ -34,7 +34,7 @@ import SecurityPage from './pages/security/SecurityPage'
 import AuditLog from './pages/security/AuditLog'
 import Jurisdiction from './pages/security/Jurisdiction'
 import SettingsPage from './pages/settings/SettingsPage'
-import { BonusesPage, BonusEditor, GiveawaysPage, GiveawayEditor, PickRushPage, PickRushEditor, PrizePoolPage, PrizePoolEditor, BookmakersRadarPage, BookmakerEditor, LeaderboardsPage, LeaderboardBotEditor } from './pages/rewards/RewardsAdminV2'
+import { BonusesPage, BonusEditor, GiveawaysPage, GiveawayEditor, PickRushPage, PickRushEditor, PrizePoolPage, PrizePoolEditor, BookmakersRadarPage, BookmakerEditor, LeaderboardsPage, LeaderboardBotEditor } from './pages/rewards/RewardsCrudAdmin'
 
 export default function App() {
   return <AdminAuthGate><StoreProvider><AppShell><Routes>

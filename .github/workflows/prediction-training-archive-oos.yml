@@ -106,25 +106,64 @@ jobs:
       - name: Run historical training from S3 archive
         shell: bash
         run: |
-          set -euo pipefail
-          python -m workers.prediction_engine.historical_training_job | tee /tmp/prediction-training.json
-          python - <<'PY'
-          import json, os
-          with open('/tmp/prediction-training.json', encoding='utf-8') as fh:
-              lines=[x.strip() for x in fh if x.strip().startswith('{') and x.strip().endswith('}')]
-          payload=json.loads(lines[-1])
-          run_id=payload.get('training_run_id')
-          model_id=payload.get('model_version_id')
-          if not run_id or not model_id:
-              raise SystemExit('training did not return training_run_id/model_version_id')
+          set +e
+          output=/tmp/prediction-training.log
+          python -m workers.prediction_engine.historical_training_job 2>&1 | tee "$output"
+          rc=${PIPESTATUS[0]}
+          set -e
+          python - "$output" <<'PY'
+          import json, os, sys
+          path=sys.argv[1]
+          started=None
+          succeeded=None
+          with open(path, encoding='utf-8') as fh:
+              for raw in fh:
+                  line=raw.strip()
+                  if not (line.startswith('{') and line.endswith('}')):
+                      continue
+                  try: payload=json.loads(line)
+                  except json.JSONDecodeError: continue
+                  if payload.get('status') == 'STARTED': started=payload
+                  if payload.get('status') == 'SUCCEEDED': succeeded=payload
+          payload=succeeded or started
+          if not payload or not payload.get('training_run_id'):
+              if int(os.environ.get('TRAINING_PROCESS_RC','0')) != 0:
+                  raise SystemExit('historical training failed before publishing a training_run_id')
+              raise SystemExit('historical training produced no lifecycle payload')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
-              fh.write(f'PREDICTION_TRAINING_RUN_ID={run_id}\n')
-              fh.write(f'PREDICTION_MODEL_VERSION_ID={model_id}\n')
-          print(f'Bound downstream evaluation to training_run_id={run_id}')
+              fh.write(f"PREDICTION_TRAINING_RUN_ID={payload['training_run_id']}\n")
+              if payload.get('model_version_id'):
+                  fh.write(f"PREDICTION_MODEL_VERSION_ID={payload['model_version_id']}\n")
+          print(f"Bound training lifecycle to training_run_id={payload['training_run_id']}")
+          if succeeded is None or int(os.environ.get('TRAINING_PROCESS_RC','0')) != 0:
+              raise SystemExit('historical training did not finish successfully')
+          PY
+        env:
+          TRAINING_PROCESS_RC: ${{ job.status == 'failure' && '1' || '0' }}
+      - name: Finalize failed training run if the process exited abnormally
+        if: failure() && env.PREDICTION_TRAINING_RUN_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import psycopg
+          from workers.prediction_engine.historical_training_job import _normalized_db_url
+          run_id=os.environ.get('PREDICTION_TRAINING_RUN_ID','').strip()
+          if not run_id:
+              raise SystemExit(0)
+          with psycopg.connect(_normalized_db_url(), connect_timeout=20, sslmode='require') as conn:
+              conn.execute('set session statement_timeout=0')
+              conn.execute("update internal.prediction_training_runs set status='FAILED', finished_at=now(), metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s and status='RUNNING'", ('{"error":"GitHub training process terminated before successful completion"}', run_id))
+              conn.commit()
+          print(f'Finalized abnormal training run: {run_id}')
           PY
       - name: Persist Elo/Glicko rating checkpoints
+        if: success()
         run: python -m workers.prediction_engine.rating_checkpoints
       - name: Build persisted OOS benchmark (Brier/ECE/RPS + market coverage)
+        if: success()
         run: python -m workers.prediction_engine.oos_benchmark
       - name: Evaluate promotion gates without activation
+        if: success()
         run: python -m workers.prediction_engine.benchmark_gate

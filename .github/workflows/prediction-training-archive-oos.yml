@@ -44,6 +44,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Install archive and prediction dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r training/archive_oos/requirements.txt
+          pip install -r workers/archive_worker/requirements.txt
       - name: Validate required credentials
         shell: bash
         run: |
@@ -60,8 +65,6 @@ jobs:
           aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
-      - name: Install Prediction Engine dependencies
-        run: python -m pip install --upgrade pip && pip install -r workers/archive_worker/requirements.txt
       - name: Run existing P0 historical training model
         run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints

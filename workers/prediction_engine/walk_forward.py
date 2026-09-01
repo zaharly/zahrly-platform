@@ -49,14 +49,25 @@ def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],
  if test_window_days<=0:raise ValueError('test_window_days must be positive')
  ordered=sorted(matches,key=lambda m:_utc(m.played_at));seasoned=all(m.season is not None for m in ordered);folds=[]
  if seasoned:
-  season_starts={s:min(_utc(m.played_at) for m in ordered if m.season==s) for s in sorted({m.season for m in ordered})}
- for raw in cutoffs:
-  cutoff=_utc(raw)
-  if seasoned:
-   labels=[s for s,start in season_starts.items() if start==cutoff]
-   if not labels:continue
-   season_label=labels[0];train=[m for m in ordered if m.season<season_label];test=[m for m in ordered if m.season==season_label]
-  else:
-   end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
-  folds.append((train,test,cutoff))
- return folds
+  season_labels=sorted({m.season for m in ordered})
+  season_starts={s:min(_utc(m.played_at) for m in ordered if m.season==s) for s in season_labels}
+  # Map each requested cutoff to its ordinal season start rather than relying on
+  # datetime object equality. This tolerates timezone/normalization differences.
+  for raw in cutoffs:
+   cutoff=_utc(raw)
+   target=min(season_labels,key=lambda s:abs((season_starts[s]-cutoff).total_seconds()))
+   if season_starts[target] < cutoff and target != season_labels[-1]:
+    later=[s for s in season_labels if season_starts[s]>=cutoff]
+    if later:target=later[0]
+   train=[m for m in ordered if m.season<target];test=[m for m in ordered if m.season==target]
+   if train and test:folds.append((train,test,season_starts[target]))
+ else:
+  for raw in cutoffs:
+   cutoff=_utc(raw);end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
+   if train and test:folds.append((train,test,cutoff))
+ # De-duplicate if callers supplied multiple cutoffs resolving to one season.
+ unique={}
+ for train,test,cutoff in folds:
+  key=min(m.season for m in test) if seasoned else cutoff
+  unique[key]=(train,test,cutoff)
+ return list(unique.values())

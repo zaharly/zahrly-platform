@@ -5,6 +5,7 @@ import json
 import os
 from datetime import datetime, timezone
 from math import log
+from urllib.parse import urlsplit, urlunsplit
 
 import boto3
 import psycopg
@@ -19,8 +20,31 @@ MIN_OOS_SAMPLES = 3000
 MIN_COMPLETE_SEASONS = 3
 
 
+def _normalized_db_url() -> str:
+    raw = os.environ.get('SUPABASE_DB_URL', '').strip()
+    if not raw:
+        raise RuntimeError('missing required environment variable: SUPABASE_DB_URL')
+    parts = urlsplit(raw)
+    if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
+        raise RuntimeError('invalid SUPABASE_DB_URL format')
+    project_url = os.environ.get('SUPABASE_URL', '').strip()
+    project_host = urlsplit(project_url).hostname if project_url else None
+    if not project_host:
+        raise RuntimeError('invalid SUPABASE_URL')
+    project_ref = project_host.split('.', 1)[0]
+    expected_host = f'db.{project_ref}.supabase.co'
+    # The training runner uses the direct Postgres endpoint, not an obsolete
+    # pooler hostname/port embedded in an older secret. Keep credentials from
+    # the secret intact while forcing the current project's direct endpoint.
+    userinfo = parts.username
+    if parts.password is not None:
+        userinfo += ':' + parts.password
+    return urlunsplit((parts.scheme, f'{userinfo}@{expected_host}:5432', '/postgres', '', ''))
+
+
 def db_connect():
-    return psycopg.connect(os.environ['SUPABASE_DB_URL'], row_factory=dict_row, connect_timeout=15)
+    url = _normalized_db_url()
+    return psycopg.connect(url, row_factory=dict_row, connect_timeout=15, sslmode='require')
 
 
 def _fit_elo_state(matches, cutoff, policy):
@@ -110,8 +134,6 @@ def _fold_metrics(test, predictions):
 def build_cutoffs(start, end):
     start = start.astimezone(timezone.utc) if start.tzinfo else start.replace(tzinfo=timezone.utc)
     end = end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc)
-    # First available season is the warm-up/training season; every subsequent
-    # calendar year up to and including the last observed season gets an OOS fold.
     return [datetime(y, 1, 1, tzinfo=timezone.utc) for y in range(start.year + 1, end.year + 1)]
 
 

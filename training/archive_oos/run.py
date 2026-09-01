@@ -77,10 +77,20 @@ def load_artifact(s3, artifact: Artifact) -> int:
     return len(data)
 
 
+def int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
+
+
 def main() -> int:
     requested = {int(x) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()}
-    min_seasons = int(os.environ.get("OOS_MIN_SEASONS", "3"))
-    min_matches = int(os.environ.get("OOS_MIN_MATCHES", "3000"))
+    min_seasons = int_env("OOS_MIN_SEASONS", 3)
+    min_matches = int_env("OOS_MIN_MATCHES", 3000)
 
     artifacts = []
     for row in load_catalog():

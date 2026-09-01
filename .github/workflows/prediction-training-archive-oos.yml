@@ -77,19 +77,26 @@ jobs:
           set -euo pipefail
           python - <<'PY'
           import os
-          from urllib.parse import urlsplit, urlunsplit
+          from urllib.parse import urlsplit, quote, urlunsplit
           import psycopg
 
           raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
           if not raw:
               raise SystemExit('missing runtime value: SUPABASE_DB_URL')
           parts = urlsplit(raw)
-          if parts.scheme not in {'postgres', 'postgresql'} or not parts.password:
-              raise SystemExit('invalid SUPABASE_DB_URL format: expected postgres URL with password')
-          project_ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
-          pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+          if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
+              raise SystemExit('invalid SUPABASE_DB_URL format: expected postgres URL with username/password')
+          project_host = urlsplit(os.environ['SUPABASE_URL']).hostname
+          if not project_host:
+              raise SystemExit('invalid SUPABASE_URL')
+          project_ref = project_host.split('.', 1)[0]
+          if project_ref != 'qosvqlwkexrhswcuakib':
+              raise SystemExit('unexpected Supabase project reference')
+          region = 'eu-central-1'
+          pooler_host = f'aws-0-{region}.pooler.supabase.com'
           username = 'postgres.' + project_ref
-          fixed = urlunsplit((parts.scheme, f'{username}:{parts.password}@{pooler_host}:5432', '/postgres', '', ''))
+          password = quote(parts.password, safe='')
+          fixed = urlunsplit((parts.scheme, f'{quote(username, safe="")}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write('SUPABASE_DB_URL=' + fixed + '\n')
           with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:

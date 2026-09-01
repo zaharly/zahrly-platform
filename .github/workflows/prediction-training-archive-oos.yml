@@ -28,7 +28,7 @@ jobs:
       AWS_REGION: ${{ secrets.S3_REGION }}
       AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-      S3_BUCKET: ${{ secrets.S3_BUCKET }}
+      S3_BUCKET: zahrly-community-storage
       SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       ARCHIVE_SEASONS: ${{ inputs.seasons }}
@@ -47,7 +47,6 @@ jobs:
           test -n "${AWS_REGION}" || { echo 'S3_REGION secret is empty'; exit 1; }
           test -n "${AWS_ACCESS_KEY_ID}" || { echo 'S3_ACCESS_KEY_ID secret is empty'; exit 1; }
           test -n "${AWS_SECRET_ACCESS_KEY}" || { echo 'S3_SECRET_ACCESS_KEY secret is empty'; exit 1; }
-          test -n "${S3_BUCKET}" || { echo 'S3_BUCKET secret is empty'; exit 1; }
           aws sts get-caller-identity
           aws s3api get-bucket-location --bucket "${S3_BUCKET}"
           aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5

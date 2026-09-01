@@ -25,11 +25,8 @@ on:
       - 'main'
     types: [opened, synchronize, reopened]
 
-# Prevent two historical training runs from concurrently inserting/maintaining
-# the same model/evaluation indexes. Do not cancel an active training run;
-# queue the next run instead.
 concurrency:
-  group: prediction-training-archive-oos-${{ github.ref }}
+  group: prediction-training-archive-oos-${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:
@@ -86,37 +83,45 @@ jobs:
           import os
           from urllib.parse import urlsplit, quote, urlunsplit
           import psycopg
-
           raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
-          if not raw:
-              raise SystemExit('missing runtime value: SUPABASE_DB_URL')
           parts = urlsplit(raw)
           if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
-              raise SystemExit('invalid SUPABASE_DB_URL format: expected postgres URL with username/password')
+              raise SystemExit('invalid SUPABASE_DB_URL format')
           project_host = urlsplit(os.environ['SUPABASE_URL']).hostname
-          if not project_host:
-              raise SystemExit('invalid SUPABASE_URL')
-          project_ref = project_host.split('.', 1)[0]
+          project_ref = project_host.split('.', 1)[0] if project_host else ''
           if project_ref != 'qosvqlwkexrhswcuakib':
               raise SystemExit('unexpected Supabase project reference')
-          region = 'eu-central-1'
-          pooler_host = f'aws-0-{region}.pooler.supabase.com'
-          username = 'postgres.' + project_ref
+          pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+          username = quote('postgres.' + project_ref, safe='')
           password = quote(parts.password, safe='')
-          fixed = urlunsplit((parts.scheme, f'{quote(username, safe="")}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
+          fixed = urlunsplit((parts.scheme, f'{username}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write('SUPABASE_DB_URL=' + fixed + '\n')
           with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
-              with conn.cursor() as cur:
-                  cur.execute('select 1')
-                  if cur.fetchone()[0] != 1:
-                      raise SystemExit('Supabase PostgreSQL smoke test returned unexpected value')
+              conn.execute('select 1')
           print('Supabase IPv4 Session Pooler connectivity: OK')
           PY
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
-        run: python -m workers.prediction_engine.historical_training_job
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m workers.prediction_engine.historical_training_job | tee /tmp/prediction-training.json
+          python - <<'PY'
+          import json, os
+          with open('/tmp/prediction-training.json', encoding='utf-8') as fh:
+              lines=[x.strip() for x in fh if x.strip().startswith('{') and x.strip().endswith('}')]
+          payload=json.loads(lines[-1])
+          run_id=payload.get('training_run_id')
+          model_id=payload.get('model_version_id')
+          if not run_id or not model_id:
+              raise SystemExit('training did not return training_run_id/model_version_id')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+              fh.write(f'PREDICTION_TRAINING_RUN_ID={run_id}\n')
+              fh.write(f'PREDICTION_MODEL_VERSION_ID={model_id}\n')
+          print(f'Bound downstream evaluation to training_run_id={run_id}')
+          PY
       - name: Persist Elo/Glicko rating checkpoints
         run: python -m workers.prediction_engine.rating_checkpoints
       - name: Build persisted OOS benchmark (Brier/ECE/RPS + market coverage)

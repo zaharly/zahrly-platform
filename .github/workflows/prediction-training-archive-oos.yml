@@ -1,6 +1,7 @@
 name: Prediction Training - S3 Archive OOS
 
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
+# Trigger poke: launch validation/training on the isolated branch.
 on:
   workflow_dispatch:
     inputs:

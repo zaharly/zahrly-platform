@@ -18,6 +18,15 @@
         "s3:GetObject"
       ],
       "Resource": "arn:aws:s3:::zahrly-community-storage/zahrly/archive/*"
+    },
+    {
+      "Sid": "PredictionModelArtifacts",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::zahrly-community-storage/zahrly/models/prediction_engine/*"
     }
   ]
 }

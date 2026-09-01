@@ -35,20 +35,16 @@ def env(name: str) -> str:
 def load_catalog() -> list[dict[str, Any]]:
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
-    response = requests.get(
-        f"{base}/rest/v1/archive_catalog",
-        headers={"apikey": key, "Authorization": f"Bearer {key}"},
-        params={
-            "select": "manifest_id,season,dataset_type,object_uri,checksum,row_count,completeness_score,schema_version",
-            "provider": "eq.api-football",
-            "order": "season.asc,dataset_type.asc",
-        },
+    response = requests.post(
+        f"{base}/rest/v1/rpc/prediction_training_archive_catalog",
+        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={},
         timeout=60,
     )
     response.raise_for_status()
     payload = response.json()
     if not isinstance(payload, list):
-        raise RuntimeError("unexpected archive_catalog response")
+        raise RuntimeError("unexpected prediction_training_archive_catalog response")
     return payload
 
 
@@ -116,7 +112,7 @@ def main() -> int:
     for artifact in artifacts:
         by_season[artifact.season].append(artifact)
 
-    s3 = boto3.client("s3", region_name=os.environ.get("AWS_REGION"))
+    s3 = boto3.client("s3", region_name=env("AWS_REGION"))
     total_bytes = 0
     validated = 0
     for artifact in artifacts:
@@ -132,7 +128,7 @@ def main() -> int:
     )
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": "internal.archive_catalog -> AWS S3",
+        "source": "public.prediction_training_archive_catalog -> AWS S3",
         "validated_artifacts": validated,
         "validated_bytes": total_bytes,
         "complete_seasons": complete_seasons,

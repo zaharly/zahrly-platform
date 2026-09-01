@@ -25,26 +25,23 @@ def _normalized_db_url() -> str:
     if not raw:
         raise RuntimeError('missing required environment variable: SUPABASE_DB_URL')
     parts = urlsplit(raw)
-    if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
-        raise RuntimeError('invalid SUPABASE_DB_URL format')
+    if parts.scheme not in {'postgres', 'postgresql'} or not parts.password:
+        raise RuntimeError('invalid SUPABASE_DB_URL format: expected postgres URL with password')
     project_url = os.environ.get('SUPABASE_URL', '').strip()
     project_host = urlsplit(project_url).hostname if project_url else None
     if not project_host:
         raise RuntimeError('invalid SUPABASE_URL')
     project_ref = project_host.split('.', 1)[0]
-    expected_host = f'db.{project_ref}.supabase.co'
-    # The training runner uses the direct Postgres endpoint, not an obsolete
-    # pooler hostname/port embedded in an older secret. Keep credentials from
-    # the secret intact while forcing the current project's direct endpoint.
-    userinfo = parts.username
-    if parts.password is not None:
-        userinfo += ':' + parts.password
-    return urlunsplit((parts.scheme, f'{userinfo}@{expected_host}:5432', '/postgres', '', ''))
+    # GitHub Actions runners are IPv4-only. Supabase documents the shared
+    # Supavisor session pooler as the IPv4-compatible alternative to the direct
+    # db.<project>.supabase.co endpoint.
+    pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+    username = 'postgres.' + project_ref
+    return urlunsplit((parts.scheme, f'{username}:{parts.password}@{pooler_host}:5432', '/postgres', '', ''))
 
 
 def db_connect():
-    url = _normalized_db_url()
-    return psycopg.connect(url, row_factory=dict_row, connect_timeout=15, sslmode='require')
+    return psycopg.connect(_normalized_db_url(), row_factory=dict_row, connect_timeout=20, sslmode='require')
 
 
 def _fit_elo_state(matches, cutoff, policy):

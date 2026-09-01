@@ -43,6 +43,8 @@ def main():
     with db() as conn:
         run=conn.execute("select id::text as id,model_version_id::text as model_version_id,metrics from internal.prediction_training_runs where status='SUCCEEDED' order by started_at desc limit 1").fetchone()
         if not run: raise SystemExit('no succeeded training run')
+        model_row=conn.execute("select artifact_uri from public.model_versions where id=%s",(run['model_version_id'],)).fetchone()
+        artifact_available=bool(model_row and model_row['artifact_uri'])
         rows=conn.execute("select * from internal.prediction_oos_benchmark where training_run_id=%s",(run['id'],)).fetchall()
         folds=conn.execute("select count(*) as n from internal.prediction_training_folds where training_run_id=%s and status='SUCCEEDED'",(run['id'],)).fetchone()['n']
         model=aggregate(rows,'model'); empirical=aggregate(rows,'empirical'); market=aggregate([r for r in rows if r['market_p_home'] is not None],'market')
@@ -52,9 +54,9 @@ def main():
         market_gain={k:gain(market[k],model[k]) for k in ('brier','log_loss','rps')}
         market_pass=market_available and market_gain['brier'] is not None and market_gain['log_loss'] is not None and market_gain['brier']>=0 and market_gain['log_loss']>=0
         history_pass=len(rows)>=MIN_OOS_PREDICTIONS and folds>=MIN_COMPLETE_SEASONS
-        eligible=history_pass and empirical_pass and market_pass
-        status='PASS' if eligible else ('WAITING_MARKET_DATA' if history_pass and empirical_pass and not market_available else ('INSUFFICIENT_HISTORY' if not history_pass else 'FAIL'))
-        gate={'status':status,'history_pass':history_pass,'empirical_pass':empirical_pass,'market_pass':market_pass,'market_available':market_available,'promotion_eligible':eligible,'model':model,'empirical_baseline':empirical,'market':market,'relative_gain_vs_empirical':rg,'market_relative_gain':market_gain,'thresholds':{'brier_relative':BRIER_IMPROVEMENT,'log_loss_relative':LOGLOSS_IMPROVEMENT,'rps_relative':RPS_IMPROVEMENT,'ece_absolute_tolerance':ECE_ABSOLUTE_TOLERANCE,'min_complete_oos_seasons':MIN_COMPLETE_SEASONS,'min_oos_predictions':MIN_OOS_PREDICTIONS},'created_at':datetime.now(timezone.utc).isoformat()}
+        eligible=artifact_available and history_pass and empirical_pass and market_pass
+        status='PASS' if eligible else ('FAIL_NO_ARTIFACT' if not artifact_available else ('WAITING_MARKET_DATA' if history_pass and empirical_pass and not market_available else ('INSUFFICIENT_HISTORY' if not history_pass else 'FAIL')))
+        gate={'status':status,'artifact_available':artifact_available,'history_pass':history_pass,'empirical_pass':empirical_pass,'market_pass':market_pass,'market_available':market_available,'promotion_eligible':eligible,'model':model,'empirical_baseline':empirical,'market':market,'relative_gain_vs_empirical':rg,'market_relative_gain':market_gain,'thresholds':{'brier_relative':BRIER_IMPROVEMENT,'log_loss_relative':LOGLOSS_IMPROVEMENT,'rps_relative':RPS_IMPROVEMENT,'ece_absolute_tolerance':ECE_ABSOLUTE_TOLERANCE,'min_complete_oos_seasons':MIN_COMPLETE_SEASONS,'min_oos_predictions':MIN_OOS_PREDICTIONS},'created_at':datetime.now(timezone.utc).isoformat()}
         with conn.transaction():
             conn.execute("update internal.prediction_training_runs set metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'benchmark_gate':gate}),run['id']))
             conn.execute("update public.model_versions set status=%s where id=%s",('SHADOW',run['model_version_id']))

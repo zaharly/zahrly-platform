@@ -37,9 +37,10 @@ def _feature_factor(match,features,side):
     if shots is not None:factor*=min(1.10,max(.90,1.0+0.025*(shots-4.0)))
     return factor
 
-def predict_with_state(match,ratings,train,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy(),features=None):
+def predict_with_state(match,ratings,train,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy(),features=None,team_rates=None):
     if _utc(match.played_at)<_utc(cutoff):raise LeakageError('test match must be at or after fold cutoff')
-    attack,defense,rate=_team_rates(train,cutoff,dc_policy);hr=ratings.get(match.home_team_id,EloState(elo_policy.initial_rating));ar=ratings.get(match.away_team_id,EloState(elo_policy.initial_rating))
+    if team_rates is None:team_rates=_team_rates(train,cutoff,dc_policy)
+    attack,defense,rate=team_rates;hr=ratings.get(match.home_team_id,EloState(elo_policy.initial_rating));ar=ratings.get(match.away_team_id,EloState(elo_policy.initial_rating))
     ef=1/(1+exp(-((hr.rating+elo_policy.home_advantage)-ar.rating)/elo_policy.rating_scale*2.302585092994046));ha=attack.get(match.home_team_id,1);aa=attack.get(match.away_team_id,1);hd=defense.get(match.home_team_id,1);ad=defense.get(match.away_team_id,1)
     hl=max(.05,rate*exp(dc_policy.home_advantage)*ha/max(ad,.05)*(.75+.5*ef)*_feature_factor(match,features,'home')); al=max(.05,rate*aa/max(hd,.05)*(1.25-.5*ef)*_feature_factor(match,features,'away'))
     ph,pd,pa=result_probabilities(probability_matrix(hl,al,dc_policy.rho,dc_policy.max_goals));return Prediction(match.match_id,match.home_team_id,match.away_team_id,ph,pd,pa,hl,al)
@@ -51,9 +52,10 @@ def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy
     ratings={}
     for m in train:
         h=ratings.get(m.home_team_id,EloState(elo_policy.initial_rating));a=ratings.get(m.away_team_id,EloState(elo_policy.initial_rating));ratings[m.home_team_id],ratings[m.away_team_id],_=update_elo(h,a,m.home_goals,m.away_goals,elo_policy)
+    team_rates=_team_rates(train,cutoff,dc_policy)
     out=[]
     for m in test:
-        out.append(predict_with_state(m,ratings,train,cutoff,elo_policy,dc_policy,features));h=ratings.get(m.home_team_id,EloState(elo_policy.initial_rating));a=ratings.get(m.away_team_id,EloState(elo_policy.initial_rating));ratings[m.home_team_id],ratings[m.away_team_id],_=update_elo(h,a,m.home_goals,m.away_goals,elo_policy)
+        out.append(predict_with_state(m,ratings,train,cutoff,elo_policy,dc_policy,features,team_rates));h=ratings.get(m.home_team_id,EloState(elo_policy.initial_rating));a=ratings.get(m.away_team_id,EloState(elo_policy.initial_rating));ratings[m.home_team_id],ratings[m.away_team_id],_=update_elo(h,a,m.home_goals,m.away_goals,elo_policy)
     return out
 
 def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],test_window_days:int=365):

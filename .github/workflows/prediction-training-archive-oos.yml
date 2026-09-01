@@ -68,6 +68,45 @@ jobs:
           aws sts get-caller-identity
           aws s3api get-bucket-location --bucket "${S3_BUCKET}"
           aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5
+      - name: Validate and normalize Supabase DB connection
+        shell: bash
+        env:
+          SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit, urlunsplit
+          import psycopg
+
+          raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
+          if not raw:
+              raise SystemExit('missing runtime value: SUPABASE_DB_URL')
+          parts = urlsplit(raw)
+          if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or not parts.password:
+              raise SystemExit('invalid SUPABASE_DB_URL format')
+          project_host = urlsplit(os.environ['SUPABASE_URL']).hostname
+          if not project_host:
+              raise SystemExit('invalid SUPABASE_URL')
+          expected_host = f'db.{project_host.split(".", 1)[0]}.supabase.co'
+          netloc = parts.hostname
+          userinfo = ''
+          if parts.username is not None:
+              userinfo = parts.username
+              if parts.password is not None:
+                  userinfo += ':' + parts.password
+              userinfo += '@'
+          port = parts.port or 5432
+          fixed = urlunsplit((parts.scheme, f'{userinfo}{expected_host}:{port}', parts.path or '/postgres', parts.query, parts.fragment))
+          # Keep the secret out of logs; only export the normalized connection string.
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+              fh.write('SUPABASE_DB_URL=' + fixed + '\n')
+          with psycopg.connect(fixed, connect_timeout=15, sslmode='require') as conn:
+              with conn.cursor() as cur:
+                  cur.execute('select 1')
+                  assert cur.fetchone()[0] == 1
+          print('Supabase PostgreSQL connectivity: OK')
+          PY
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive

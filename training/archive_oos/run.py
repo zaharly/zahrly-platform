@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import Any
 
 import boto3
 import requests
+from botocore.config import Config
 
 
 @dataclass(frozen=True)
@@ -26,26 +28,25 @@ class Artifact:
 
 
 def env(name: str) -> str:
-    value = os.environ.get(name)
+    value = os.environ.get(name, "").strip()
     if not value:
         raise RuntimeError(f"missing required environment variable: {name}")
     return value
 
 
-def load_catalog() -> list[dict[str, Any]]:
+def load_catalog() -> list[Artifact]:
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
     response = requests.post(
         f"{base}/rest/v1/rpc/prediction_training_archive_catalog",
         headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={},
-        timeout=60,
+        json={}, timeout=60,
     )
     response.raise_for_status()
-    payload = response.json()
-    if not isinstance(payload, list):
+    rows = response.json()
+    if not isinstance(rows, list):
         raise RuntimeError("unexpected prediction_training_archive_catalog response")
-    return payload
+    return [Artifact(str(r["manifest_id"]), int(r["season"]), str(r["dataset_type"]), str(r["object_uri"]), str(r["checksum"]), int(r["row_count"]), float(r["completeness_score"] or 0), str(r["schema_version"])) for r in rows]
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -67,15 +68,13 @@ def load_artifact(s3, artifact: Artifact) -> int:
     data = obj["Body"].read()
     actual = sha256_bytes(data)
     if actual != artifact.checksum:
-        raise RuntimeError(
-            f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}"
-        )
+        raise RuntimeError(f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}")
     return len(data)
 
 
 def int_env(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None or not raw.strip():
+    raw = os.environ.get(name, "")
+    if not raw.strip():
         return default
     try:
         return int(raw)
@@ -87,24 +86,9 @@ def main() -> int:
     requested = {int(x) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()}
     min_seasons = int_env("OOS_MIN_SEASONS", 3)
     min_matches = int_env("OOS_MIN_MATCHES", 3000)
+    max_workers = max(2, min(16, int_env("S3_VALIDATE_WORKERS", 12)))
 
-    artifacts = []
-    for row in load_catalog():
-        season = int(row["season"])
-        if requested and season not in requested:
-            continue
-        artifacts.append(
-            Artifact(
-                manifest_id=str(row["manifest_id"]),
-                season=season,
-                dataset_type=str(row["dataset_type"]),
-                object_uri=str(row["object_uri"]),
-                checksum=str(row["checksum"]),
-                row_count=int(row["row_count"]),
-                completeness_score=float(row["completeness_score"] or 0),
-                schema_version=str(row["schema_version"]),
-            )
-        )
+    artifacts = [a for a in load_catalog() if not requested or a.season in requested]
     if not artifacts:
         raise RuntimeError("archive catalog returned no artifacts")
 
@@ -112,25 +96,39 @@ def main() -> int:
     for artifact in artifacts:
         by_season[artifact.season].append(artifact)
 
-    s3 = boto3.client("s3", region_name=env("AWS_REGION"))
+    def make_client():
+        return boto3.client(
+            "s3",
+            region_name=env("AWS_REGION"),
+            config=Config(max_pool_connections=max_workers, retries={"max_attempts": 5, "mode": "standard"}),
+        )
+
+    def validate_one(artifact: Artifact) -> int:
+        return load_artifact(make_client(), artifact)
+
     total_bytes = 0
     validated = 0
-    for artifact in artifacts:
-        total_bytes += load_artifact(s3, artifact)
-        validated += 1
+    errors: list[str] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(validate_one, artifact): artifact for artifact in artifacts}
+        for future in as_completed(futures):
+            artifact = futures[future]
+            try:
+                total_bytes += future.result()
+                validated += 1
+            except Exception as exc:
+                errors.append(f"{artifact.manifest_id}: {exc}")
+    if errors:
+        raise RuntimeError("S3 archive validation failed: " + " | ".join(errors[:10]))
 
-    complete_seasons = [
-        season for season, items in sorted(by_season.items())
-        if items and min(item.completeness_score for item in items) >= 1.0
-    ]
-    fixture_like_rows = sum(
-        item.row_count for item in artifacts if item.dataset_type in {"fixtures", "fixture_results", "matches"}
-    )
+    complete_seasons = [season for season, items in sorted(by_season.items()) if items and min(item.completeness_score for item in items) >= 1.0]
+    fixture_like_rows = sum(item.row_count for item in artifacts if item.dataset_type in {"fixtures", "fixture_results", "matches"})
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "public.prediction_training_archive_catalog -> AWS S3",
         "validated_artifacts": validated,
         "validated_bytes": total_bytes,
+        "s3_validation_workers": max_workers,
         "complete_seasons": complete_seasons,
         "complete_season_count": len(complete_seasons),
         "fixture_like_rows": fixture_like_rows,
@@ -139,9 +137,7 @@ def main() -> int:
         "oos_ready": len(complete_seasons) >= min_seasons and fixture_like_rows >= min_matches,
         "write_scope": "NO_PRODUCTION_WRITES",
     }
-    Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json")).write_text(
-        json.dumps(report, indent=2), encoding="utf-8"
-    )
+    Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json")).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0
 

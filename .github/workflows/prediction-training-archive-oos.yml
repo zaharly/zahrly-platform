@@ -1,0 +1,41 @@
+name: Prediction Training - S3 Archive OOS
+
+on:
+  workflow_dispatch:
+    inputs:
+      seasons:
+        description: 'Comma-separated seasons; blank = all archived seasons'
+        required: false
+        default: ''
+      min_oos_seasons:
+        description: 'Minimum complete seasons required for OOS readiness'
+        required: false
+        default: '3'
+      min_oos_matches:
+        description: 'Minimum match rows required for OOS readiness'
+        required: false
+        default: '3000'
+
+jobs:
+  archive-preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ARCHIVE_SEASONS: ${{ inputs.seasons }}
+      OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons }}
+      OOS_MIN_MATCHES: ${{ inputs.min_oos_matches }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r training/archive_oos/requirements.txt
+      - name: Validate S3 archive against catalog manifests
+        run: python training/archive_oos/run.py

@@ -1,0 +1,2 @@
+This runner may read internal.archive_catalog and AWS S3 archive objects only.
+It must never write campaigns, worker_jobs, prediction_jobs, pgmq queues, fixtures, model_versions, or production read models.

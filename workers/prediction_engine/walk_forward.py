@@ -13,11 +13,23 @@ class Prediction:
     match_id:str; home_team_id:str; away_team_id:str; p_home:float; p_draw:float; p_away:float; lambda_home:float; lambda_away:float
 class LeakageError(ValueError):pass
 def _utc(v):return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
-def season_start(label):
+def normalize_season_label(label):
  if label is None:return None
  text=str(label).strip()
- try:return int(text.split('/',1)[0])
- except (ValueError,IndexError):return None
+ if not text:return None
+ if '/' in text:
+  parts=[p.strip() for p in text.split('/',1)]
+  try:start,end=int(parts[0]),int(parts[1])
+  except (ValueError,IndexError):return None
+  if end!=start+1:return None
+  return f'{start}/{end}'
+ try:start=int(text)
+ except ValueError:return None
+ return f'{start}/{start+1}'
+def season_start(label):
+ normalized=normalize_season_label(label)
+ if normalized is None:return None
+ return int(normalized.split('/',1)[0])
 def _season_sort_key(label):
  start=season_start(label)
  return (start if start is not None else 10**9,str(label))
@@ -55,18 +67,20 @@ def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy
  return out
 def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],test_window_days:int=365):
  if test_window_days<=0:raise ValueError('test_window_days must be positive')
- ordered=sorted(matches,key=lambda m:_utc(m.played_at));seasoned=all(m.season is not None for m in ordered);folds=[]
- if seasoned:
-  season_labels=sorted({str(m.season) for m in ordered},key=_season_sort_key)
+ ordered=sorted(matches,key=lambda m:_utc(m.played_at));labelled=[(m,normalize_season_label(m.season)) for m in ordered];season_labels=sorted({label for _,label in labelled if label is not None},key=_season_sort_key);folds=[]
+ if len(season_labels)>=2:
   season_index={s:i for i,s in enumerate(season_labels)}
-  season_starts={s:min(_utc(m.played_at) for m in ordered if str(m.season)==s) for s in season_labels}
+  season_starts={s:min(_utc(m.played_at) for m,label in labelled if label==s) for s in season_labels}
   for raw in cutoffs:
    cutoff=_utc(raw)
    later=[s for s in season_labels if season_starts[s]>=cutoff]
-   target=later[0] if later else season_labels[-1]
-   target_index=season_index[target]
-   train=[m for m in ordered if m.season is not None and season_index[str(m.season)]<target_index]
-   test=[m for m in ordered if m.season is not None and str(m.season)==target]
+   if not later:continue
+   target=later[0];target_index=season_index[target];train=[];test=[]
+   for m,label in labelled:
+    played=_utc(m.played_at)
+    if label==target:test.append(m)
+    elif label is not None and season_index[label]<target_index:train.append(m)
+    elif label is None and played<season_starts[target]:train.append(m)
    if train and test:folds.append((train,test,season_starts[target]))
  else:
   for raw in cutoffs:
@@ -74,6 +88,6 @@ def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],
    if train and test:folds.append((train,test,cutoff))
  unique={}
  for train,test,cutoff in folds:
-  key=str(min((m.season for m in test if m.season is not None),default=cutoff)) if seasoned else cutoff
+  key=normalize_season_label(min((m.season for m in test if m.season is not None),default=None)) if any(m.season is not None for m in test) else cutoff
   unique[key]=(train,test,cutoff)
  return list(unique.values())

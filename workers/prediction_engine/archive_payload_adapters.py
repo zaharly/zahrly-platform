@@ -13,14 +13,15 @@ _AWAY_KEYS=("away_team_id","away_id","awayTeamId","awayId","match_awayteam_id","
 _DATE_KEYS=("date","timestamp","fixture_date","match_date","kickoff","kickoff_at","event_date","eventDate","event_timestamp","matchDate","match_datetime")
 _HOME_GOAL_KEYS=("home_goals","home_score","homeGoals","homeScore","goalsHomeTeam","home_team_goals","match_hometeam_score","score_home")
 _AWAY_GOAL_KEYS=("away_goals","away_score","awayGoals","awayScore","goalsAwayTeam","away_team_goals","match_awayteam_score","score_away")
+_HOME_OBJECT_KEYS=("home","homeTeam","home_team","localTeam","localteam")
+_AWAY_OBJECT_KEYS=("away","awayTeam","away_team","visitorTeam","visitorteam")
 
 
 def _decode_json_container(value:Any)->Any:
-    """Decode raw JSON, gzip JSON, base64-wrapped JSON, and JSON-lines legacy payloads."""
     current=value
     for _ in range(6):
         if isinstance(current,bytes):
-            raw=current
+            raw=value if current is value else current
             if raw[:2]==b"\x1f\x8b":
                 try: raw=gzip.decompress(raw)
                 except (OSError,EOFError): return value
@@ -102,14 +103,16 @@ def _columnar_rows(value:dict[str,Any])->list[dict[str,Any]]|None:
 def _canonical_from_legacy(value:dict[str,Any])->dict[str,Any]|None:
     fixture=value.get("fixture") if isinstance(value.get("fixture"),dict) else None
     teams=value.get("teams") if isinstance(value.get("teams"),dict) else None
-    fixture_id=_first(value,_ID_KEYS) if isinstance(value,dict) else None
+    fixture_id=_first(value,_ID_KEYS)
     if fixture_id is None and fixture:fixture_id=_first(fixture,_ID_KEYS)
     home=_first(value,_HOME_KEYS);away=_first(value,_AWAY_KEYS)
+    if home is None:home=_nested_id(_first(value,_HOME_OBJECT_KEYS))
+    if away is None:away=_nested_id(_first(value,_AWAY_OBJECT_KEYS))
     if teams:
         if home is None:home=_nested_id(teams.get("home"))
         if away is None:away=_nested_id(teams.get("away"))
-    if home is None:home=_nested_id(value.get("home"))
-    if away is None:away=_nested_id(value.get("away"))
+    if home is None and fixture:home=_nested_id(fixture.get("homeTeam"))
+    if away is None and fixture:away=_nested_id(fixture.get("awayTeam"))
     date=_first(value,_DATE_KEYS)
     if date is None and fixture:date=_first(fixture,_DATE_KEYS)
     goals=value.get("goals") if isinstance(value.get("goals"),dict) else {}

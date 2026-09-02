@@ -52,8 +52,10 @@ def predict_with_state(match,ratings,train,cutoff,elo_policy=EloPolicy(),dc_poli
 
 def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy(),features=None):
     cutoff=_utc(cutoff);train=sorted(train,key=lambda m:_utc(m.played_at));test=sorted(test,key=lambda m:_utc(m.played_at))
+    if not train or not test:raise ValueError('walk-forward fold requires non-empty train and test sets')
     if any(_utc(m.played_at)>=cutoff for m in train):raise LeakageError('fold training contains future data')
     if any(_utc(m.played_at)<cutoff for m in test):raise LeakageError('fold test contains pre-cutoff data')
+    if max(_utc(m.played_at) for m in train)>=min(_utc(m.played_at) for m in test):raise LeakageError('fold training/test timestamps overlap')
     ratings={}
     for m in train:
         h=ratings.get(m.home_team_id,EloState(elo_policy.initial_rating));a=ratings.get(m.away_team_id,EloState(elo_policy.initial_rating));ratings[m.home_team_id],ratings[m.away_team_id],_=update_elo(h,a,m.home_goals,m.away_goals,elo_policy)
@@ -63,40 +65,45 @@ def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy
     return out
 
 def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],test_window_days:int=365):
+    """Build one chronological fold per logical football season after the first.
+
+    The archive season key is provider-specific (for API-Football, e.g. 2011),
+    while folds operate on normalized football seasons (e.g. 2011/2012).
+    Fold membership is determined by logical season identity, not by the first
+    archived fixture timestamp. This prevents a partial/late archive from
+    causing the same logical season to appear in both train and test.
+    """
     if test_window_days<=0:raise ValueError('test_window_days must be positive')
-    ordered=sorted(matches,key=lambda m:_utc(m.played_at));labelled=[]
+    ordered=sorted(matches,key=lambda m:_utc(m.played_at))
+    labelled=[]
     for m in ordered:
         try:label=normalize_season_label(m.season)
         except ValueError:label=None
         labelled.append((m,label))
-    season_labels=sorted({label for _,label in labelled if label is not None},key=_season_sort_key);folds=[]
+    season_labels=sorted({label for _,label in labelled if label is not None},key=_season_sort_key)
     if len(season_labels)>=2:
+        folds=[]
         season_index={s:i for i,s in enumerate(season_labels)}
-        season_starts={s:min(_utc(m.played_at) for m,label in labelled if label==s) for s in season_labels}
-        for raw in cutoffs:
-            cutoff=_utc(raw)
-            later=[s for s in season_labels if season_starts[s]>=cutoff]
-            if not later:continue
-            target=later[0];target_index=season_index[target];train=[];test=[]
-            for m,label in labelled:
-                played=_utc(m.played_at)
-                if label==target:test.append(m)
-                elif label is not None and season_index[label]<target_index and played<cutoff:train.append(m)
-                elif label is None and played<cutoff:train.append(m)
-            if train and test:folds.append((train,test,season_starts[target]))
-    else:
-        for raw in cutoffs:
-            cutoff=_utc(raw);end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
-            if train and test:folds.append((train,test,cutoff))
-    unique={}
-    for train,test,cutoff in folds:
-        labels=[]
-        for m in test:
-            try:
-                label=normalize_season_label(m.season)
-            except ValueError:
-                label=None
-            if label is not None:labels.append(label)
-        key=sorted(set(labels),key=_season_sort_key)[0] if labels else cutoff
-        unique[key]=(train,test,cutoff)
-    return list(unique.values())
+        season_boundary={s:min(_utc(m.played_at) for m,label in labelled if label==s) for s in season_labels}
+        # We intentionally derive the fold from season order. The supplied
+        # cutoffs are advisory/legacy inputs and are not allowed to re-define
+        # the test season boundary.
+        for target_index in range(1,len(season_labels)):
+            target=season_labels[target_index];cutoff=season_boundary[target]
+            train=[m for m,label in labelled if label is not None and season_index[label]<target_index and _utc(m.played_at)<cutoff]
+            test=[m for m,label in labelled if label==target]
+            if not train or not test:continue
+            train_seasons={normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None}
+            test_seasons={normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None}
+            if train_seasons & test_seasons:raise LeakageError(f'walk-forward season overlap: {sorted(train_seasons & test_seasons,key=_season_sort_key)}')
+            if max(_utc(m.played_at) for m in train)>=min(_utc(m.played_at) for m in test):raise LeakageError(f'walk-forward timestamp overlap for test season {target}')
+            folds.append((train,test,cutoff))
+        return folds
+    # Legacy fallback only when there are no usable season labels. This keeps
+    # the function usable for generic synthetic tests without weakening the
+    # season-aware production path above.
+    folds=[]
+    for raw in cutoffs:
+        cutoff=_utc(raw);end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
+        if train and test:folds.append((train,test,cutoff))
+    return folds

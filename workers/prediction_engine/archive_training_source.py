@@ -129,3 +129,5 @@ def load_settled_matches(conn,as_of=None):
     matches=sorted(by_id.values(),key=lambda m:(m.played_at,m.match_id))
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')
     return matches
+
+# Preserve the archive-season key while training operates on normalized logical football seasons.

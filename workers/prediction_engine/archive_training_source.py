@@ -31,7 +31,7 @@ def fetch_fixture_manifests(conn,min_completeness=1.0,complete_seasons=None):
     complete_seasons=set(complete_seasons if complete_seasons is not None else fetch_complete_archive_seasons(conn,min_completeness))
     if not complete_seasons:return []
     with conn.cursor() as cur:
-        cur.execute("""select manifest_id::text as manifest_id,object_uri,checksum,row_count,date_start,date_end,season from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score >= %s and season = any(%s) and object_uri like 's3://%' order by coalesce(date_start,created_at),manifest_id""",(min_completeness,sorted(complete_seasons)))
+        cur.execute("""select manifest_id::text as manifest_id,object_uri,checksum,row_count,date_start,date_end,season from internal.archive_catalog where dataset_type='fixtures' and provider='api-football' and completeness_score >= %s and season = any(%s) and object_uri like 's3://%%' order by coalesce(date_start,created_at),manifest_id""",(min_completeness,sorted(complete_seasons)))
         return [ArchiveManifest(**row) for row in cur.fetchall()]
 
 def fetch_team_identity_map(conn):

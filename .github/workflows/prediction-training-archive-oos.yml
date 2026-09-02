@@ -148,7 +148,7 @@ jobs:
               raise SystemExit(0)
           with psycopg.connect(_normalized_db_url(), connect_timeout=20, sslmode='require') as conn:
               conn.execute('set session statement_timeout=0')
-              conn.execute("update internal.prediction_training_runs set status='FAILED', finished_at=now(), metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s and status='RUNNING'", ('{"error":"GitHub training process terminated before successful completion"}', run_id))
+              conn.execute("update internal.prediction_training_runs set status='FAILED', finished_at=now(), metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s and status='RUNNING'", ('{\"error\":\"GitHub training process terminated before successful completion\"}', run_id))
               conn.commit()
           print(f'Finalized abnormal training run: {run_id}')
           PY

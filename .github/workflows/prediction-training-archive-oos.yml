@@ -111,27 +111,30 @@ jobs:
           python - "$output" <<'PY'
           import json, os, sys
           path=sys.argv[1]
-          started=None
-          succeeded=None
-          with open(path, encoding='utf-8') as fh:
+          payloads=[]
+          with open(path, encoding='utf-8-sig') as fh:
               for raw in fh:
-                  line=raw.strip()
+                  line=raw.lstrip('\ufeff').strip()
                   if not (line.startswith('{') and line.endswith('}')):
                       continue
-                  try: payload=json.loads(line)
-                  except json.JSONDecodeError: continue
-                  if payload.get('status') == 'STARTED': started=payload
-                  if payload.get('status') == 'SUCCEEDED': succeeded=payload
-          payload=succeeded or started
+                  try:
+                      payload=json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if payload.get('training_run_id'):
+                      payloads.append(payload)
+          final_payload=next((p for p in reversed(payloads) if p.get('status') == 'SUCCEEDED'), None)
+          started_payload=next((p for p in reversed(payloads) if p.get('status') == 'STARTED'), None)
+          payload=final_payload or started_payload
           if not payload or not payload.get('training_run_id'):
               raise SystemExit('historical training failed before publishing a training_run_id')
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write(f"PREDICTION_TRAINING_RUN_ID={payload['training_run_id']}\n")
               if payload.get('model_version_id'):
                   fh.write(f"PREDICTION_MODEL_VERSION_ID={payload['model_version_id']}\n")
-          print(f"Bound training lifecycle to training_run_id={payload['training_run_id']}")
           rc=int(os.environ.get('TRAINING_PROCESS_RC','1'))
-          if succeeded is None or rc != 0:
+          print(f"Historical training final status={payload.get('status')} rc={rc} training_run_id={payload['training_run_id']}")
+          if final_payload is None or rc != 0:
               raise SystemExit('historical training did not finish successfully')
           PY
       - name: Finalize failed training run if the process exited abnormally

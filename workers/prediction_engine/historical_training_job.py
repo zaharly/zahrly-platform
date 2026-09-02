@@ -65,6 +65,19 @@ def build_cutoffs(matches):
   return [min(m.played_at for m in ordered if logical_by_match[m.match_id]==season) for season in seasons[1:]]
  start=ordered[0].played_at;end=ordered[-1].played_at;s=start.astimezone(timezone.utc) if start.tzinfo else start.replace(tzinfo=timezone.utc);e=end.astimezone(timezone.utc) if end.tzinfo else end.replace(tzinfo=timezone.utc);return [datetime(y,1,1,tzinfo=timezone.utc) for y in range(s.year+1,e.year+1)]
 
+def _season_set(rows):
+ return {label for label in (normalize_season_label(m.season) for m in rows) if label is not None}
+
+def _fold_gate(train,test,fc):
+ if not train or not test:raise RuntimeError(f'prediction_training_gate_failed:empty_fold:cutoff={fc.isoformat()}')
+ train_end=max(m.played_at for m in train);test_start=min(m.played_at for m in test)
+ if train_end>=test_start:raise RuntimeError(f'prediction_training_gate_failed:walk_forward_time_overlap:cutoff={fc.isoformat()}:train_end={train_end.isoformat()}:test_start={test_start.isoformat()}')
+ if any(m.played_at>=fc for m in train):raise RuntimeError(f'prediction_training_gate_failed:training_on_or_after_cutoff:cutoff={fc.isoformat()}')
+ if any(m.played_at<fc for m in test):raise RuntimeError(f'prediction_training_gate_failed:test_before_cutoff:cutoff={fc.isoformat()}')
+ train_seasons=sorted(_season_set(train),key=lambda s:season_start_year(s));test_seasons=sorted(_season_set(test),key=lambda s:season_start_year(s))
+ overlap=sorted(set(train_seasons)&set(test_seasons),key=lambda s:season_start_year(s))
+ return train_seasons,test_seasons,overlap,train_end,test_start
+
 def main():
  started=datetime.now(timezone.utc)
  with db_connect() as conn:
@@ -78,12 +91,8 @@ def main():
    if label is not None:season_inventory[label]=season_inventory.get(label,0)+1
   preview=[]
   for train,test,fc in folds:
-   train_seasons=sorted({normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None},key=lambda s:season_start_year(s))
-   test_seasons=sorted({normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None},key=lambda s:season_start_year(s))
-   overlap=set(train_seasons)&set(test_seasons)
-   if overlap:raise RuntimeError(f'prediction_training_gate_failed:walk_forward_season_overlap:{sorted(overlap)}:cutoff={fc.isoformat()}')
-   if max(m.played_at for m in train)>=min(m.played_at for m in test):raise RuntimeError(f'prediction_training_gate_failed:walk_forward_time_overlap:cutoff={fc.isoformat()}')
-   preview.append({'cutoff':fc.isoformat(),'train':len(train),'test':len(test),'train_seasons':train_seasons,'test_seasons':test_seasons,'train_end':max(m.played_at for m in train).isoformat(),'test_start':min(m.played_at for m in test).isoformat()})
+   train_seasons,test_seasons,overlap,train_end,test_start=_fold_gate(train,test,fc)
+   preview.append({'cutoff':fc.isoformat(),'train':len(train),'test':len(test),'train_seasons':train_seasons,'test_seasons':test_seasons,'season_overlap_diagnostic':overlap,'train_end':train_end.isoformat(),'test_start':test_start.isoformat()})
   version='p0-shadow-'+started.strftime('%Y%m%d%H%M%S');cutoff=started;_lock(conn)
   try:
    with conn.transaction():
@@ -94,7 +103,8 @@ def main():
    from .feature_layer import build_feature_index_for_matches
    summaries=[];total=tb=tl=tr=0.;oos_seasons=set();usable=[(train,test,fc) for train,test,fc in folds if train and test];all_oos=[m for _,test,_ in usable for m in test];all_features=build_feature_index_for_matches(conn,all_oos,min(fc for _,_,fc in usable)) if usable else {}
    for no,(train,test,fc) in enumerate(usable,1):
-    features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,fc,features=features);score=_metrics(test,preds);total+=len(preds);tb+=score['brier_1x2']*len(preds);tl+=score['log_loss_1x2']*len(preds);tr+=score['rps_1x2']*len(preds);oos_seasons.update(normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None);coverage=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);summaries.append({'fold_no':no,'status':'SUCCEEDED','cutoff':fc.isoformat(),'train':len(train),'test':len(test),'predictions':len(preds),'test_seasons':sorted({normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None},key=lambda s:season_start_year(s)),'feature_snapshots':len(features),'feature_covered_fixtures':coverage,'feature_coverage':coverage/len(test) if test else 0.,**score})
+    train_seasons,test_seasons,overlap,train_end,test_start=_fold_gate(train,test,fc)
+    features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,fc,features=features);score=_metrics(test,preds);total+=len(preds);tb+=score['brier_1x2']*len(preds);tl+=score['log_loss_1x2']*len(preds);tr+=score['rps_1x2']*len(preds);oos_seasons.update(normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None);coverage=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);summaries.append({'fold_no':no,'status':'SUCCEEDED','cutoff':fc.isoformat(),'train':len(train),'test':len(test),'predictions':len(preds),'test_seasons':test_seasons,'train_seasons':train_seasons,'season_overlap_diagnostic':overlap,'train_end':train_end.isoformat(),'test_start':test_start.isoformat(),'feature_snapshots':len(features),'feature_covered_fixtures':coverage,'feature_coverage':coverage/len(test) if test else 0.,**score})
    with conn.transaction():
     for s,(train,test,fc) in zip(summaries,usable):conn.execute("insert into internal.prediction_training_folds(training_run_id,fold_no,train_cutoff,test_start,test_end,status,metrics) values (%s,%s,%s,%s,%s,'SUCCEEDED',%s)",(run_id,s['fold_no'],fc,min(m.played_at for m in test),max(m.played_at for m in test),json.dumps(s)))
    if not total:raise RuntimeError(f'prediction_training_gate_failed:no_oos_predictions:fold_preview={preview}')

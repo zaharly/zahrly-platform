@@ -163,5 +163,3 @@ jobs:
       - name: Evaluate promotion gates without activation
         if: success()
         run: python -m workers.prediction_engine.benchmark_gate
-
-# explicit push-trigger verification marker

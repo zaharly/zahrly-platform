@@ -53,7 +53,7 @@ def _historical_team_key(external_id,canonical_id):
     return f'api-football:{str(external_id)}'
 
 def _s3_client():
-    kwargs={'service_name':'s3','region_name':_env('S3_REGION'),'aws_access_key_id':_env('S3_ACCESS_KEY_ID'),'aws_secret_access_key':_env('S3_SECRET_ACCESS_KEY'),'config':Config(retries={'max_attempts':5,'mode':'standard')};endpoint=os.environ.get('S3_ENDPOINT_URL','').strip()
+    kwargs={'service_name':'s3','region_name':_env('S3_REGION'),'aws_access_key_id':_env('S3_ACCESS_KEY_ID'),'aws_secret_access_key':_env('S3_SECRET_ACCESS_KEY'),'config':Config(retries={'max_attempts':5,'mode':'standard'})};endpoint=os.environ.get('S3_ENDPOINT_URL','').strip()
     if endpoint:kwargs['endpoint_url']=endpoint
     return boto3.client(**kwargs)
 

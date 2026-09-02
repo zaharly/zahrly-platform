@@ -21,15 +21,15 @@ def _decode_json_container(value:Any)->Any:
     current=value
     for _ in range(6):
         if isinstance(current,bytes):
-            raw=value if current is value else current
+            raw=current
             if raw[:2]==b"\x1f\x8b":
                 try: raw=gzip.decompress(raw)
                 except (OSError,EOFError): return value
-            try: current=raw.decode("utf-8")
+            try: current=raw.decode("utf-8-sig")
             except UnicodeDecodeError: return value
             continue
         if not isinstance(current,str): return current
-        text=current.strip()
+        text=current.lstrip("\ufeff").strip()
         if not text: return current
         if text[0] in "[{":
             try: current=json.loads(text); continue
@@ -37,7 +37,7 @@ def _decode_json_container(value:Any)->Any:
                 lines=[line.strip() for line in text.splitlines() if line.strip()]
                 parsed=[]
                 for line in lines:
-                    try:item=json.loads(line)
+                    try:item=json.loads(line.lstrip("\ufeff"))
                     except (TypeError,ValueError): parsed=[]; break
                     parsed.append(item)
                 if parsed: return parsed
@@ -118,6 +118,8 @@ def _canonical_from_legacy(value:dict[str,Any])->dict[str,Any]|None:
     goals=value.get("goals") if isinstance(value.get("goals"),dict) else {}
     score=value.get("score") if isinstance(value.get("score"),dict) else {}
     hg=goals.get("home");ag=goals.get("away")
+    if isinstance(hg,dict): hg=_first(hg,("total","goals","score","value"))
+    if isinstance(ag,dict): ag=_first(ag,("total","goals","score","value"))
     if hg is None or ag is None:
         for key in ("fulltime","regular","current","extratime","halftime"):
             pair=score.get(key)

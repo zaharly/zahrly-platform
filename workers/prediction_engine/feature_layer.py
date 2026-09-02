@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
-import hashlib, json, os
+import base64, gzip, hashlib, json, os
 from urllib.parse import urlparse
 import boto3
 from botocore.config import Config
@@ -22,13 +22,42 @@ def _utc(v):
     d=v if isinstance(v,datetime) else datetime.fromisoformat(str(v).replace("Z","+00:00"))
     return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
 
+def _decode_archive(value:Any)->Any:
+    current=value
+    for _ in range(6):
+        if isinstance(current,bytes):
+            raw=current
+            if raw[:2]==b"\x1f\x8b":
+                try:raw=gzip.decompress(raw)
+                except (OSError,EOFError):return value
+            try:current=raw.decode('utf-8');continue
+            except UnicodeDecodeError:return value
+        if not isinstance(current,str):return current
+        text=current.strip()
+        if not text:return current
+        try:return json.loads(text)
+        except (TypeError,ValueError):
+            if len(text)>=32 and len(text)%4==0:
+                try:decoded=base64.b64decode(text,validate=True)
+                except (ValueError,base64.binascii.Error):decoded=None
+                if decoded:
+                    current=decoded;continue
+            lines=[line.strip() for line in text.splitlines() if line.strip()]
+            parsed=[]
+            for line in lines:
+                try:item=json.loads(line)
+                except (TypeError,ValueError):parsed=[];break
+                parsed.append(item)
+            return parsed if parsed else current
+    return current
+
 def _walk(v:Any)->Iterable[dict[str,Any]]:
     if isinstance(v,list):
-        for x in v: yield from _walk(x)
+        for x in v:yield from _walk(x)
     elif isinstance(v,dict):
         yield v
-        for k in ("response","rows","results","data","payload","body"):
-            if k in v: yield from _walk(v[k])
+        for k in ("response","rows","results","data","payload","body","content","items"):
+            if k in v:yield from _walk(v[k])
 
 def _s3():
     return boto3.client("s3",region_name=os.environ.get("S3_REGION","eu-north-1"),aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],config=Config(retries={"max_attempts":5,"mode":"standard"}))
@@ -41,14 +70,14 @@ def _uri(uri):
 def _fixture_id(o):
     f=o.get("fixture")
     if isinstance(f,dict) and f.get("id") is not None:return str(f["id"])
-    for k in ("fixture_id","fixtureId"):
+    for k in ("fixture_id","fixtureId","match_id","matchId"):
         if o.get(k) is not None:return str(o[k])
     return None
 
 def _team_id(o):
     t=o.get("team")
     if isinstance(t,dict) and t.get("id") is not None:return str(t["id"])
-    for k in ("team_id","teamId"):
+    for k in ("team_id","teamId","match_hometeam_id","match_awayteam_id"):
         if o.get(k) is not None:return str(o[k])
     return None
 
@@ -102,7 +131,8 @@ def build_feature_index(conn,target_matches,latest_target=None):
         bucket,key=_uri(row["object_uri"]); raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest()!=row["checksum"]:raise RuntimeError(f"archive checksum mismatch:{row['id']}")
         available=_utc(row["date_end"]); dataset=row["dataset_type"]
-        for o in _walk(json.loads(raw.decode("utf-8"))):
+        decoded=_decode_archive(raw)
+        for o in _walk(decoded):
             fid=_fixture_id(o)
             if not fid or fid not in matches:continue
             played,_,_=matches[fid]; tid=aliases.get(_team_id(o) or "")

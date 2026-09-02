@@ -9,7 +9,7 @@ from .season_resolver import normalize_season_label,season_start_year
 
 @dataclass(frozen=True)
 class Match:
-    match_id:str; played_at:datetime; home_team_id:str; away_team_id:str; home_goals:int; away_goals:int; season:str|None=None
+    match_id:str; played_at:datetime; home_team_id:str; away_team_id:str; home_goals:int; away_goals:int; season:str|None=None; archive_season_key:str|None=None
 
 @dataclass(frozen=True)
 class Prediction:
@@ -19,12 +19,9 @@ class LeakageError(ValueError):pass
 
 def _utc(v):return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
 
-def season_start(label):
-    return season_start_year(label)
-
+def season_start(label):return season_start_year(label)
 def _season_sort_key(label):
-    start=season_start_year(label)
-    return (start if start is not None else 10**9,str(label))
+    start=season_start_year(label);return (start if start is not None else 10**9,str(label))
 
 def _team_rates(train,cutoff,policy):
     cutoff=_utc(cutoff);gf={};ga={};tw=tg=0.
@@ -65,43 +62,26 @@ def run_fold(train,test,cutoff,elo_policy=EloPolicy(),dc_policy=DixonColesPolicy
     return out
 
 def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],test_window_days:int=365):
-    """Build one chronological fold per logical football season after the first.
-
-    The archive season key is provider-specific (for API-Football, e.g. 2011),
-    while folds operate on normalized football seasons (e.g. 2011/2012).
-    Fold membership is determined by logical season identity, not by the first
-    archived fixture timestamp. This prevents a partial/late archive from
-    causing the same logical season to appear in both train and test.
-    """
     if test_window_days<=0:raise ValueError('test_window_days must be positive')
-    ordered=sorted(matches,key=lambda m:_utc(m.played_at))
-    labelled=[]
+    ordered=sorted(matches,key=lambda m:_utc(m.played_at));labelled=[]
     for m in ordered:
         try:label=normalize_season_label(m.season)
         except ValueError:label=None
         labelled.append((m,label))
     season_labels=sorted({label for _,label in labelled if label is not None},key=_season_sort_key)
     if len(season_labels)>=2:
-        folds=[]
-        season_index={s:i for i,s in enumerate(season_labels)}
+        folds=[];season_index={s:i for i,s in enumerate(season_labels)}
         season_boundary={s:min(_utc(m.played_at) for m,label in labelled if label==s) for s in season_labels}
-        # We intentionally derive the fold from season order. The supplied
-        # cutoffs are advisory/legacy inputs and are not allowed to re-define
-        # the test season boundary.
         for target_index in range(1,len(season_labels)):
             target=season_labels[target_index];cutoff=season_boundary[target]
             train=[m for m,label in labelled if label is not None and season_index[label]<target_index and _utc(m.played_at)<cutoff]
             test=[m for m,label in labelled if label==target]
             if not train or not test:continue
-            train_seasons={normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None}
-            test_seasons={normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None}
+            train_seasons={normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None};test_seasons={normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None}
             if train_seasons & test_seasons:raise LeakageError(f'walk-forward season overlap: {sorted(train_seasons & test_seasons,key=_season_sort_key)}')
             if max(_utc(m.played_at) for m in train)>=min(_utc(m.played_at) for m in test):raise LeakageError(f'walk-forward timestamp overlap for test season {target}')
             folds.append((train,test,cutoff))
         return folds
-    # Legacy fallback only when there are no usable season labels. This keeps
-    # the function usable for generic synthetic tests without weakening the
-    # season-aware production path above.
     folds=[]
     for raw in cutoffs:
         cutoff=_utc(raw);end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]

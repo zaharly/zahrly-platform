@@ -58,21 +58,28 @@ def _season_from_uri(uri):
 
 def _as_datetime(value):
     if isinstance(value,datetime):dt=value
-    else:dt=datetime.fromisoformat(str(value).replace('Z','+00:00'))
+    elif isinstance(value,(int,float)) and not isinstance(value,bool):
+        seconds=float(value)
+        if seconds>1e11:seconds/=1000.0
+        dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
+    elif isinstance(value,str):
+        text=value.strip()
+        try:
+            numeric=float(text)
+            seconds=numeric/1000.0 if numeric>1e11 else numeric
+            dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
+        except (ValueError,OverflowError):
+            dt=datetime.fromisoformat(text.replace('Z','+00:00'))
+    else:raise TypeError(f'unsupported datetime value: {type(value).__name__}')
     if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
 
-def _walk(value):
-    """Recursively discover API-Football fixture payloads regardless of wrapper shape."""
-    if isinstance(value,list):
-        for item in value:yield from _walk(item)
-        return
-    if not isinstance(value,dict):return
-    if isinstance(value.get('fixture'),dict) and isinstance(value.get('teams'),dict):
-        yield value
-        return
-    for child in value.values():
-        yield from _walk(child)
+def _fixture_date(row):
+    fixture=row.get('fixture') or {}
+    if isinstance(fixture,dict):
+        value=fixture.get('date') or fixture.get('timestamp')
+        if value is not None:return value
+    return row.get('date') or row.get('timestamp')
 
 def _number(value):
     if value is None or isinstance(value,bool):return None
@@ -97,12 +104,41 @@ def _score_pair(row):
     if ag is None:ag=_number(row.get('away_goals'))
     return hg,ag
 
-def _fixture_date(row):
-    fixture=row.get('fixture') or {}
-    if isinstance(fixture,dict):
-        value=fixture.get('date') or fixture.get('timestamp')
-        if value is not None:return value
-    return row.get('date') or row.get('timestamp')
+def _walk(value):
+    """Recursively discover canonical API-Football fixtures and legacy flat archived rows."""
+    if isinstance(value,list):
+        for item in value:yield from _walk(item)
+        return
+    if not isinstance(value,dict):return
+    if isinstance(value.get('fixture'),dict) and isinstance(value.get('teams'),dict):
+        yield value
+        return
+
+    fixture_id=value.get('fixture_id') or value.get('match_id') or value.get('game_id')
+    fixture=value.get('fixture') if isinstance(value.get('fixture'),dict) else {}
+    if fixture_id is None:fixture_id=fixture.get('id')
+    teams=value.get('teams') if isinstance(value.get('teams'),dict) else {}
+    home=value.get('home_team_id',value.get('home_id'))
+    away=value.get('away_team_id',value.get('away_id'))
+    if home is None:
+        h=teams.get('home') if isinstance(teams,dict) else None
+        home=h.get('id') if isinstance(h,dict) else h
+    if away is None:
+        a=teams.get('away') if isinstance(teams,dict) else None
+        away=a.get('id') if isinstance(a,dict) else a
+    if home is None:
+        h=value.get('home')
+        home=h.get('id') if isinstance(h,dict) else h
+    if away is None:
+        a=value.get('away')
+        away=a.get('id') if isinstance(a,dict) else a
+    date=_fixture_date(value)
+    hg,ag=_score_pair(value)
+    if fixture_id is not None and home is not None and away is not None and date is not None and hg is not None and ag is not None:
+        yield {'fixture':{'id':fixture_id,'date':date},'teams':{'home':{'id':home},'away':{'id':away}},'goals':{'home':hg,'away':ag}}
+        return
+    for child in value.values():
+        yield from _walk(child)
 
 def load_settled_matches(conn,as_of=None):
     manifests=fetch_fixture_manifests(conn)
@@ -122,8 +158,7 @@ def load_settled_matches(conn,as_of=None):
             if played>=cutoff:stats['pre_cutoff']+=1;continue
             ht=_historical_team_key(home,team_map.get(str(home)));at=_historical_team_key(away,team_map.get(str(away)))
             if not ht or not at:stats['missing_team_identity']+=1;continue
-            candidate=Match(str(fid),played,ht,at,hg,ag,logical_season,archive_season);existing=by_id.get(str(fid))
-            stats['accepted']+=1
+            candidate=Match(str(fid),played,ht,at,hg,ag,logical_season,archive_season);existing=by_id.get(str(fid));stats['accepted']+=1
             if logical_season is not None:season_inventory[logical_season]=season_inventory.get(logical_season,0)+1
             if existing is None:by_id[str(fid)]=candidate
             elif existing!=candidate:

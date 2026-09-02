@@ -56,19 +56,29 @@ def main():
  with db_connect() as conn:
   matches=load_settled_matches(conn,as_of=started)
   if len(matches)<30:raise RuntimeError(f'prediction_training_gate_failed:settled_matches={len(matches)}')
-  from .walk_forward import build_walk_forward_folds,run_fold
-  cutoffs=build_cutoffs(matches);folds=build_walk_forward_folds(matches,cutoffs);preview=[{'cutoff':fc.isoformat(),'train':len(train),'test':len(test),'train_seasons':sorted({str(m.season) for m in train if m.season is not None}),'test_seasons':sorted({str(m.season) for m in test if m.season is not None})} for train,test,fc in folds]
+  from .walk_forward import build_walk_forward_folds,run_fold,normalize_season_label
+  cutoffs=build_cutoffs(matches);folds=build_walk_forward_folds(matches,cutoffs)
+  preview=[]
+  for train,test,fc in folds:
+   train_seasons=sorted({normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None})
+   test_seasons=sorted({normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None})
+   overlap=set(train_seasons)&set(test_seasons)
+   if overlap:
+    raise RuntimeError(f'prediction_training_gate_failed:walk_forward_season_overlap:{sorted(overlap)}:cutoff={fc.isoformat()}')
+   if max(m.played_at for m in train)>=min(m.played_at for m in test):
+    raise RuntimeError(f'prediction_training_gate_failed:walk_forward_time_overlap:cutoff={fc.isoformat()}')
+   preview.append({'cutoff':fc.isoformat(),'train':len(train),'test':len(test),'train_seasons':train_seasons,'test_seasons':test_seasons,'train_end':max(m.played_at for m in train).isoformat(),'test_start':min(m.played_at for m in test).isoformat()})
   version='p0-shadow-'+started.strftime('%Y%m%d%H%M%S');cutoff=started;_lock(conn)
   try:
    with conn.transaction():
     model_id=conn.execute("insert into public.model_versions(family,version,status,training_cutoff) values (%s,%s,'SHADOW',%s) returning id::text as id",('prediction_engine',version,cutoff)).fetchone()['id'];run_id=conn.execute("insert into internal.prediction_training_runs(model_version_id,status,requested_cutoff,started_at,metrics) values (%s,'RUNNING',%s,%s,%s) returning id::text as id",(model_id,cutoff,started,json.dumps({'source':'s3_fixture_archive','settled_matches':len(matches),'feature_layer':'enabled','fold_strategy':'season_aware'}))).fetchone()['id']
   finally:_unlock(conn)
-  print(json.dumps({'status':'STARTED','training_run_id':run_id,'model_version_id':model_id,'version':version,'settled_matches':len(matches),'candidate_oos_folds':len(cutoffs),'fold_preview':preview},sort_keys=True),flush=True)
+  print(json.dumps({'status':'STARTED','training_run_id':run_id,'model_version_id':model_id,'version':version,'settled_matches':len(matches),'candidate_oos_folds':len(folds),'fold_preview':preview},sort_keys=True),flush=True)
   try:
    from .feature_layer import build_feature_index_for_matches
    summaries=[];total=tb=tl=tr=0.;oos_seasons=set();usable=[(train,test,fc) for train,test,fc in folds if train and test];all_oos=[m for _,test,_ in usable for m in test];all_features=build_feature_index_for_matches(conn,all_oos,min(fc for _,_,fc in usable)) if usable else {}
    for no,(train,test,fc) in enumerate(usable,1):
-    features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,fc,features=features);score=_metrics(test,preds);total+=len(preds);tb+=score['brier_1x2']*len(preds);tl+=score['log_loss_1x2']*len(preds);tr+=score['rps_1x2']*len(preds);oos_seasons.update(str(m.season) for m in test if m.season is not None);coverage=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);summaries.append({'fold_no':no,'status':'SUCCEEDED','cutoff':fc.isoformat(),'train':len(train),'test':len(test),'predictions':len(preds),'test_seasons':sorted({str(m.season) for m in test if m.season is not None}),'feature_snapshots':len(features),'feature_covered_fixtures':coverage,'feature_coverage':coverage/len(test) if test else 0.,**score})
+    features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,fc,features=features);score=_metrics(test,preds);total+=len(preds);tb+=score['brier_1x2']*len(preds);tl+=score['log_loss_1x2']*len(preds);tr+=score['rps_1x2']*len(preds);oos_seasons.update(normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None);coverage=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);summaries.append({'fold_no':no,'status':'SUCCEEDED','cutoff':fc.isoformat(),'train':len(train),'test':len(test),'predictions':len(preds),'test_seasons':sorted({normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None}),'feature_snapshots':len(features),'feature_covered_fixtures':coverage,'feature_coverage':coverage/len(test) if test else 0.,**score})
    with conn.transaction():
     for s,(train,test,fc) in zip(summaries,usable):conn.execute("insert into internal.prediction_training_folds(training_run_id,fold_no,train_cutoff,test_start,test_end,status,metrics) values (%s,%s,%s,%s,%s,'SUCCEEDED',%s)",(run_id,s['fold_no'],fc,min(m.played_at for m in test),max(m.played_at for m in test),json.dumps(s)))
    if not total:raise RuntimeError(f'prediction_training_gate_failed:no_oos_predictions:fold_preview={preview}')

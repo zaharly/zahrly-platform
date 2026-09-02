@@ -22,7 +22,15 @@ def _env(name,default=None):
 
 def db_connect():return psycopg.connect(_env('SUPABASE_DB_URL'),row_factory=dict_row,connect_timeout=15)
 
+def _configured_complete_seasons():
+    raw=os.environ.get('ARCHIVE_COMPLETE_SEASONS','').strip()
+    if not raw:return None
+    try:return {int(x.strip()) for x in raw.split(',') if x.strip()}
+    except ValueError as exc:raise RuntimeError(f'invalid ARCHIVE_COMPLETE_SEASONS: {raw!r}') from exc
+
 def fetch_complete_archive_seasons(conn,min_completeness=1.0):
+    configured=_configured_complete_seasons()
+    if configured is not None:return configured
     with conn.cursor() as cur:
         cur.execute("select season from internal.archive_catalog where provider='api-football' group by season having min(completeness_score) >= %s order by season",(min_completeness,))
         return {int(row['season']) for row in cur.fetchall()}
@@ -36,7 +44,8 @@ def fetch_fixture_manifests(conn,min_completeness=1.0,complete_seasons=None):
 
 def fetch_team_identity_map(conn):
     with conn.cursor() as cur:
-        cur.execute("select external_team_id,team_id::text as team_id from public.team_aliases where provider='api-football' and external_team_id is not null and team_id is not null");return {str(row['external_team_id']):str(row['team_id']) for row in cur.fetchall()}
+        cur.execute("select external_team_id,team_id::text as team_id from public.team_aliases where provider='api-football' and external_team_id is not null and team_id is not null")
+        return {str(row['external_team_id']):str(row['team_id']) for row in cur.fetchall()}
 
 def _historical_team_key(external_id,canonical_id):
     if canonical_id:return canonical_id
@@ -90,7 +99,7 @@ def _score_pair(row):
     goals=row.get('goals') or {};score=row.get('score') or {}
     hg=_number(goals.get('home')) if isinstance(goals,dict) else None;ag=_number(goals.get('away')) if isinstance(goals,dict) else None
     if isinstance(score,dict):
-        for key in ('fulltime','regular','current','extratime'):
+        for key in ('fulltime','regular','current','extratime','halftime'):
             pair=score.get(key)
             if not isinstance(pair,dict):continue
             if hg is None:hg=_number(pair.get('home'))
@@ -108,8 +117,9 @@ def load_settled_matches(conn,as_of=None):
     for manifest in manifests:
         bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_uri(manifest.object_uri);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
-        doc=json.loads(raw.decode('utf-8'));stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
-        for row in walk_fixture_rows(doc):
+        stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'manifest_count':0,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
+        stats['manifest_count']+=1
+        for row in walk_fixture_rows(raw):
             stats['walked']+=1
             fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row)
             home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) and isinstance(teams.get('home'),dict) else (teams.get('home') if isinstance(teams,dict) else None)
@@ -130,4 +140,4 @@ def load_settled_matches(conn,as_of=None):
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')
     return matches
 
-# Preserve the archive-season key while training operates only on archive-complete logical football seasons.
+# Historical training preserves the archive season key while using the authoritative preflight completeness decision.

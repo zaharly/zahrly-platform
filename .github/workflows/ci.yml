@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import gzip
           import json
           import py_compile
           from workers.prediction_engine.archive_payload_adapters import walk_fixture_rows
@@ -49,6 +50,18 @@ jobs:
           assert len(list(walk_fixture_rows({'response': json.dumps([row])}))) == 1
           assert len(list(walk_fixture_rows({'body': json.dumps({'response': [row]})}))) == 1
           assert len(list(walk_fixture_rows(json.dumps(row)))) == 1
+          assert len(list(walk_fixture_rows(gzip.compress(json.dumps(row).encode('utf-8'))))) == 1
+          legacy = {
+              'fixture_id': 2,
+              'match_hometeam_id': 11,
+              'match_awayteam_id': 21,
+              'event_date': '2010-05-08T12:00:00Z',
+              'goalsHomeTeam': 0,
+              'goalsAwayTeam': 0,
+          }
+          assert len(list(walk_fixture_rows(legacy))) == 1
+          jsonl = '\n'.join(json.dumps(x) for x in [row, legacy])
+          assert len(list(walk_fixture_rows(jsonl))) == 2
           print('Season resolver and archive payload adapter validation: OK')
           PY
 

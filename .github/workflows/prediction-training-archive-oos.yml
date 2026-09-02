@@ -29,6 +29,20 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
+    env:
+      AWS_REGION: ${{ secrets.S3_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      S3_BUCKET: zahrly-community-storage
+      S3_REGION: ${{ secrets.S3_REGION }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
+      SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ARCHIVE_SEASONS: ${{ inputs.seasons || '' }}
+      OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
+      OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -41,55 +55,51 @@ jobs:
           pip install -r workers/archive_worker/requirements.txt
       - name: Validate required credentials
         shell: bash
-        env:
-          AWS_REGION: ${{ secrets.S3_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_BUCKET: zahrly-community-storage
-          SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           set -euo pipefail
           for v in AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SUPABASE_DB_URL_RAW SUPABASE_SERVICE_ROLE_KEY S3_BUCKET; do
             test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
           done
       - name: Verify AWS identity and archive bucket access
-        env:
-          AWS_REGION: ${{ secrets.S3_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+        shell: bash
         run: |
+          set -euo pipefail
           aws sts get-caller-identity
-          aws s3api get-bucket-location --bucket zahrly-community-storage
-          aws s3api list-objects-v2 --bucket zahrly-community-storage --prefix zahrly/archive/ --max-items 5
-      - name: Run historical archive validator
-        env:
-          AWS_REGION: ${{ secrets.S3_REGION }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_REGION: ${{ secrets.S3_REGION }}
-          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_BUCKET: zahrly-community-storage
-          SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          aws s3api get-bucket-location --bucket "${S3_BUCKET}"
+          aws s3api list-objects-v2 --bucket "${S3_BUCKET}" --prefix zahrly/archive/ --max-items 5
+      - name: Configure Supabase IPv4 Session Pooler
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit, quote, urlunsplit
+          import psycopg
+          raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
+          parts = urlsplit(raw)
+          if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
+              raise SystemExit('invalid SUPABASE_DB_URL format')
+          project_ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
+          if project_ref != 'qosvqlwkexrhswcuakib':
+              raise SystemExit('unexpected Supabase project reference')
+          pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+          fixed = urlunsplit((parts.scheme, f'{quote("postgres." + project_ref, safe="")}:{quote(parts.password, safe="")}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+              fh.write('SUPABASE_DB_URL=' + fixed + '\n')
+          with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
+              conn.execute('select 1')
+          print('Supabase IPv4 Session Pooler connectivity: OK')
+          PY
+      - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
-        env:
-          S3_REGION: ${{ secrets.S3_REGION }}
-          S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
-          S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
-          S3_BUCKET: zahrly-community-storage
-          SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints
+        if: success()
         run: python -m workers.prediction_engine.rating_checkpoints
-      - name: Build persisted OOS benchmark
+      - name: Build persisted OOS benchmark (Brier/ECE/RPS + market coverage)
+        if: success()
         run: python -m workers.prediction_engine.oos_benchmark
       - name: Evaluate promotion gates without activation
+        if: success()
         run: python -m workers.prediction_engine.benchmark_gate

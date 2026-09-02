@@ -26,9 +26,11 @@ def _season_sort_key(label):
 def _season_boundary(label):
     start=season_start_year(label)
     if start is None: raise ValueError(f'cannot determine season start for {label!r}')
-    # Football seasons are anchored to the season start year; July 1 is a
-    # conservative chronological boundary that keeps calendar spillover out
-    # of the preceding logical season without changing the immutable archive.
+    # Annual calendar-year tournaments (for example 2008/2009 archive keys
+    # resolved to 2008 and 2009) use January 1. Split football seasons use
+    # July 1. This keeps fold boundaries aligned to the logical season type.
+    if isinstance(label,str) and len(label)==4 and label.isdigit():
+        return datetime(start,1,1,tzinfo=timezone.utc)
     return datetime(start,7,1,tzinfo=timezone.utc)
 
 def _team_rates(train,cutoff,policy):

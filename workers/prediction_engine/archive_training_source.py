@@ -93,6 +93,12 @@ def _fixture_date(row):
 
 def _number(value):
     if value is None or isinstance(value,bool):return None
+    if isinstance(value,dict):
+        for key in ('total','goals','score','value','fulltime','regular','current'):
+            if key in value:
+                parsed=_number(value.get(key))
+                if parsed is not None:return parsed
+        return None
     if isinstance(value,int):return value
     if isinstance(value,float):return int(value) if value.is_integer() else None
     if isinstance(value,str):
@@ -118,12 +124,12 @@ def load_settled_matches(conn,as_of=None):
     complete_seasons=fetch_complete_archive_seasons(conn)
     manifests=fetch_fixture_manifests(conn,complete_seasons=complete_seasons)
     if not manifests:raise RuntimeError('prediction_training_source_unavailable:no_complete_fixture_manifests')
-    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};diagnostics={}
+    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};diagnostics={};expected={}
     for manifest in manifests:
         bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_manifest(manifest);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
-        stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'manifest_count':0,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
-        stats['manifest_count']+=1
+        stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'manifest_count':0,'expected_rows':0,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
+        stats['manifest_count']+=1;stats['expected_rows']+=manifest.row_count
         for row in walk_fixture_rows(raw):
             stats['walked']+=1
             fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row)
@@ -140,7 +146,9 @@ def load_settled_matches(conn,as_of=None):
             elif existing!=candidate:
                 if (existing.played_at,existing.home_team_id,existing.away_team_id,existing.home_goals,existing.away_goals)!=(candidate.played_at,candidate.home_team_id,candidate.away_team_id,candidate.home_goals,candidate.away_goals):raise RuntimeError(f'conflicting archived fixture payload:{fid}')
                 if existing.season is None and logical_season is not None:by_id[str(fid)]=candidate
-    print(json.dumps({'complete_archive_seasons':sorted(complete_seasons),'archive_fixture_parse_diagnostics':diagnostics},sort_keys=True),flush=True)
+    missing=[season for season in sorted(complete_seasons) if diagnostics.get(str(season),{}).get('expected_rows',0)>0 and diagnostics.get(str(season),{}).get('accepted',0)==0]
+    print(json.dumps({'complete_archive_seasons':sorted(complete_seasons),'archive_fixture_parse_diagnostics':diagnostics,'unparsed_complete_seasons':missing},sort_keys=True),flush=True)
+    if missing:raise RuntimeError(f'prediction_training_source_unavailable:complete_seasons_with_zero_parsed_fixtures:{missing}')
     matches=sorted(by_id.values(),key=lambda m:(m.played_at,m.match_id))
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')
     return matches

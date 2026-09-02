@@ -8,7 +8,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import boto3
 import requests
@@ -46,7 +45,19 @@ def load_catalog() -> list[Artifact]:
     rows = response.json()
     if not isinstance(rows, list):
         raise RuntimeError("unexpected prediction_training_archive_catalog response")
-    return [Artifact(str(r["manifest_id"]), int(r["season"]), str(r["dataset_type"]), str(r["object_uri"]), str(r["checksum"]), int(r["row_count"]), float(r["completeness_score"] or 0), str(r["schema_version"])) for r in rows]
+    return [
+        Artifact(
+            str(r["manifest_id"]),
+            int(r["season"]),
+            str(r["dataset_type"]),
+            str(r["object_uri"]),
+            str(r["checksum"]),
+            int(r["row_count"]),
+            float(r["completeness_score"] or 0),
+            str(r["schema_version"]),
+        )
+        for r in rows
+    ]
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:
@@ -80,6 +91,15 @@ def int_env(name: str, default: int) -> int:
         return int(raw)
     except ValueError as exc:
         raise RuntimeError(f"{name} must be an integer, got {raw!r}") from exc
+
+
+def export_complete_seasons(seasons: list[int]) -> None:
+    """Pass the preflight completeness decision to the training process without recomputing it differently."""
+    value = ",".join(str(s) for s in seasons)
+    github_env = os.environ.get("GITHUB_ENV")
+    if github_env:
+        with open(github_env, "a", encoding="utf-8") as fh:
+            fh.write(f"ARCHIVE_COMPLETE_SEASONS={value}\n")
 
 
 def main() -> int:
@@ -121,8 +141,15 @@ def main() -> int:
     if errors:
         raise RuntimeError("S3 archive validation failed: " + " | ".join(errors[:10]))
 
-    complete_seasons = [season for season, items in sorted(by_season.items()) if items and min(item.completeness_score for item in items) >= 1.0]
-    fixture_like_rows = sum(item.row_count for item in artifacts if item.dataset_type in {"fixtures", "fixture_results", "matches"})
+    complete_seasons = [
+        season
+        for season, items in sorted(by_season.items())
+        if items and min(item.completeness_score for item in items) >= 1.0
+    ]
+    fixture_like_rows = sum(
+        item.row_count for item in artifacts if item.dataset_type in {"fixtures", "fixture_results", "matches"}
+    )
+    export_complete_seasons(complete_seasons)
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "public.prediction_training_archive_catalog -> AWS S3",
@@ -137,7 +164,9 @@ def main() -> int:
         "oos_ready": len(complete_seasons) >= min_seasons and fixture_like_rows >= min_matches,
         "write_scope": "NO_PRODUCTION_WRITES",
     }
-    Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json")).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    Path(os.environ.get("TRAINING_REPORT", "training_archive_oos_report.json")).write_text(
+        json.dumps(report, indent=2), encoding="utf-8"
+    )
     print(json.dumps(report, indent=2))
     return 0
 

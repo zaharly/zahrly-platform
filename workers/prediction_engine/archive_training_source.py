@@ -52,8 +52,7 @@ def _season_from_uri(uri):
         if segment.startswith(marker):
             raw=segment[len(marker):]
             break
-    if raw is None:
-        return None,None
+    if raw is None:return None,None
     resolved=resolve_season(raw,source='api-football')
     return resolved.archive_season_key,resolved.logical_season
 
@@ -64,13 +63,16 @@ def _as_datetime(value):
     return dt.astimezone(timezone.utc)
 
 def _walk(value):
+    """Recursively discover API-Football fixture payloads regardless of wrapper shape."""
     if isinstance(value,list):
         for item in value:yield from _walk(item)
         return
     if not isinstance(value,dict):return
-    if isinstance(value.get('fixture'),dict) and isinstance(value.get('teams'),dict):yield value;return
-    for key in ('response','rows','results','data','payload','body'):
-        if key in value:yield from _walk(value[key])
+    if isinstance(value.get('fixture'),dict) and isinstance(value.get('teams'),dict):
+        yield value
+        return
+    for child in value.values():
+        yield from _walk(child)
 
 def _number(value):
     if value is None or isinstance(value,bool):return None
@@ -82,13 +84,25 @@ def _number(value):
     return None
 
 def _score_pair(row):
-    goals=row.get('goals') or {};score=row.get('score') or {};full=score.get('fulltime') if isinstance(score,dict) else None;extra=score.get('extratime') if isinstance(score,dict) else None
+    goals=row.get('goals') or {};score=row.get('score') or {}
     hg=_number(goals.get('home')) if isinstance(goals,dict) else None;ag=_number(goals.get('away')) if isinstance(goals,dict) else None
-    if hg is None and isinstance(full,dict):hg=_number(full.get('home'))
-    if ag is None and isinstance(full,dict):ag=_number(full.get('away'))
-    if hg is None and isinstance(extra,dict):hg=_number(extra.get('home'))
-    if ag is None and isinstance(extra,dict):ag=_number(extra.get('away'))
+    if isinstance(score,dict):
+        for key in ('fulltime','regular','current','extratime'):
+            pair=score.get(key)
+            if not isinstance(pair,dict):continue
+            if hg is None:hg=_number(pair.get('home'))
+            if ag is None:ag=_number(pair.get('away'))
+            if hg is not None and ag is not None:break
+    if hg is None:hg=_number(row.get('home_goals'))
+    if ag is None:ag=_number(row.get('away_goals'))
     return hg,ag
+
+def _fixture_date(row):
+    fixture=row.get('fixture') or {}
+    if isinstance(fixture,dict):
+        value=fixture.get('date') or fixture.get('timestamp')
+        if value is not None:return value
+    return row.get('date') or row.get('timestamp')
 
 def load_settled_matches(conn,as_of=None):
     manifests=fetch_fixture_manifests(conn)
@@ -99,7 +113,7 @@ def load_settled_matches(conn,as_of=None):
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
         doc=json.loads(raw.decode('utf-8'))
         for row in _walk(doc):
-            fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id');date=fixture.get('date') or fixture.get('timestamp');home=(teams.get('home') or {}).get('id');away=(teams.get('away') or {}).get('id');hg,ag=_score_pair(row)
+            fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row);home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) else None;away=(teams.get('away') or {}).get('id') if isinstance(teams,dict) else None;hg,ag=_score_pair(row)
             if fid is None or date is None or home is None or away is None or hg is None or ag is None:continue
             try:played=_as_datetime(date)
             except (TypeError,ValueError,OverflowError):continue

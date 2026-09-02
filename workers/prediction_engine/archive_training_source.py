@@ -1,14 +1,14 @@
-from __future__ import annotations
+from __future__
 import hashlib,json,os
 from dataclasses import dataclass
 from datetime import datetime,timezone
-from typing import Any
 from urllib.parse import urlparse
 import boto3,psycopg
 from botocore.config import Config
 from psycopg.rows import dict_row
 from .walk_forward import Match
-from .season_resolver import normalize_season_label,resolve_season
+from .season_resolver import resolve_season
+from .archive_payload_adapters import walk_fixture_rows
 
 @dataclass(frozen=True)
 class ArchiveManifest:
@@ -46,30 +46,19 @@ def _parse_uri(uri):
     return p.netloc,p.path.lstrip('/')
 
 def _season_from_uri(uri):
-    marker='season='
-    raw=None
-    for segment in urlparse(uri).path.split('/'):
-        if segment.startswith(marker):
-            raw=segment[len(marker):]
-            break
+    raw=next((segment[len('season='):] for segment in urlparse(uri).path.split('/') if segment.startswith('season=')),None)
     if raw is None:return None,None
-    resolved=resolve_season(raw,source='api-football')
-    return resolved.archive_season_key,resolved.logical_season
+    resolved=resolve_season(raw,source='api-football');return resolved.archive_season_key,resolved.logical_season
 
 def _as_datetime(value):
     if isinstance(value,datetime):dt=value
     elif isinstance(value,(int,float)) and not isinstance(value,bool):
-        seconds=float(value)
-        if seconds>1e11:seconds/=1000.0
-        dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
+        seconds=float(value);seconds/=1000.0 if seconds>1e11 else 1.0;dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
     elif isinstance(value,str):
         text=value.strip()
         try:
-            numeric=float(text)
-            seconds=numeric/1000.0 if numeric>1e11 else numeric
-            dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
-        except (ValueError,OverflowError):
-            dt=datetime.fromisoformat(text.replace('Z','+00:00'))
+            numeric=float(text);seconds=numeric/1000.0 if numeric>1e11 else numeric;dt=datetime.fromtimestamp(seconds,tz=timezone.utc)
+        except (ValueError,OverflowError):dt=datetime.fromisoformat(text.replace('Z','+00:00'))
     else:raise TypeError(f'unsupported datetime value: {type(value).__name__}')
     if dt.tzinfo is None:dt=dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
@@ -104,42 +93,6 @@ def _score_pair(row):
     if ag is None:ag=_number(row.get('away_goals'))
     return hg,ag
 
-def _walk(value):
-    """Recursively discover canonical API-Football fixtures and legacy flat archived rows."""
-    if isinstance(value,list):
-        for item in value:yield from _walk(item)
-        return
-    if not isinstance(value,dict):return
-    if isinstance(value.get('fixture'),dict) and isinstance(value.get('teams'),dict):
-        yield value
-        return
-
-    fixture_id=value.get('fixture_id') or value.get('match_id') or value.get('game_id')
-    fixture=value.get('fixture') if isinstance(value.get('fixture'),dict) else {}
-    if fixture_id is None:fixture_id=fixture.get('id')
-    teams=value.get('teams') if isinstance(value.get('teams'),dict) else {}
-    home=value.get('home_team_id',value.get('home_id'))
-    away=value.get('away_team_id',value.get('away_id'))
-    if home is None:
-        h=teams.get('home') if isinstance(teams,dict) else None
-        home=h.get('id') if isinstance(h,dict) else h
-    if away is None:
-        a=teams.get('away') if isinstance(teams,dict) else None
-        away=a.get('id') if isinstance(a,dict) else a
-    if home is None:
-        h=value.get('home')
-        home=h.get('id') if isinstance(h,dict) else h
-    if away is None:
-        a=value.get('away')
-        away=a.get('id') if isinstance(a,dict) else a
-    date=_fixture_date(value)
-    hg,ag=_score_pair(value)
-    if fixture_id is not None and home is not None and away is not None and date is not None and hg is not None and ag is not None:
-        yield {'fixture':{'id':fixture_id,'date':date},'teams':{'home':{'id':home},'away':{'id':away}},'goals':{'home':hg,'away':ag}}
-        return
-    for child in value.values():
-        yield from _walk(child)
-
 def load_settled_matches(conn,as_of=None):
     manifests=fetch_fixture_manifests(conn)
     if not manifests:raise RuntimeError('prediction_training_source_unavailable:no_fixture_manifests')
@@ -148,11 +101,12 @@ def load_settled_matches(conn,as_of=None):
         bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_uri(manifest.object_uri);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
         doc=json.loads(raw.decode('utf-8'));stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
-        for row in _walk(doc):
+        for row in walk_fixture_rows(doc):
             stats['walked']+=1
-            fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row);home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) else None;away=(teams.get('away') or {}).get('id') if isinstance(teams,dict) else None;hg,ag=_score_pair(row)
-            if fid is None or date is None or home is None or away is None or hg is None or ag is None:
-                stats['missing_fields']+=1;continue
+            fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row)
+            home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) and isinstance(teams.get('home'),dict) else (teams.get('home') if isinstance(teams,dict) else None)
+            away=(teams.get('away') or {}).get('id') if isinstance(teams,dict) and isinstance(teams.get('away'),dict) else (teams.get('away') if isinstance(teams,dict) else None);hg,ag=_score_pair(row)
+            if fid is None or date is None or home is None or away is None or hg is None or ag is None:stats['missing_fields']+=1;continue
             try:played=_as_datetime(date)
             except (TypeError,ValueError,OverflowError):stats['bad_date']+=1;continue
             if played>=cutoff:stats['pre_cutoff']+=1;continue

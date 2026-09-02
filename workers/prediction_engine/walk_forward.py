@@ -7,12 +7,20 @@ from .dixon_coles import DixonColesPolicy,probability_matrix,result_probabilitie
 from .elo import EloPolicy,EloState,update_elo
 @dataclass(frozen=True)
 class Match:
-    match_id:str; played_at:datetime; home_team_id:str; away_team_id:str; home_goals:int; away_goals:int; season:int|None=None
+    match_id:str; played_at:datetime; home_team_id:str; away_team_id:str; home_goals:int; away_goals:int; season:str|None=None
 @dataclass(frozen=True)
 class Prediction:
     match_id:str; home_team_id:str; away_team_id:str; p_home:float; p_draw:float; p_away:float; lambda_home:float; lambda_away:float
 class LeakageError(ValueError):pass
 def _utc(v):return v.astimezone(timezone.utc) if v.tzinfo else v.replace(tzinfo=timezone.utc)
+def season_start(label):
+ if label is None:return None
+ text=str(label).strip()
+ try:return int(text.split('/',1)[0])
+ except (ValueError,IndexError):return None
+def _season_sort_key(label):
+ start=season_start(label)
+ return (start if start is not None else 10**9,str(label))
 def _team_rates(train,cutoff,policy):
  cutoff=_utc(cutoff);gf={};ga={};tw=tg=0.
  for m in train:
@@ -49,25 +57,23 @@ def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],
  if test_window_days<=0:raise ValueError('test_window_days must be positive')
  ordered=sorted(matches,key=lambda m:_utc(m.played_at));seasoned=all(m.season is not None for m in ordered);folds=[]
  if seasoned:
-  season_labels=sorted({m.season for m in ordered})
-  season_starts={s:min(_utc(m.played_at) for m in ordered if m.season==s) for s in season_labels}
-  # Map each requested cutoff to its ordinal season start rather than relying on
-  # datetime object equality. This tolerates timezone/normalization differences.
+  season_labels=sorted({str(m.season) for m in ordered},key=_season_sort_key)
+  season_index={s:i for i,s in enumerate(season_labels)}
+  season_starts={s:min(_utc(m.played_at) for m in ordered if str(m.season)==s) for s in season_labels}
   for raw in cutoffs:
    cutoff=_utc(raw)
-   target=min(season_labels,key=lambda s:abs((season_starts[s]-cutoff).total_seconds()))
-   if season_starts[target] < cutoff and target != season_labels[-1]:
-    later=[s for s in season_labels if season_starts[s]>=cutoff]
-    if later:target=later[0]
-   train=[m for m in ordered if m.season<target];test=[m for m in ordered if m.season==target]
+   later=[s for s in season_labels if season_starts[s]>=cutoff]
+   target=later[0] if later else season_labels[-1]
+   target_index=season_index[target]
+   train=[m for m in ordered if m.season is not None and season_index[str(m.season)]<target_index]
+   test=[m for m in ordered if m.season is not None and str(m.season)==target]
    if train and test:folds.append((train,test,season_starts[target]))
  else:
   for raw in cutoffs:
    cutoff=_utc(raw);end=datetime(cutoff.year+1,1,1,tzinfo=timezone.utc);train=[m for m in ordered if _utc(m.played_at)<cutoff];test=[m for m in ordered if cutoff<=_utc(m.played_at)<end]
    if train and test:folds.append((train,test,cutoff))
- # De-duplicate if callers supplied multiple cutoffs resolving to one season.
  unique={}
  for train,test,cutoff in folds:
-  key=min(m.season for m in test) if seasoned else cutoff
+  key=str(min((m.season for m in test if m.season is not None),default=cutoff)) if seasoned else cutoff
   unique[key]=(train,test,cutoff)
  return list(unique.values())

@@ -1,0 +1,10 @@
+This isolated runner may read internal.archive_catalog and AWS S3 archive objects.
+It may write ONLY:
+- public.model_versions with status CANDIDATE (never ACTIVE/PRODUCTION)
+- public.policy_versions for versioned training/rating policy artifacts
+- internal.prediction_training_runs
+- internal.prediction_training_folds
+- internal.prediction_rating_checkpoints
+- internal.prediction_oos_benchmark
+It must never write or mutate campaigns, worker_jobs, prediction_jobs, pgmq queues, public.fixtures, prediction_baselines, evidence, production market states, production read models, or production model activation state.
+Production promotion remains outside this runner.

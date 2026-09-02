@@ -26,6 +26,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
+          import base64
           import gzip
           import json
           import py_compile
@@ -36,6 +37,7 @@ jobs:
               'workers/prediction_engine/archive_payload_adapters.py',
               'workers/prediction_engine/walk_forward.py',
               'workers/prediction_engine/archive_training_source.py',
+              'workers/prediction_engine/feature_layer.py',
               'workers/prediction_engine/historical_training_job.py',
           ]:
               py_compile.compile(path, doraise=True)
@@ -50,7 +52,10 @@ jobs:
           assert len(list(walk_fixture_rows({'response': json.dumps([row])}))) == 1
           assert len(list(walk_fixture_rows({'body': json.dumps({'response': [row]})}))) == 1
           assert len(list(walk_fixture_rows(json.dumps(row)))) == 1
-          assert len(list(walk_fixture_rows(gzip.compress(json.dumps(row).encode('utf-8'))))) == 1
+          compressed = gzip.compress(json.dumps(row).encode('utf-8'))
+          assert len(list(walk_fixture_rows(compressed))) == 1
+          encoded = base64.b64encode(json.dumps(row).encode('utf-8')).decode('ascii')
+          assert len(list(walk_fixture_rows(encoded))) == 1
           legacy = {
               'fixture_id': 2,
               'match_hometeam_id': 11,

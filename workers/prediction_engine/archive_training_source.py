@@ -1,7 +1,7 @@
 from __future__ import annotations
 import hashlib,json,os
 from dataclasses import dataclass
-from datetime import datetime,timezone
+from datetime import datetime,timedelta,timezone
 from urllib.parse import urlparse
 import boto3,psycopg
 from botocore.config import Config
@@ -62,10 +62,15 @@ def _parse_uri(uri):
     if p.scheme!='s3' or not p.netloc or not p.path.lstrip('/'):raise ValueError(f'invalid S3 object URI: {uri}')
     return p.netloc,p.path.lstrip('/')
 
-def _season_from_uri(uri):
-    raw=next((segment[len('season='):] for segment in urlparse(uri).path.split('/') if segment.startswith('season=')),None)
-    if raw is None:return None,None
-    resolved=resolve_season(raw,source='api-football');return resolved.archive_season_key,resolved.logical_season
+def _season_from_manifest(manifest):
+    raw=str(manifest.season)
+    if manifest.date_start and manifest.date_end:
+        start=manifest.date_start.astimezone(timezone.utc) if manifest.date_start.tzinfo else manifest.date_start.replace(tzinfo=timezone.utc)
+        end=manifest.date_end.astimezone(timezone.utc) if manifest.date_end.tzinfo else manifest.date_end.replace(tzinfo=timezone.utc)
+        if end>=start and start.year==end.year and end-start<=timedelta(days=370):
+            return raw,str(start.year)
+    resolved=resolve_season(raw,source='api-football')
+    return resolved.archive_season_key,resolved.logical_season
 
 def _as_datetime(value):
     if isinstance(value,datetime):dt=value
@@ -115,7 +120,7 @@ def load_settled_matches(conn,as_of=None):
     if not manifests:raise RuntimeError('prediction_training_source_unavailable:no_complete_fixture_manifests')
     team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};diagnostics={}
     for manifest in manifests:
-        bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_uri(manifest.object_uri);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
+        bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_manifest(manifest);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
         stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'manifest_count':0,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
         stats['manifest_count']+=1
@@ -140,4 +145,4 @@ def load_settled_matches(conn,as_of=None):
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')
     return matches
 
-# Historical training preserves the archive season key while using the authoritative preflight completeness decision.
+# Historical training preserves immutable archive keys while deriving logical season identity from manifest scope/date windows.

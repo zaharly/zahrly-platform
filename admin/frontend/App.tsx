@@ -35,6 +35,7 @@ import AuditLog from './pages/security/AuditLog'
 import Jurisdiction from './pages/security/Jurisdiction'
 import SettingsPage from './pages/settings/SettingsPage'
 import { BonusesPage, BonusEditor, GiveawaysPage, GiveawayEditor, PickRushPage, PickRushEditor, PrizePoolPage, PrizePoolEditor, BookmakersRadarPage, BookmakerEditor, LeaderboardsPage, LeaderboardBotEditor } from './pages/rewards/RewardsAdminV2'
+import BookmakerReports from './pages/rewards/BookmakerReports'
 
 export default function App() {
   return <AdminAuthGate><StoreProvider><AppShell><Routes>
@@ -50,7 +51,7 @@ export default function App() {
     <Route path="/giveaways" element={<GiveawaysPage/>}/><Route path="/giveaways/new" element={<GiveawayEditor/>}/><Route path="/giveaways/:id/edit" element={<GiveawayEditor/>}/>
     <Route path="/pickrush" element={<PickRushPage/>}/><Route path="/pickrush/new" element={<PickRushEditor/>}/><Route path="/pickrush/:id/edit" element={<PickRushEditor/>}/>
     <Route path="/prizepool" element={<PrizePoolPage/>}/><Route path="/prizepool/new" element={<PrizePoolEditor/>}/><Route path="/prizepool/:id/edit" element={<PrizePoolEditor/>}/>
-    <Route path="/bookmakersradar" element={<BookmakersRadarPage/>}/><Route path="/bookmakersradar/new" element={<BookmakerEditor/>}/><Route path="/bookmakersradar/:id/edit" element={<BookmakerEditor/>}/>
+    <Route path="/bookmakersradar" element={<BookmakersRadarPage/>}/><Route path="/bookmakersradar/new" element={<BookmakerEditor/>}/><Route path="/bookmakersradar/:id/edit" element={<BookmakerEditor/>}/><Route path="/bookmakersradar/reports" element={<BookmakerReports/>}/><Route path="/bookmakersradar/reports/:id" element={<BookmakerReports/>}/>
     <Route path="/leaderboards" element={<LeaderboardsPage/>}/><Route path="/leaderboards/new" element={<LeaderboardBotEditor/>}/><Route path="/leaderboards/:id/edit" element={<LeaderboardBotEditor/>}/>
     <Route path="*" element={<AdminDashboardV2/>}/>
   </Routes></AppShell></StoreProvider></AdminAuthGate>

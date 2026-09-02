@@ -1,4 +1,4 @@
-from __future__
+from __future__ import annotations
 import hashlib,json,os
 from dataclasses import dataclass
 from datetime import datetime,timezone

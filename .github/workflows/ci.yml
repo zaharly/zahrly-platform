@@ -22,14 +22,17 @@ jobs:
           test -f .gitignore
           test -f docker/Dockerfile.runtime
 
-      - name: Validate Prediction Engine season resolver
+      - name: Validate Prediction Engine season resolver and archive adapters
         shell: bash
         run: |
           python - <<'PY'
+          import json
           import py_compile
+          from workers.prediction_engine.archive_payload_adapters import walk_fixture_rows
           from workers.prediction_engine.season_resolver import normalize_season_label, resolve_season
           for path in [
               'workers/prediction_engine/season_resolver.py',
+              'workers/prediction_engine/archive_payload_adapters.py',
               'workers/prediction_engine/walk_forward.py',
               'workers/prediction_engine/archive_training_source.py',
               'workers/prediction_engine/historical_training_job.py',
@@ -41,7 +44,12 @@ jobs:
           assert normalize_season_label('2008') == '2008/2009'
           assert normalize_season_label('2009') == '2009/2010'
           assert normalize_season_label('2010') == '2010/2011'
-          print('Season resolver validation: OK')
+          row = {'fixture': {'id': 1, 'date': '2011-08-01T12:00:00Z'}, 'teams': {'home': {'id': 10}, 'away': {'id': 20}}, 'goals': {'home': 2, 'away': 1}}
+          assert len(list(walk_fixture_rows(row))) == 1
+          assert len(list(walk_fixture_rows({'response': json.dumps([row])}))) == 1
+          assert len(list(walk_fixture_rows({'body': json.dumps({'response': [row]})}))) == 1
+          assert len(list(walk_fixture_rows(json.dumps(row)))) == 1
+          print('Season resolver and archive payload adapter validation: OK')
           PY
 
       - name: Build runtime container

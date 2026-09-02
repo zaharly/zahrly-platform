@@ -1,11 +1,55 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator
 from typing import Any
 
 
+_JSON_WRAPPER_KEYS = {
+    "response", "data", "rows", "results", "items", "fixtures", "matches", "payload", "body", "content"
+}
+
+
+def _decode_json_container(value: Any) -> Any:
+    """Decode JSON strings/bytes produced by legacy archive wrappers."""
+    current = value
+    for _ in range(3):
+        if isinstance(current, bytes):
+            try:
+                current = current.decode("utf-8")
+            except UnicodeDecodeError:
+                return value
+        if not isinstance(current, str):
+            return current
+        text = current.strip()
+        if not text or text[0] not in "[{":
+            return current
+        try:
+            decoded = json.loads(text)
+        except (TypeError, ValueError):
+            return current
+        if decoded is current:
+            return current
+        current = decoded
+    return current
+
+
+def _iter_children(value: Any) -> Iterator[Any]:
+    if isinstance(value, list):
+        yield from value
+        return
+    if not isinstance(value, dict):
+        return
+    preferred = [value[key] for key in _JSON_WRAPPER_KEYS if key in value]
+    if preferred:
+        yield from preferred
+        return
+    yield from value.values()
+
+
 def walk_fixture_rows(value: Any) -> Iterator[dict[str, Any]]:
-    """Yield canonical fixture-shaped rows plus common legacy archive shapes."""
+    """Yield canonical fixture-shaped rows from current and legacy archive payloads."""
+    value = _decode_json_container(value)
     if isinstance(value, list):
         for item in value:
             yield from walk_fixture_rows(item)
@@ -59,5 +103,5 @@ def walk_fixture_rows(value: Any) -> Iterator[dict[str, Any]]:
         }
         return
 
-    for child in value.values():
+    for child in _iter_children(value):
         yield from walk_fixture_rows(child)

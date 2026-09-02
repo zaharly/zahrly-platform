@@ -23,6 +23,14 @@ def season_start(label):return season_start_year(label)
 def _season_sort_key(label):
     start=season_start_year(label);return (start if start is not None else 10**9,str(label))
 
+def _season_boundary(label):
+    start=season_start_year(label)
+    if start is None: raise ValueError(f'cannot determine season start for {label!r}')
+    # Football seasons are anchored to the season start year; July 1 is a
+    # conservative chronological boundary that keeps calendar spillover out
+    # of the preceding logical season without changing the immutable archive.
+    return datetime(start,7,1,tzinfo=timezone.utc)
+
 def _team_rates(train,cutoff,policy):
     cutoff=_utc(cutoff);gf={};ga={};tw=tg=0.
     for m in train:
@@ -71,11 +79,10 @@ def build_walk_forward_folds(matches:Iterable[Match],cutoffs:Sequence[datetime],
     season_labels=sorted({label for _,label in labelled if label is not None},key=_season_sort_key)
     if len(season_labels)>=2:
         folds=[];season_index={s:i for i,s in enumerate(season_labels)}
-        season_boundary={s:min(_utc(m.played_at) for m,label in labelled if label==s) for s in season_labels}
         for target_index in range(1,len(season_labels)):
-            target=season_labels[target_index];cutoff=season_boundary[target]
+            target=season_labels[target_index];cutoff=_season_boundary(target)
             train=[m for m,label in labelled if label is not None and season_index[label]<target_index and _utc(m.played_at)<cutoff]
-            test=[m for m,label in labelled if label==target]
+            test=[m for m,label in labelled if label==target and _utc(m.played_at)>=cutoff]
             if not train or not test:continue
             train_seasons={normalize_season_label(m.season) for m in train if normalize_season_label(m.season) is not None};test_seasons={normalize_season_label(m.season) for m in test if normalize_season_label(m.season) is not None}
             if train_seasons & test_seasons:raise LeakageError(f'walk-forward season overlap: {sorted(train_seasons & test_seasons,key=_season_sort_key)}')

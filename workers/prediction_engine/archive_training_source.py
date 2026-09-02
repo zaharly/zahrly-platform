@@ -107,25 +107,29 @@ def _fixture_date(row):
 def load_settled_matches(conn,as_of=None):
     manifests=fetch_fixture_manifests(conn)
     if not manifests:raise RuntimeError('prediction_training_source_unavailable:no_fixture_manifests')
-    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};season_inventory={}
+    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};season_inventory={};diagnostics={}
     for manifest in manifests:
         bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_uri(manifest.object_uri);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
-        doc=json.loads(raw.decode('utf-8'))
+        doc=json.loads(raw.decode('utf-8'));stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
         for row in _walk(doc):
+            stats['walked']+=1
             fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row);home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) else None;away=(teams.get('away') or {}).get('id') if isinstance(teams,dict) else None;hg,ag=_score_pair(row)
-            if fid is None or date is None or home is None or away is None or hg is None or ag is None:continue
+            if fid is None or date is None or home is None or away is None or hg is None or ag is None:
+                stats['missing_fields']+=1;continue
             try:played=_as_datetime(date)
-            except (TypeError,ValueError,OverflowError):continue
-            if played>=cutoff:continue
+            except (TypeError,ValueError,OverflowError):stats['bad_date']+=1;continue
+            if played>=cutoff:stats['pre_cutoff']+=1;continue
             ht=_historical_team_key(home,team_map.get(str(home)));at=_historical_team_key(away,team_map.get(str(away)))
-            if not ht or not at:continue
+            if not ht or not at:stats['missing_team_identity']+=1;continue
             candidate=Match(str(fid),played,ht,at,hg,ag,logical_season,archive_season);existing=by_id.get(str(fid))
+            stats['accepted']+=1
             if logical_season is not None:season_inventory[logical_season]=season_inventory.get(logical_season,0)+1
             if existing is None:by_id[str(fid)]=candidate
             elif existing!=candidate:
                 if (existing.played_at,existing.home_team_id,existing.away_team_id,existing.home_goals,existing.away_goals)!=(candidate.played_at,candidate.home_team_id,candidate.away_team_id,candidate.home_goals,candidate.away_goals):raise RuntimeError(f'conflicting archived fixture payload:{fid}')
                 if existing.season is None and logical_season is not None:by_id[str(fid)]=candidate
+    print(json.dumps({'archive_fixture_parse_diagnostics':diagnostics},sort_keys=True),flush=True)
     matches=sorted(by_id.values(),key=lambda m:(m.played_at,m.match_id))
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')
     return matches

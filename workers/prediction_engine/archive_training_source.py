@@ -36,7 +36,15 @@ def _parse_uri(uri):
  if p.scheme!='s3' or not p.netloc or not p.path.lstrip('/'):raise ValueError(f'invalid S3 object URI: {uri}')
  return p.netloc,p.path.lstrip('/')
 def _season_from_uri(uri):
- m=re.search(r'(?:^|/)season=(\d{4})(?:/|$)',uri);return int(m.group(1)) if m else None
+ m=re.search(r'(?:^|/)season=(\d{4})(?:/|$)',uri)
+ if not m:return None
+ # Archive objects use the competition season start year in the path.
+ # Keep football seasons as one logical label: season=2011 -> 2011/2012.
+ start=int(m.group(1));return f'{start}/{start+1}'
+def _season_start(label):
+ if label is None:return None
+ m=re.match(r'^(\d{4})(?:/(\d{4}))?$',str(label).strip())
+ return int(m.group(1)) if m else None
 def _as_datetime(value):
  if isinstance(value,datetime):dt=value
  else:dt=datetime.fromisoformat(str(value).replace('Z','+00:00'))

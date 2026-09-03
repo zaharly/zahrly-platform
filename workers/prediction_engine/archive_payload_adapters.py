@@ -1,4 +1,4 @@
-from __future__ import annotations
+from __future__
 
 import base64
 import bz2
@@ -26,16 +26,16 @@ def _decode_bytes(raw: bytes) -> bytes | None:
     if raw[:2] == b"\x1f\x8b":
         try:
             candidates.insert(0, gzip.decompress(raw))
-        except (OSError, EOFError):
+        except (OSError, EOFError, gzip.BadGzipFile):
             pass
     for fn in (zlib.decompress, bz2.decompress, lzma.decompress):
         try:
             candidates.insert(0, fn(raw))
-        except (OSError, EOFError, zlib.error):
+        except (OSError, EOFError, zlib.error, lzma.LZMAError):
             pass
     try:
         with zipfile.ZipFile(BytesIO(raw)) as zf:
-            names = zf.namelist()
+            names = [name for name in zf.namelist() if not name.endswith("/")]
             if names:
                 candidates.insert(0, zf.read(names[0]))
     except (zipfile.BadZipFile, OSError, IndexError):
@@ -167,16 +167,22 @@ def _canonical_from_legacy(v: dict[str, Any]) -> dict[str, Any] | None:
     hg, ag = goals.get("home"), goals.get("away")
     if hg is None or ag is None:
         ph, pa = _nested_score(goals)
-        if hg is None: hg = ph
-        if ag is None: ag = pa
+        if hg is None:
+            hg = ph
+        if ag is None:
+            ag = pa
     for key in ("fulltime", "regular", "current", "extratime", "halftime"):
         p = score.get(key)
         if isinstance(p, dict):
             ph, pa = _nested_score(p)
-            if hg is None: hg = ph
-            if ag is None: ag = pa
-    if hg is None: hg = _first(v, _HOME_GOAL_KEYS)
-    if ag is None: ag = _first(v, _AWAY_GOAL_KEYS)
+            if hg is None:
+                hg = ph
+            if ag is None:
+                ag = pa
+    if hg is None:
+        hg = _first(v, _HOME_GOAL_KEYS)
+    if ag is None:
+        ag = _first(v, _AWAY_GOAL_KEYS)
     if any(x is None for x in (fid, h, a, d, hg, ag)):
         return None
     return {"fixture": {"id": fid, "date": d}, "teams": {"home": {"id": h}, "away": {"id": a}}, "goals": {"home": hg, "away": ag}}

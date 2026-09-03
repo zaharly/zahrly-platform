@@ -1,5 +1,7 @@
 name: Prediction Training - S3 Archive OOS
 
+# Historical-only training path. Never touches 7-Day Rolling or active campaigns.
+# The main-branch trigger exists only to make the training workflow independently executable.
 on:
   workflow_dispatch:
     inputs:
@@ -18,6 +20,9 @@ on:
   push:
     branches:
       - 'prediction/training-archive-oos-v2'
+      - 'main'
+    paths:
+      - '.github/workflows/prediction-training-archive-oos.yml'
 
 concurrency:
   group: prediction-training-archive-oos-${{ github.workflow }}
@@ -45,6 +50,8 @@ jobs:
       OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: prediction/training-archive-oos-v2
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -83,7 +90,9 @@ jobs:
           if project_ref != 'qosvqlwkexrhswcuakib':
               raise SystemExit('unexpected Supabase project reference')
           pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
-          fixed = urlunsplit((parts.scheme, f'{quote("postgres." + project_ref, safe="")}:{quote(parts.password, safe="")}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
+          username = quote('postgres.' + project_ref, safe='')
+          password = quote(parts.password, safe='')
+          fixed = urlunsplit((parts.scheme, f'{username}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
           with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
               fh.write('SUPABASE_DB_URL=' + fixed + '\n')
           with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
@@ -93,7 +102,60 @@ jobs:
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
-        run: python -m workers.prediction_engine.historical_training_job
+        shell: bash
+        run: |
+          set +e
+          output=/tmp/prediction-training.log
+          python -m workers.prediction_engine.historical_training_job 2>&1 | tee "$output"
+          rc=${PIPESTATUS[0]}
+          printf 'TRAINING_PROCESS_RC=%s\n' "$rc" >> "$GITHUB_ENV"
+          set -e
+          TRAINING_PROCESS_RC="$rc" python - "$output" <<'PY'
+          import json, os, sys
+          path=sys.argv[1]
+          payloads=[]
+          with open(path, encoding='utf-8-sig') as fh:
+              for raw in fh:
+                  line=raw.lstrip('\ufeff').strip()
+                  if not (line.startswith('{') and line.endswith('}')):
+                      continue
+                  try:
+                      payload=json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if payload.get('training_run_id'):
+                      payloads.append(payload)
+          final_payload=next((p for p in reversed(payloads) if p.get('status') == 'SUCCEEDED'), None)
+          started_payload=next((p for p in reversed(payloads) if p.get('status') == 'STARTED'), None)
+          payload=final_payload or started_payload
+          if not payload or not payload.get('training_run_id'):
+              raise SystemExit('historical training failed before publishing a training_run_id')
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+              fh.write(f"PREDICTION_TRAINING_RUN_ID={payload['training_run_id']}\n")
+              if payload.get('model_version_id'):
+                  fh.write(f"PREDICTION_MODEL_VERSION_ID={payload['model_version_id']}\n")
+          rc=int(os.environ.get('TRAINING_PROCESS_RC','1'))
+          print(f"Historical training final status={payload.get('status')} rc={rc} training_run_id={payload['training_run_id']}")
+          if final_payload is None or rc != 0:
+              raise SystemExit('historical training did not finish successfully')
+          PY
+      - name: Finalize failed training run if the process exited abnormally
+        if: failure() && env.PREDICTION_TRAINING_RUN_ID != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import psycopg
+          from workers.prediction_engine.historical_training_job import _normalized_db_url
+          run_id=os.environ.get('PREDICTION_TRAINING_RUN_ID','').strip()
+          if not run_id:
+              raise SystemExit(0)
+          with psycopg.connect(_normalized_db_url(), connect_timeout=20, sslmode='require') as conn:
+              conn.execute('set session statement_timeout=0')
+              conn.execute("update internal.prediction_training_runs set status='FAILED', finished_at=now(), metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s and status='RUNNING'", ('{\"error\":\"GitHub training process terminated before successful completion\"}', run_id))
+              conn.commit()
+          print(f'Finalized abnormal training run: {run_id}')
       - name: Persist Elo/Glicko rating checkpoints
         if: success()
         run: python -m workers.prediction_engine.rating_checkpoints

@@ -4,7 +4,6 @@ name: Prediction Training - S3 Archive OOS
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # This workflow is intentionally present on this branch so branch pushes can execute it.
 # Archive decoder probes are fail-safe so plain JSON is never mistaken for compressed data.
-# Verification trigger: execute on the latest decoder-hardening commit.
 on:
   workflow_dispatch:
     inputs:
@@ -103,7 +102,7 @@ jobs:
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
-        run: python -m training.archive_oos.run_historical_training_with_recovery
+        run: python -m training.archive_oos.run_historical_training_with_s3_fallback
       - name: Persist Elo/Glicko rating checkpoints
         if: success()
         run: python -m workers.prediction_engine.rating_checkpoints

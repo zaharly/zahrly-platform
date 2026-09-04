@@ -118,69 +118,87 @@ def _temperature_probs(prediction: Prediction, temperature: float, bias=(0.0, 0.
     return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, p[0], p[1], p[2], prediction.lambda_home, prediction.lambda_away)
 
 
-def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]) -> tuple[float, dict]:
-    """Fit leakage-safe multiclass temperature + small class bias.
+def _confidence_ece(predictions: Sequence[Prediction], outcomes: Sequence[str], temperature: float) -> float:
+    bins = [{'n': 0, 'confidence': 0.0, 'correct': 0.0} for _ in range(10)]
+    for p, y in zip(predictions, outcomes):
+        q = _temperature_probs(p, temperature)
+        probs = (q.p_home, q.p_draw, q.p_away)
+        confidence = max(probs)
+        predicted = ('H', 'D', 'A')[max(range(3), key=lambda i: probs[i])]
+        b = bins[min(9, int(confidence * 10.0))]
+        b['n'] += 1
+        b['confidence'] += confidence
+        b['correct'] += int(predicted == y)
+    n = len(predictions)
+    return sum((b['n'] / n) * abs((b['correct'] - b['confidence']) / b['n']) for b in bins if b['n'])
 
-    The calibration parameters are fit only on chronological calibration data. Bias
-    is regularized toward zero and the deterministic coordinate search is bounded so
-    it cannot become an unconstrained reweighting of the OOS distribution.
+
+def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[str], temperature: float) -> tuple[float, float, float, float]:
+    brier = 0.0
+    log_loss = 0.0
+    rps = 0.0
+    for p, y in zip(predictions, outcomes):
+        q = _temperature_probs(p, temperature)
+        probs = (q.p_home, q.p_draw, q.p_away)
+        target = {'H': (1.0, 0.0, 0.0), 'D': (0.0, 1.0, 0.0), 'A': (0.0, 0.0, 1.0)}[y]
+        idx = {'H': 0, 'D': 1, 'A': 2}[y]
+        brier += sum((a - z) ** 2 for a, z in zip(probs, target))
+        log_loss -= log(max(1e-15, probs[idx]))
+        rps += ((probs[0] - target[0]) ** 2 + (probs[0] + probs[1] - target[0] - target[1]) ** 2) / 2.0
+    n = len(predictions)
+    return brier / n, log_loss / n, rps / n, _confidence_ece(predictions, outcomes, temperature)
+
+
+def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]) -> tuple[float, dict]:
+    """Fit one robust multiclass temperature on chronological calibration data.
+
+    The production-safe calibrator intentionally has one degree of freedom. We first
+    find the NLL-optimal temperature, then select an ECE-optimal candidate only when
+    it stays within a small proper-score guardrail. This avoids the high-variance
+    class-bias calibration that previously damaged Brier/LogLoss/RPS on the OOS fold.
     """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
     if len(predictions) < 20:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "bias": [0.0, 0.0, 0.0], "method": "temperature_plus_bias"}
-    index = {"H": 0, "D": 1, "A": 2}
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "bias": [0.0, 0.0, 0.0], "method": "temperature_ece_guarded"}
 
-    def objective(t, bias):
-        loss = 0.0
-        for p, y in zip(predictions, outcomes):
-            q = _temperature_probs(p, t, bias)
-            probs = (q.p_home, q.p_draw, q.p_away)
-            loss -= log(max(1e-15, probs[index[y]]))
-        # Small L2 penalty prevents sparse historical calibration from producing
-        # extreme class priors. Bias is identifiable only up to a constant, so the
-        # sum-zero constraint below is enforced after every coordinate update.
-        loss /= len(predictions)
-        loss += 0.01 * sum(float(b) * float(b) for b in bias)
-        return loss
-
-    best_t = 1.0
-    best_b = [0.0, 0.0, 0.0]
-    best_loss = objective(best_t, best_b)
-    # Coarse global temperature search, then deterministic coordinate descent on
-    # class bias. The bounded bias range is intentionally conservative.
-    for i in range(81):
-        t = 0.20 + i * 0.05
-        loss = objective(t, best_b)
-        if loss < best_loss - 1e-12:
-            best_loss = loss
-            best_t = t
-    for _ in range(4):
-        changed = False
-        for j in range(3):
-            current = best_b[j]
-            local_value = current
-            local_loss = best_loss
-            for step in (0.40, 0.20, 0.10, 0.05, 0.025):
-                candidates = (max(-0.75, current - step), current, min(0.75, current + step))
-                for value in candidates:
-                    trial = list(best_b)
-                    trial[j] = value
-                    mean = sum(trial) / 3.0
-                    trial = [max(-0.75, min(0.75, b - mean)) for b in trial]
-                    loss = objective(best_t, trial)
-                    if loss < local_loss - 1e-12:
-                        local_loss = loss
-                        local_value = trial[j]
-                        best_b = trial
-                        changed = True
-            best_b[j] = local_value
-            mean = sum(best_b) / 3.0
-            best_b = [max(-0.75, min(0.75, b - mean)) for b in best_b]
-            best_loss = objective(best_t, best_b)
-        if not changed:
-            break
-    return best_t, {"status": "FITTED", "n": len(predictions), "temperature": best_t, "bias": [round(float(x), 8) for x in best_b], "log_loss": best_loss, "method": "temperature_plus_bias"}
+    candidates = [0.20 + i * 0.025 for i in range(161)]
+    scored = [(t, *_calibration_scores(predictions, outcomes, t)) for t in candidates]
+    baseline = next(row for row in scored if abs(row[0] - 1.0) < 1e-12)
+    nll_best = min(scored, key=lambda row: (row[2], row[0]))
+    # ECE is the gate metric, but calibration must not buy ECE by materially
+    # sacrificing proper probabilistic scores. Guardrails are relative to the
+    # uncalibrated candidate and therefore remain conservative on small samples.
+    allowed_brier = baseline[1] + max(0.005, 0.01 * abs(baseline[1]))
+    allowed_nll = baseline[2] + 0.01
+    allowed_rps = baseline[3] + 0.005
+    eligible = [row for row in scored if row[1] <= allowed_brier and row[2] <= allowed_nll and row[3] <= allowed_rps]
+    ece_best = min(eligible, key=lambda row: (row[4], row[2], row[1])) if eligible else nll_best
+    # If ECE optimization is nearly tied, prefer NLL; this keeps the calibrator
+    # stable instead of chasing binning noise.
+    if ece_best[4] <= nll_best[4] * 0.98:
+        chosen = ece_best
+        selection = "ECE_WITH_SCORE_GUARDRAILS"
+    else:
+        chosen = nll_best
+        selection = "NLL_PRIMARY"
+    t, brier, nll, rps, ece_value = chosen
+    return t, {
+        "status": "FITTED",
+        "n": len(predictions),
+        "temperature": t,
+        "bias": [0.0, 0.0, 0.0],
+        "brier": brier,
+        "log_loss": nll,
+        "rps": rps,
+        "ece": ece_value,
+        "nll_opt_temperature": nll_best[0],
+        "nll_opt_ece": nll_best[4],
+        "ece_opt_temperature": ece_best[0],
+        "ece_opt_ece": ece_best[4],
+        "selection": selection,
+        "method": "temperature_ece_guarded",
+    }
 
 
 def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, team_rates=None):
@@ -208,10 +226,6 @@ def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPo
     test = sorted(test, key=lambda m: _utc(m.played_at))
     if not train or not test:
         raise ValueError("walk-forward fold requires non-empty train and test sets")
-    # Calibration folds can split a historical training set inside a matchday, so
-    # several rows may share the exact boundary timestamp. Those boundary rows are
-    # not before the calibration cutoff and must never enter the calibration model.
-    # Drop them deterministically rather than weakening the strict leakage invariant.
     test_start = min(_utc(m.played_at) for m in test)
     if any(_utc(m.played_at) >= test_start for m in train):
         train = [m for m in train if _utc(m.played_at) < test_start]

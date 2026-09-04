@@ -1,0 +1,71 @@
+name: One-shot stale prediction artifact cleanup
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ secrets.S3_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      S3_BUCKET: zahrly-community-storage
+      S3_REGION: ${{ secrets.S3_REGION }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
+      SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      PREDICTION_TRAINING_RUN_ID: b006ed4b-81a1-4491-aad2-9618f33ef410
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install archive dependencies
+        run: pip install -r workers/archive_worker/requirements.txt
+      - name: Configure Supabase IPv4 Session Pooler and validate exact stale run
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit, quote, urlunsplit
+          import psycopg
+          raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
+          parts = urlsplit(raw)
+          ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
+          fixed = urlunsplit((parts.scheme, f'{quote("postgres." + ref, safe="")}:{quote(parts.password, safe="")}@aws-0-eu-central-1.pooler.supabase.com:5432', '/postgres', 'sslmode=require', ''))
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh: fh.write('SUPABASE_DB_URL=' + fixed + '\n')
+          with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
+              row = conn.execute("""
+                select tr.id::text, tr.status, tr.model_version_id::text,
+                       (select count(*) from internal.prediction_oos_benchmark o where o.training_run_id=tr.id) as oos_rows,
+                       (select count(*) from internal.prediction_rating_checkpoints r where r.model_version_id=tr.model_version_id) as rating_rows
+                from internal.prediction_training_runs tr where tr.id=%s
+              """, (os.environ['PREDICTION_TRAINING_RUN_ID'],)).fetchone()
+              print({'run': row[0] if row else None, 'status': row[1] if row else None, 'model_version_id': row[2] if row else None, 'oos_rows': row[3] if row else None, 'rating_rows': row[4] if row else None})
+              if not row or row[1] != 'SUCCEEDED' or int(row[3]) != 29679 or int(row[4]) != 84460: raise SystemExit('exact stale-run invariant failed')
+          PY
+      - name: Verify AWS target
+        run: |
+          aws sts get-caller-identity
+          aws s3api get-bucket-location --bucket "${S3_BUCKET}"
+      - name: Archive stale run with canonical verified worker
+        run: python -m workers.prediction_engine.archive_prediction_artifacts
+      - name: Verify transient tables are empty
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ['SUPABASE_DB_URL'], connect_timeout=20, sslmode='require') as conn:
+              row = conn.execute("select pg_size_pretty(pg_database_size(current_database())), (select count(*) from internal.prediction_rating_checkpoints), (select count(*) from internal.prediction_oos_benchmark), (select count(*) from internal.prediction_artifacts)").fetchone()
+              print({'db_size': row[0], 'rating_rows': row[1], 'oos_rows': row[2], 'artifact_rows': row[3]})
+              if int(row[1]) != 0 or int(row[2]) != 0: raise SystemExit('transient prediction artifact rows remain')
+          PY

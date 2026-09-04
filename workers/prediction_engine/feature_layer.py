@@ -130,11 +130,7 @@ def _manifests(conn,latest):
               and object_uri like 's3://%%'
               and completeness_score>=0.0
               and dataset_type=any(%s)
-              and (
-                    dataset_type=any(%s)
-                    or date_end is null
-                    or date_end<%s
-                  )
+              and (dataset_type=any(%s) or date_end is null or date_end<%s)
             order by date_end nulls last,manifest_id
         """,(list(HISTORICAL_DATASETS),list(DETAIL_DATASETS),latest))
         return cur.fetchall()
@@ -156,7 +152,7 @@ def _feature_values(dataset,o):
         for k,v in o.items():
             if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id"}:continue
             n=_number(v)
-            if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_")}"]=n
+            if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
     return vals
 
 def build_feature_index(conn,target_matches,latest_target=None):

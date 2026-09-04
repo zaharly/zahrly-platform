@@ -106,11 +106,11 @@ def _feature_factor(match, features, side):
     return min(1.15, max(0.85, factor))
 
 
-def _temperature_probs(prediction: Prediction, temperature: float) -> Prediction:
+def _temperature_probs(prediction: Prediction, temperature: float, bias=(0.0, 0.0, 0.0)) -> Prediction:
     if temperature <= 0:
         raise ValueError("temperature must be positive")
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
-    logits = [log(x) / temperature for x in raw]
+    logits = [log(x) / temperature + float(b) for x, b in zip(raw, bias)]
     pivot = max(logits)
     weights = [exp(x - pivot) for x in logits]
     total = sum(weights)
@@ -119,30 +119,68 @@ def _temperature_probs(prediction: Prediction, temperature: float) -> Prediction
 
 
 def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]) -> tuple[float, dict]:
-    """Fit multiclass temperature only on a leakage-safe calibration split.
+    """Fit leakage-safe multiclass temperature + small class bias.
 
-    Grid search is deliberately bounded and deterministic. T>1 softens confidence;
-    T<1 sharpens it. We optimize log-loss, the same proper scoring rule used by the gate.
+    The calibration parameters are fit only on chronological calibration data. Bias
+    is regularized toward zero and the deterministic coordinate search is bounded so
+    it cannot become an unconstrained reweighting of the OOS distribution.
     """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
     if len(predictions) < 20:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions)}
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "bias": [0.0, 0.0, 0.0], "method": "temperature_plus_bias"}
     index = {"H": 0, "D": 1, "A": 2}
-    best_t = 1.0
-    best_loss = float("inf")
-    for i in range(81):
-        t = 0.20 + i * 0.05
+
+    def objective(t, bias):
         loss = 0.0
         for p, y in zip(predictions, outcomes):
-            q = _temperature_probs(p, t)
+            q = _temperature_probs(p, t, bias)
             probs = (q.p_home, q.p_draw, q.p_away)
             loss -= log(max(1e-15, probs[index[y]]))
+        # Small L2 penalty prevents sparse historical calibration from producing
+        # extreme class priors. Bias is identifiable only up to a constant, so the
+        # sum-zero constraint below is enforced after every coordinate update.
         loss /= len(predictions)
+        loss += 0.01 * sum(float(b) * float(b) for b in bias)
+        return loss
+
+    best_t = 1.0
+    best_b = [0.0, 0.0, 0.0]
+    best_loss = objective(best_t, best_b)
+    # Coarse global temperature search, then deterministic coordinate descent on
+    # class bias. The bounded bias range is intentionally conservative.
+    for i in range(81):
+        t = 0.20 + i * 0.05
+        loss = objective(t, best_b)
         if loss < best_loss - 1e-12:
             best_loss = loss
             best_t = t
-    return best_t, {"status": "FITTED", "n": len(predictions), "temperature": best_t, "log_loss": best_loss}
+    for _ in range(4):
+        changed = False
+        for j in range(3):
+            current = best_b[j]
+            local_value = current
+            local_loss = best_loss
+            for step in (0.40, 0.20, 0.10, 0.05, 0.025):
+                candidates = (max(-0.75, current - step), current, min(0.75, current + step))
+                for value in candidates:
+                    trial = list(best_b)
+                    trial[j] = value
+                    mean = sum(trial) / 3.0
+                    trial = [max(-0.75, min(0.75, b - mean)) for b in trial]
+                    loss = objective(best_t, trial)
+                    if loss < local_loss - 1e-12:
+                        local_loss = loss
+                        local_value = trial[j]
+                        best_b = trial
+                        changed = True
+            best_b[j] = local_value
+            mean = sum(best_b) / 3.0
+            best_b = [max(-0.75, min(0.75, b - mean)) for b in best_b]
+            best_loss = objective(best_t, best_b)
+        if not changed:
+            break
+    return best_t, {"status": "FITTED", "n": len(predictions), "temperature": best_t, "bias": [round(float(x), 8) for x in best_b], "log_loss": best_loss, "method": "temperature_plus_bias"}
 
 
 def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, team_rates=None):
@@ -164,7 +202,7 @@ def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc
     return Prediction(match.match_id, match.home_team_id, match.away_team_id, ph, pd, pa, hl, al)
 
 
-def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, temperature=1.0):
+def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, temperature=1.0, calibration_bias=(0.0, 0.0, 0.0)):
     cutoff = _utc(cutoff)
     train = sorted(train, key=lambda m: _utc(m.played_at))
     test = sorted(test, key=lambda m: _utc(m.played_at))
@@ -195,7 +233,7 @@ def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPo
     out = []
     for m in test:
         raw = predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy, features, team_rates)
-        out.append(_temperature_probs(raw, temperature) if temperature != 1.0 else raw)
+        out.append(_temperature_probs(raw, temperature, calibration_bias) if temperature != 1.0 or any(calibration_bias) else raw)
         h = ratings.get(m.home_team_id, EloState(elo_policy.initial_rating))
         a = ratings.get(m.away_team_id, EloState(elo_policy.initial_rating))
         ratings[m.home_team_id], ratings[m.away_team_id], _ = update_elo(h, a, m.home_goals, m.away_goals, elo_policy)

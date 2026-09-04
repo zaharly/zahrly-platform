@@ -7,6 +7,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 import boto3
 import psycopg
@@ -20,8 +21,37 @@ KEEP_RATING_MODELS = int(os.environ.get("KEEP_RATING_MODELS", "2"))
 CRON_RETENTION_DAYS = int(os.environ.get("CRON_RETENTION_DAYS", "2"))
 
 
+def normalized_db_url(raw: str) -> str:
+    raw = raw.strip()
+    p = urlsplit(raw)
+    if p.scheme not in {"postgres", "postgresql"} or not p.hostname or p.password is None:
+        raise RuntimeError("SUPABASE_DB_URL must be a valid PostgreSQL URL with a password")
+    host = p.hostname.lower().rstrip(".")
+    # A malformed secret can encode the @ separator as part of the hostname.
+    host = host.lstrip("@")
+    project_ref = "qosvqlwkexrhswcuakib"
+    pooler_host = "aws-0-eu-central-1.pooler.supabase.com"
+    pooler_port = 5432
+    user = unquote(p.username or "postgres")
+    password = quote(unquote(p.password), safe="")
+    if host.endswith(".pooler.supabase.com"):
+        selected_host, selected_port = host, p.port or pooler_port
+        if "." not in user:
+            user = f"postgres.{project_ref}"
+    elif host == f"db.{project_ref}.supabase.co":
+        selected_host, selected_port = pooler_host, pooler_port
+        if user == "postgres":
+            user = f"postgres.{project_ref}"
+    else:
+        raise RuntimeError(f"Unsupported Supabase host: {host}")
+    query = p.query or ""
+    if "sslmode=" not in query:
+        query = f"{query}&sslmode=require" if query else "sslmode=require"
+    return urlunsplit(("postgresql", f"{quote(user, safe='')}:{password}@{selected_host}:{selected_port}", p.path or "/postgres", query, ""))
+
+
 def db():
-    return psycopg.connect(os.environ["SUPABASE_DB_URL"], row_factory=dict_row, connect_timeout=20)
+    return psycopg.connect(normalized_db_url(os.environ["SUPABASE_DB_URL"]), row_factory=dict_row, connect_timeout=20)
 
 
 def s3():
@@ -39,8 +69,6 @@ def archive_query(client, query: str, key: str) -> tuple[int, str, int]:
     with tempfile.NamedTemporaryFile(prefix="db-archive-", suffix=".jsonl.gz", delete=False) as tmp:
         path = Path(tmp.name)
         with gzip.GzipFile(fileobj=tmp, mode="wb", compresslevel=6) as gz:
-            # Export on a dedicated read connection so the DELETE transaction never holds
-            # the export snapshot open while the S3 upload is in progress.
             with db() as conn:
                 with conn.cursor() as cur:
                     copy_sql = f"COPY ({query}) TO STDOUT"
@@ -62,11 +90,7 @@ def archive_query(client, query: str, key: str) -> tuple[int, str, int]:
         ExtraArgs={
             "ContentType": "application/x-ndjson",
             "ContentEncoding": "gzip",
-            "Metadata": {
-                "sha256": digest,
-                "row_count": str(rows),
-                "archived_at": datetime.now(timezone.utc).isoformat(),
-            },
+            "Metadata": {"sha256": digest, "row_count": str(rows), "archived_at": datetime.now(timezone.utc).isoformat()},
         },
     )
     head = client.head_object(Bucket=BUCKET, Key=key)
@@ -88,7 +112,6 @@ def main() -> None:
     results = []
 
     with db() as conn:
-        # Keep the newest completed OOS runs; archive only older, finished runs.
         oos_candidates = fetch_ids(
             conn,
             """
@@ -116,7 +139,6 @@ def main() -> None:
                 raise RuntimeError(f"OOS delete mismatch: archived={rows}, deleted={deleted}")
             results.append({"table": "internal.prediction_oos_benchmark", "rows": rows, "s3_key": key, "sha256": digest, "bytes": size})
 
-        # Keep the newest checkpoint-bearing model versions; archive older ones only.
         rating_candidates = fetch_ids(
             conn,
             """
@@ -151,7 +173,6 @@ def main() -> None:
                 raise RuntimeError(f"rating delete mismatch: archived={rows}, deleted={deleted}")
             results.append({"table": "internal.prediction_rating_checkpoints", "rows": rows, "s3_key": key, "sha256": digest, "bytes": size})
 
-        # pg_cron run history is operational log data; keep two days live and archive older history.
         cron_count = conn.execute("SELECT count(*) AS n FROM cron.job_run_details WHERE start_time < now() - make_interval(days => %s)", (CRON_RETENTION_DAYS,)).fetchone()["n"]
         if cron_count:
             key = f"{PREFIX}/cron/job_run_details/archive_run={run_tag}.jsonl.gz"
@@ -164,23 +185,12 @@ def main() -> None:
                 raise RuntimeError(f"cron delete mismatch: archived={rows}, deleted={deleted}")
             results.append({"table": "cron.job_run_details", "rows": rows, "s3_key": key, "sha256": digest, "bytes": size})
 
-    # Reclaim dead tuples and update statistics without taking a VACUUM FULL lock.
     with db() as conn:
         conn.autocommit = True
         for table in ("internal.prediction_oos_benchmark", "internal.prediction_rating_checkpoints", "cron.job_run_details"):
-            conn.execute(sql.SQL("VACUUM (ANALYZE) {} ").format(sql.Identifier(*table.split("."))))
+            conn.execute(sql.SQL("VACUUM (ANALYZE) {}").format(sql.Identifier(*table.split("."))))
 
-    manifest = {
-        "run_tag": run_tag,
-        "bucket": BUCKET,
-        "prefix": PREFIX,
-        "retention": {
-            "keep_oos_runs": KEEP_OOS_RUNS,
-            "keep_rating_models": KEEP_RATING_MODELS,
-            "cron_days": CRON_RETENTION_DAYS,
-        },
-        "results": results,
-    }
+    manifest = {"run_tag": run_tag, "bucket": BUCKET, "prefix": PREFIX, "retention": {"keep_oos_runs": KEEP_OOS_RUNS, "keep_rating_models": KEEP_RATING_MODELS, "cron_days": CRON_RETENTION_DAYS}, "results": results}
     print(json.dumps(manifest, sort_keys=True))
 
 

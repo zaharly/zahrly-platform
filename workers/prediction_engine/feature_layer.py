@@ -122,6 +122,16 @@ def _manifests(conn,latest):
         cur.execute("select manifest_id::text as id,dataset_type,object_uri,checksum,date_end from internal.archive_catalog where provider='api-football' and object_uri like 's3://%%' and completeness_score>=0.0 and dataset_type=any(%s) and date_end is not null and date_end<%s order by date_end,manifest_id",(list(HISTORICAL_DATASETS),latest))
         return cur.fetchall()
 
+def _observation_available_at(dataset:str,played:datetime,date_end:datetime|None)->datetime|None:
+    # Fixture-level records are observed once the fixture is played. Using the
+    # manifest's season end here incorrectly hides same-season features from all
+    # earlier test fixtures and collapses feature coverage to zero.
+    if dataset in {"fixture_statistics","fixture_players_statistics","fixture_events","lineups"}:
+        return played
+    # Aggregates without a per-observation timestamp remain conservatively
+    # available only once their archive manifest is complete.
+    return _utc(date_end) if date_end is not None else None
+
 def build_feature_index(conn,target_matches,latest_target=None):
     targets=list(target_matches)
     if not targets:return {}
@@ -130,7 +140,7 @@ def build_feature_index(conn,target_matches,latest_target=None):
     for row in _manifests(conn,latest):
         bucket,key=_uri(row["object_uri"]); raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest()!=row["checksum"]:raise RuntimeError(f"archive checksum mismatch:{row['id']}")
-        available=_utc(row["date_end"]); dataset=row["dataset_type"]
+        manifest_end=_utc(row["date_end"]) if row["date_end"] is not None else None; dataset=row["dataset_type"]
         decoded=_decode_archive(raw)
         for o in _walk(decoded):
             fid=_fixture_id(o)
@@ -149,7 +159,9 @@ def build_feature_index(conn,target_matches,latest_target=None):
                     if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id"}:continue
                     n=_number(v)
                     if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
-            if vals:history.setdefault(tid,[]).append((played,available,vals,dataset))
+            if vals:
+                available_at=_observation_available_at(dataset,played,manifest_end)
+                history.setdefault(tid,[]).append((played,available_at,vals,dataset))
     for rows in history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
     out={}
     for m in targets:

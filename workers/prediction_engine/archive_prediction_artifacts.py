@@ -11,9 +11,11 @@ import boto3
 import psycopg
 from psycopg.rows import dict_row
 
+# The current IAM principal is permitted to write under zahrly/archive/database/.
+# Keep the canonical DB artifact registry as the source of truth for exact S3 URIs.
 ARTIFACTS = (
-    ("OOS_BENCHMARK", "prediction_oos_benchmark", "zahrly/prediction/oos"),
-    ("RATING_CHECKPOINTS", "prediction_rating_checkpoints", "zahrly/prediction/rating-checkpoints"),
+    ("OOS_BENCHMARK", "prediction_oos_benchmark", "zahrly/archive/database/prediction_oos_benchmark"),
+    ("RATING_CHECKPOINTS", "prediction_rating_checkpoints", "zahrly/archive/database/prediction_rating_checkpoints"),
 )
 
 
@@ -24,7 +26,7 @@ def db_connect():
 def s3_client():
     return boto3.client(
         "s3",
-        region_name=os.environ.get("S3_REGION", "eu-central-1"),
+        region_name=os.environ.get("S3_REGION", "eu-north-1"),
         endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,
         aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
@@ -110,7 +112,7 @@ def main():
                 if row_count == 0:
                     results.append({"artifact_type": artifact_type, "row_count": 0, "status": "EMPTY"})
                     continue
-                key = f"{prefix}/{run['version']}/{run['training_run_id']}.jsonl.gz"
+                key = f"{prefix}/archive_run={run['training_run_id']}.jsonl.gz"
                 sha, size = upload_verified(s3, bucket, key, path)
                 uri = f"s3://{bucket}/{key}"
                 register(conn, artifact_type, run["training_run_id"], run["model_version_id"], uri, sha, size, row_count)
@@ -129,5 +131,4 @@ def main():
         print(json.dumps({"status": "SUCCEEDED", "training_run_id": run["training_run_id"], "artifacts": results}, sort_keys=True))
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

@@ -4,6 +4,7 @@ name: Prediction Training - S3 Archive OOS
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
+# Trigger refresh: ensure this corrected workflow revision is exercised on push.
 on:
   workflow_dispatch:
     inputs:

@@ -5,6 +5,7 @@ name: Prediction Training - S3 Archive OOS
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
 # Trigger refresh: ensure this corrected workflow revision is exercised on push.
+# Trigger refresh 2: explicit execution test for corrected S3 archive path.
 on:
   workflow_dispatch:
     inputs:

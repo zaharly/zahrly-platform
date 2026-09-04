@@ -3,6 +3,7 @@ name: Prediction Training - S3 Archive OOS
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # This workflow is intentionally present on this branch so branch pushes can execute it.
+# Archive decoder probes are fail-safe so plain JSON is never mistaken for compressed data.
 on:
   workflow_dispatch:
     inputs:

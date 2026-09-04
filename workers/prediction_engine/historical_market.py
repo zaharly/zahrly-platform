@@ -14,25 +14,8 @@ from psycopg.rows import dict_row
 
 from .archive_payload_adapters import _decode_json_container
 
-
-MARKET_NAMES = {
-    "match winner",
-    "match result",
-    "1x2",
-    "3way",
-    "home draw away",
-}
-SELECTION_MAP = {
-    "home": "H",
-    "1": "H",
-    "h": "H",
-    "draw": "D",
-    "x": "D",
-    "d": "D",
-    "away": "A",
-    "2": "A",
-    "a": "A",
-}
+MARKET_NAMES = {"match winner", "match result", "1x2", "3way", "home draw away"}
+SELECTION_MAP = {"home": "H", "1": "H", "h": "H", "draw": "D", "x": "D", "d": "D", "away": "A", "2": "A", "a": "A"}
 
 
 def _utc(value: Any) -> datetime | None:
@@ -54,9 +37,7 @@ def _utc(value: Any) -> datetime | None:
                 dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
             except ValueError:
                 return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
 
 
 def _number(value: Any) -> float | None:
@@ -108,12 +89,7 @@ def _captured_at(node: dict[str, Any], fallback: datetime | None) -> datetime | 
     return fallback
 
 
-def _walk_with_context(
-    value: Any,
-    fixture_id: str | None = None,
-    kickoff: datetime | None = None,
-    captured_at: datetime | None = None,
-) -> Iterator[tuple[dict[str, Any], str | None, datetime | None, datetime | None]]:
+def _walk_with_context(value: Any, fixture_id: str | None = None, kickoff: datetime | None = None, captured_at: datetime | None = None) -> Iterator[tuple[dict[str, Any], str | None, datetime | None, datetime | None]]:
     if isinstance(value, list):
         for item in value:
             yield from _walk_with_context(item, fixture_id, kickoff, captured_at)
@@ -129,14 +105,7 @@ def _walk_with_context(
 
 
 def _s3_client():
-    return boto3.client(
-        "s3",
-        region_name=os.environ.get("S3_REGION", "eu-north-1"),
-        endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,
-        aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],
-        config=Config(retries={"max_attempts": 5, "mode": "standard"}),
-    )
+    return boto3.client("s3", region_name=os.environ.get("S3_REGION", "eu-north-1"), endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None, aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"], aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"], config=Config(retries={"max_attempts": 5, "mode": "standard"}))
 
 
 def _uri(uri: str) -> tuple[str, str]:
@@ -148,20 +117,15 @@ def _uri(uri: str) -> tuple[str, str]:
 
 def _manifest_rows(conn, latest: datetime) -> list[dict[str, Any]]:
     with conn.cursor() as cur:
-        cur.execute(
-            """
+        cur.execute("""
             select manifest_id::text as manifest_id, object_uri, checksum, date_start, date_end
               from internal.archive_catalog
              where provider='api-football'
                and dataset_type='pre_match_odds'
                and completeness_score >= 1.0
                and object_uri like 's3://%%'
-               and date_start is not null
-               and date_start < %s
-             order by date_start, manifest_id
-            """,
-            (latest,),
-        )
+             order by coalesce(date_start,date_end), manifest_id
+        """)
         return cur.fetchall()
 
 
@@ -201,12 +165,10 @@ def _market_entries(node: dict[str, Any]) -> Iterator[tuple[str, str, float]]:
 def load_archive_pre_match_market_probs(conn, requested: dict[str, datetime]) -> dict[str, tuple[float, float, float, datetime, list[tuple[str, float]]]]:
     if not requested:
         return {}
-    latest = max(requested.values()).astimezone(timezone.utc)
     wanted = {str(k): v.astimezone(timezone.utc) for k, v in requested.items()}
     snapshots: dict[str, dict[str, dict[str, dict[str, float | datetime]]]] = defaultdict(lambda: defaultdict(dict))
     client = _s3_client()
-    manifests = _manifest_rows(conn, latest)
-    for manifest in manifests:
+    for manifest in _manifest_rows(conn, max(wanted.values())):
         bucket, key = _uri(manifest["object_uri"])
         raw = client.get_object(Bucket=bucket, Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest() != manifest["checksum"]:
@@ -222,11 +184,7 @@ def load_archive_pre_match_market_probs(conn, requested: dict[str, datetime]) ->
             if observed is None or observed >= match_kickoff:
                 continue
             for bookmaker_id, selection, odd in _market_entries(node):
-                current = snapshots[fid][bookmaker_id].get(observed.isoformat())
-                if current is None:
-                    snapshots[fid][bookmaker_id][observed.isoformat()] = {"captured": observed, selection: odd}
-                else:
-                    current[selection] = odd
+                snapshots[fid][bookmaker_id].setdefault(observed.isoformat(), {"captured": observed})[selection] = odd
 
     output: dict[str, tuple[float, float, float, datetime, list[tuple[str, float]]]] = {}
     for fid, books in snapshots.items():
@@ -248,14 +206,8 @@ def load_archive_pre_match_market_probs(conn, requested: dict[str, datetime]) ->
             normalized.append((inv[0] / scale, inv[1] / scale, inv[2] / scale, closing[0]))
             if len(complete) > 1:
                 opening = complete[0]
-                for selection, index in (("H", 1), ("D", 2), ("A", 3)):
+                for selection, index in (("H",1),("D",2),("A",3)):
                     clv.append((selection, opening[index] / closing[index] - 1.0))
         if normalized:
-            output[fid] = (
-                sum(x[0] for x in normalized) / len(normalized),
-                sum(x[1] for x in normalized) / len(normalized),
-                sum(x[2] for x in normalized) / len(normalized),
-                max(x[3] for x in normalized),
-                clv,
-            )
+            output[fid] = (sum(x[0] for x in normalized)/len(normalized), sum(x[1] for x in normalized)/len(normalized), sum(x[2] for x in normalized)/len(normalized), max(x[3] for x in normalized), clv)
     return output

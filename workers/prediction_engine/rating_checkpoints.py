@@ -66,3 +66,4 @@ def main() -> None:
         print(json.dumps({'status':'SUCCEEDED','training_run_id':run['id'],'model_version_id':run['model_version_id'],'settled_matches':len(matches),'elo_teams':len(elo),'glicko_teams':len(glicko),'checkpoints':len(checkpoints),'persisted_checkpoint_rows':mapped_checkpoint_rows,'cutoff':matches[-1].played_at.isoformat()},sort_keys=True))
 
 if __name__=='__main__': main()
+# retrigger canonical workflow to validate checkpoint persistence fix

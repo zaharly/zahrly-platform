@@ -23,7 +23,7 @@ on:
       - 'prediction/training-archive-oos-v2'
 
 concurrency:
-  group: prediction-training-archive-oos-${{ github.workflow }}
+  group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

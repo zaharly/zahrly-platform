@@ -4,16 +4,9 @@ import re
 from dataclasses import dataclass
 
 
-# In the current historical archive, API-Football uses calendar-year season keys
-# for annual international tournaments (Euro 2008, Confederations Cup 2009),
-# while the league-style seasons use the season start year (for example 2011 ->
-# 2011/2012). This mapping is applied only in memory and never mutates S3.
-_ANNUAL_API_FOOTBALL_SEASONS = {2008, 2009}
-
-
 @dataclass(frozen=True)
 class ResolvedSeason:
-    """Code-side season identity; never mutates the immutable archive."""
+    """Code-side season identity; the immutable archive key is never mutated."""
 
     archive_season_key: str | None
     logical_season: str | None
@@ -28,7 +21,7 @@ def resolve_season(value: object, *, source: str = "api-football") -> ResolvedSe
     if not text:
         return ResolvedSeason(None, None, None)
 
-    # Already logical: YYYY/YYYY+1.
+    # Canonical logical label: YYYY/YYYY+1.
     match = re.fullmatch(r"(\d{4})\s*/\s*(\d{4})", text)
     if match:
         start, end = int(match.group(1)), int(match.group(2))
@@ -37,14 +30,13 @@ def resolve_season(value: object, *, source: str = "api-football") -> ResolvedSe
         logical = f"{start}/{end}"
         return ResolvedSeason(text, logical, start)
 
-    # API-Football archive objects use the competition season key. Some annual
-    # tournaments in the archived historical corpus are calendar-year seasons.
+    # API-Football archive objects use the competition season start year for the
+    # historical football corpus. Normalize it to the canonical logical label
+    # used by training/OOS folds without mutating the original archive key.
     if source == "api-football":
         match = re.fullmatch(r"\d{4}", text)
         if match:
             start = int(text)
-            if start in _ANNUAL_API_FOOTBALL_SEASONS:
-                return ResolvedSeason(text, text, start)
             return ResolvedSeason(text, f"{start}/{start + 1}", start)
 
     raise ValueError(f"unsupported season value for source={source}: {value!r}")

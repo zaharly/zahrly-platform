@@ -5,6 +5,7 @@ from datetime import datetime,timezone
 import psycopg
 from psycopg.rows import dict_row
 from .archive_training_source import load_settled_matches
+from .historical_market import load_archive_pre_match_market_probs
 from .walk_forward import build_walk_forward_folds,run_fold
 from .feature_layer import build_feature_index_for_matches
 MIN_COMPLETE_SEASONS=3;MIN_OOS_PREDICTIONS=3000
@@ -51,9 +52,9 @@ def main(training_run_id=None):
   if row['status']!='SUCCEEDED':raise SystemExit(f"training run is not succeeded:{row['id']}")
   training_run_id=row['id'];model_version_id=row['model_version_id'];matches=load_settled_matches(conn,as_of=datetime.now(timezone.utc));folds=conn.execute("select fold_no,train_cutoff,test_start,test_end,status from internal.prediction_training_folds where training_run_id=%s and status='SUCCEEDED' order by fold_no",(training_run_id,)).fetchall()
   if not folds:raise SystemExit('no succeeded training folds')
-  wf=build_walk_forward_folds(matches,[r['train_cutoff'] for r in folds]);usable=[(fd,w) for fd,w in zip(folds,wf) if w[0] and w[1]];all_oos=[m for _,(_,test,_) in usable for m in test];all_features=build_feature_index_for_matches(conn,all_oos,min(w[2] for _,w in usable)) if usable else {};market_requests={m.match_id:m.played_at for m in all_oos};market_by_match=_market_probs_batch(conn,market_requests)
+  wf=build_walk_forward_folds(matches,[r['train_cutoff'] for r in folds]);usable=[(fd,w) for fd,w in zip(folds,wf) if w[0] and w[1]];all_oos=[m for _,(_,test,_) in usable for m in test];all_features=build_feature_index_for_matches(conn,all_oos,min(w[2] for _,w in usable)) if usable else {};market_requests={m.match_id:m.played_at for m in all_oos};market_by_match=_market_probs_batch(conn,market_requests);archive_market=load_archive_pre_match_market_probs(conn,market_requests);market_by_match.update(archive_market)
   conn.execute('delete from internal.prediction_oos_benchmark where training_run_id=%s',(training_run_id,));conn.execute("delete from internal.evaluation_metrics where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_folds where run_id in(select id from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS')",(model_version_id,));conn.execute("delete from internal.evaluation_runs where model_version_id=%s and benchmark_type='WALK_FORWARD_OOS'",(model_version_id,));conn.commit();model_rows=[];emp_rows=[];market_rows=[];clv_values=[];feature_cov=[]
-  eval_run=conn.execute("insert into internal.evaluation_runs(model_version_id,benchmark_type,status,started_at,metadata) values(%s,'WALK_FORWARD_OOS','RUNNING',now(),%s) returning id::text as id",(model_version_id,json.dumps({'training_run_id':training_run_id,'source':'s3_fixture_archive','feature_layer':'enabled','market_lookup':'batch'}))).fetchone()['id'];conn.commit()
+  eval_run=conn.execute("insert into internal.evaluation_runs(model_version_id,benchmark_type,status,started_at,metadata) values(%s,'WALK_FORWARD_OOS','RUNNING',now(),%s) returning id::text as id",(model_version_id,json.dumps({'training_run_id':training_run_id,'source':'s3_fixture_archive','feature_layer':'enabled','market_lookup':'db_plus_s3_archive'}))).fetchone()['id'];conn.commit()
   try:
    for fd,(train,test,cutoff) in usable:
     features={m.match_id:all_features[m.match_id] for m in test if m.match_id in all_features};preds=run_fold(train,test,cutoff,features=features);emp=empirical_probs(train);covered=sum(bool(features.get(m.match_id) and features[m.match_id].values) for m in test);feature_cov.append(covered);fold_scores=[]

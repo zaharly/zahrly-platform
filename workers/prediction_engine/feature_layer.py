@@ -24,8 +24,12 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(timezone.utc)
 
 
+def _key(value) -> str:
+    return str(value)
+
+
 def _point_for_team(match, team_id: str) -> tuple[float, float, float, float, float, float, float, float, float, str]:
-    home = match.home_team_id == team_id
+    home = _key(match.home_team_id) == team_id
     gf = float(match.home_goals if home else match.away_goals)
     ga = float(match.away_goals if home else match.home_goals)
     if gf > ga:
@@ -44,11 +48,12 @@ def _point_for_team(match, team_id: str) -> tuple[float, float, float, float, fl
 
 
 def _history_index(matches: Iterable) -> dict[str, tuple[list[datetime], list[tuple]]]:
-    ordered = sorted(matches, key=lambda m: (_utc(m.played_at), str(m.match_id)))
+    ordered = sorted(matches, key=lambda m: (_utc(m.played_at), _key(m.match_id)))
     by_team: dict[str, list[tuple]] = {}
     for match in ordered:
         played = _utc(match.played_at)
-        for team_id in (match.home_team_id, match.away_team_id):
+        for raw_team_id in (match.home_team_id, match.away_team_id):
+            team_id = _key(raw_team_id)
             gf, ga, points, win, draw, loss, clean, failed, goal_diff, venue = _point_for_team(match, team_id)
             by_team.setdefault(team_id, []).append((played, gf, ga, points, win, draw, loss, clean, failed, goal_diff, venue))
     return {
@@ -70,7 +75,7 @@ def _aggregate(prefix: str, rows: list[tuple]) -> dict[str, float]:
     clean = sum(r[7] for r in rows) / n
     failed = sum(r[8] for r in rows) / n
     diff = sum(r[9] for r in rows) / n
-    out = {
+    return {
         f"{prefix}.avg_goals_for": gf,
         f"{prefix}.avg_goals_against": ga,
         f"{prefix}.avg_goal_diff": diff,
@@ -82,7 +87,6 @@ def _aggregate(prefix: str, rows: list[tuple]) -> dict[str, float]:
         f"{prefix}.failed_to_score_rate": failed,
         f"{prefix}.matches": n,
     }
-    return out
 
 
 def build_feature_index(conn, target_matches, latest_target=None):
@@ -90,15 +94,23 @@ def build_feature_index(conn, target_matches, latest_target=None):
     if not targets:
         return {}
 
-    all_matches = load_settled_matches(conn, as_of=max(_utc(m.played_at) for m in targets))
+    latest_kickoff = max(_utc(m.played_at) for m in targets)
+    all_matches = load_settled_matches(conn, as_of=latest_kickoff)
     index = _history_index(all_matches)
     output: dict[str, FeatureSnapshot] = {}
+    target_team_ids = {_key(team_id) for m in targets for team_id in (m.home_team_id, m.away_team_id)}
+    indexed_team_ids = set(index)
+    team_overlap = len(target_team_ids & indexed_team_ids)
+    covered_targets = 0
+    home_covered = 0
+    away_covered = 0
 
     for match in targets:
         kickoff = _utc(match.played_at)
         values: dict[str, float] = {}
         sources: set[str] = set()
-        for side, team_id in (("home", match.home_team_id), ("away", match.away_team_id)):
+        for side, raw_team_id in (("home", match.home_team_id), ("away", match.away_team_id)):
+            team_id = _key(raw_team_id)
             entry = index.get(team_id)
             if not entry:
                 continue
@@ -108,22 +120,44 @@ def build_feature_index(conn, target_matches, latest_target=None):
             if not prior:
                 continue
             values.update(_aggregate(f"{side}.last5", prior))
-            venue = "home" if side == "home" else "away"
-            venue_rows = [row for row in prior if row[10] == venue]
-            values.update(_aggregate(f"{side}.{venue}.last5", venue_rows))
+            venue_rows = [row for row in prior if row[10] == side]
+            values.update(_aggregate(f"{side}.{side}.last5", venue_rows))
             rest_days = (kickoff - prior[-1][0]).total_seconds() / 86400.0
             values[f"{side}.rest_days"] = max(0.0, rest_days)
             sources.add("canonical_fixtures")
+            if side == "home":
+                home_covered += 1
+            else:
+                away_covered += 1
 
-        output[match.match_id] = FeatureSnapshot(
+        if values:
+            covered_targets += 1
+        output[_key(match.match_id)] = FeatureSnapshot(
             values=values,
             available={key: True for key in values},
             sources=tuple(sorted(sources)),
         )
 
+    print(
+        {
+            "feature_layer_diagnostics": {
+                "target_matches": len(targets),
+                "settled_history_matches": len(all_matches),
+                "target_team_ids": len(target_team_ids),
+                "indexed_team_ids": len(indexed_team_ids),
+                "team_id_overlap": team_overlap,
+                "covered_target_matches": covered_targets,
+                "home_covered": home_covered,
+                "away_covered": away_covered,
+                "coverage": covered_targets / len(targets) if targets else 0.0,
+            }
+        },
+        flush=True,
+    )
     return output
 
 
 def build_feature_index_for_matches(conn, matches, cutoff):
-    selected = [m for m in matches if _utc(m.played_at) >= _utc(cutoff)]
+    cutoff = _utc(cutoff)
+    selected = [m for m in matches if _utc(m.played_at) >= cutoff]
     return build_feature_index(conn, selected, cutoff)

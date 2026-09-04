@@ -3,8 +3,6 @@ name: Prediction Training - S3 Archive OOS
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # This workflow is intentionally present on this branch so branch pushes can execute it.
-# Archive decoder probes are fail-safe so plain JSON is never mistaken for compressed data.
-# Recovery also scans the full season fixture namespace when the catalog object is metadata-only.
 on:
   workflow_dispatch:
     inputs:
@@ -103,7 +101,7 @@ jobs:
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
-        run: python -m training.archive_oos.run_historical_training_with_s3_fallback
+        run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints
         if: success()
         run: python -m workers.prediction_engine.rating_checkpoints

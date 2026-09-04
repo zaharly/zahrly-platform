@@ -96,11 +96,23 @@ def _load_payload_candidates(client, bucket, key, expected_checksum):
         return current, current_rows, "CURRENT"
 
     try:
-        versions = client.list_object_versions(Bucket=bucket, Key=key).get("Versions", [])
+        paginator = client.get_paginator("list_object_versions")
+        versions = []
+        for page in paginator.paginate(Bucket=bucket, Prefix=key, MaxKeys=1000):
+            versions.extend(
+                version for version in page.get("Versions", [])
+                if version.get("Key") == key
+            )
     except Exception as exc:
-        raise RuntimeError(f"historical archive object is metadata-only and S3 version recovery is unavailable:{key}:{type(exc).__name__}") from exc
+        raise RuntimeError(
+            f"historical archive object is metadata-only and S3 version recovery is unavailable:{key}:{type(exc).__name__}"
+        ) from exc
 
-    for version in sorted(versions, key=lambda item: (item.get("LastModified") or datetime.min), reverse=True):
+    for version in sorted(
+        versions,
+        key=lambda item: (item.get("LastModified") or datetime.min.replace(tzinfo=timezone.utc)),
+        reverse=True,
+    ):
         version_id = version.get("VersionId")
         if not version_id or version.get("IsLatest"):
             continue

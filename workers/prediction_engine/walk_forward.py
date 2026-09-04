@@ -109,10 +109,11 @@ def _feature_factor(match, features, side):
 def _apply_class_conditional_calibration(prediction: Prediction, params: tuple[float, float, float, float, float, float]) -> Prediction:
     """Calibrate the reported top-label probability conditioned on its class.
 
-    This directly matches the gate's top-label ECE definition: calibration is
-    conditioned on whether HOME, DRAW or AWAY is the predicted class. The argmax
-    class is never changed and the non-top probabilities retain their original
-    relative proportions. Parameters are learned only from historical OOF pairs.
+    The fitted parameters are one-vs-rest class calibrators learned from every
+    historical OOF probability for the corresponding class, not only rows where
+    that class was top-1. At application time only the reported top class is
+    transformed, which directly targets top-label ECE while preserving argmax and
+    the relative proportions of the non-top classes.
     """
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
     top = max(range(3), key=lambda i: raw[i])
@@ -121,7 +122,6 @@ def _apply_class_conditional_calibration(prediction: Prediction, params: tuple[f
     b = params[2 * top + 1]
     z = a + b * log(c / (1.0 - c))
     calibrated = 1.0 / (1.0 + exp(-z))
-    # Keep the predicted class unchanged and keep all probabilities on the simplex.
     other_max = max(raw[i] for i in range(3) if i != top)
     calibrated = min(1.0 - 1e-12, max(other_max + 1e-9, calibrated))
     remainder = 1.0 - calibrated
@@ -141,7 +141,6 @@ def _apply_calibration(prediction: Prediction, calibration) -> Prediction:
         if len(calibration) == 6:
             return _apply_class_conditional_calibration(prediction, calibration)
         if len(calibration) == 2:
-            # Backward compatibility for archived runs; new fitting never emits this form.
             a, b = calibration
             raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
             top = max(range(3), key=lambda i: raw[i])
@@ -203,21 +202,22 @@ def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[st
 
 
 def _fit_platt_for_top_class(predictions: Sequence[Prediction], outcomes: Sequence[str], top_class: int, min_n: int = 50):
+    """Fit a one-vs-rest Platt calibrator using every historical probability for the class.
+
+    Using all p(class) observations fixes the structural DRAW=0 problem of the
+    previous top-1-only estimator. A class does not need to be the historical
+    top prediction to contribute a valid binary target (y == class).
+    """
     rows = []
     labels = []
     for p, y in zip(predictions, outcomes):
         raw = (p.p_home, p.p_draw, p.p_away)
-        top = max(range(3), key=lambda i: raw[i])
-        if top != top_class:
-            continue
-        c = min(1.0 - 1e-12, max(1e-12, raw[top]))
+        c = min(1.0 - 1e-12, max(1e-12, raw[top_class]))
         rows.append(log(c / (1.0 - c)))
-        labels.append(1.0 if y == ('H', 'D', 'A')[top] else 0.0)
+        labels.append(1.0 if y == ('H', 'D', 'A')[top_class] else 0.0)
     if len(rows) < min_n:
         return 0.0, 1.0, len(rows)
 
-    # Deterministic regularized Newton fit. The target is top-label correctness,
-    # exactly the quantity used by the ECE gate.
     a = 0.0
     b = 1.0
     for _ in range(20):
@@ -233,7 +233,6 @@ def _fit_platt_for_top_class(predictions: Sequence[Prediction], outcomes: Sequen
             h_aa += w
             h_ab += w * x
             h_bb += w * x * x
-        # Ridge toward identity; intercept is shrunk to 0 and slope to 1.
         lam = 0.10
         g_a += lam * a
         g_b += lam * (b - 1.0)
@@ -254,19 +253,17 @@ def _fit_platt_for_top_class(predictions: Sequence[Prediction], outcomes: Sequen
 
 
 def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
-    """Fit class-conditional top-label calibration on historical OOF data.
+    """Fit leakage-safe class-conditional top-label calibration.
 
-    The gate measures top-label ECE. Therefore calibration is conditioned on the
-    predicted class (HOME/DRAW/AWAY) instead of mixing all three classes in one
-    confidence curve. A chronological holdout is used only for model selection.
-    The final calibrator is selected only if it does not worsen Brier, LogLoss or
-    RPS on that holdout beyond small numerical guardrails. No OOS target is used.
+    Each class calibrator is trained from all historical OOF p(class) values against
+    the one-vs-rest outcome. Model selection is chronological and guarded against
+    worsening Brier, LogLoss or RPS. No OOS target is used.
     """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
     n = len(predictions)
     if n < 120:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": n, "method": "class_conditional_top_label"}
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": n, "method": "class_conditional_one_vs_rest"}
 
     split = max(80, int(n * 0.75))
     split = min(split, n - 40)
@@ -284,11 +281,8 @@ def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
     fitted = tuple(fitted)
     base = _calibration_scores(valid_predictions, valid_outcomes, identity)
 
-    # Shrink each class-specific fit toward identity. Selection is entirely on the
-    # later chronological validation slice. This avoids the previous failure mode
-    # where a single global curve averaged incompatible HOME/DRAW/AWAY calibration.
     candidates = [identity]
-    for alpha in (0.15, 0.25, 0.40, 0.55, 0.70, 0.85, 1.0):
+    for alpha in (0.10, 0.15, 0.25, 0.40, 0.55, 0.70, 0.85, 1.0):
         candidates.append(tuple(
             fitted[j] * alpha if j % 2 == 0 else 1.0 + (fitted[j] - 1.0) * alpha
             for j in range(6)
@@ -311,7 +305,7 @@ def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
         "fit_n": len(fit_predictions),
         "validation_n": len(valid_predictions),
         "parameters": [round(float(x), 8) for x in chosen],
-        "top_class_counts": {"H": counts[0], "D": counts[1], "A": counts[2]},
+        "class_calibration_counts": {"H": counts[0], "D": counts[1], "A": counts[2]},
         "brier": valid_scores[0],
         "log_loss": valid_scores[1],
         "rps": valid_scores[2],
@@ -320,9 +314,9 @@ def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
         "fit_brier": fit_scores[0],
         "fit_log_loss": fit_scores[1],
         "fit_rps": fit_scores[2],
-        "method": "class_conditional_top_label",
+        "method": "class_conditional_one_vs_rest",
         "selection": "chronological_validation_guarded",
-        "target": "top_label_correctness",
+        "target": "one_vs_rest_class_correctness",
         "argmax_preserved": True,
         "synthetic_data": False,
         "random_sampling": False,

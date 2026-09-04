@@ -151,12 +151,11 @@ def _historical_calibration_pairs(train, features):
 
     history = []
     pairs = []
-    for m in ordered[CALIBRATION_MIN_HISTORY:]:
+    for m in ordered:
         if len(history) < CALIBRATION_MIN_HISTORY:
             history.append(m)
             continue
         cutoff = m.played_at
-        # Never allow a same-timestamp historical match into the training side.
         eligible_history = [h for h in history if h.played_at < cutoff]
         if len(eligible_history) < CALIBRATION_MIN_HISTORY:
             history.append(m)
@@ -196,12 +195,12 @@ def main(training_run_id=None):
         usable = [(fd, w) for fd, w in zip(folds, wf) if w[0] and w[1]]
         all_oos = [m for _, (_, test, _) in usable for m in test]
 
-        # Build calibration targets from all historical training rows, not merely the
-        # last 30%. This gives the calibrator hundreds of genuine chronological OOF
-        # observations while keeping every target strictly after its training history.
+        # Build calibration targets from all historical training rows. The pair builder
+        # performs the 30-match warmup itself, so the first historical rows are retained
+        # as legitimate model history instead of being discarded twice.
         calibration_targets = []
         for _, (train, _, _) in usable:
-            calibration_targets.extend(train[CALIBRATION_MIN_HISTORY:])
+            calibration_targets.extend(train)
         feature_targets = all_oos + calibration_targets
         all_features = build_feature_index(
             conn,
@@ -271,7 +270,7 @@ def main(training_run_id=None):
                             "own_calibration_n": len(current_pairs),
                             "pooled_prior_n": prior_n,
                             "calibration_method": "expanding_chronological_ooo",
-                            "target_max_timestamp": max((m.played_at for m in train[CALIBRATION_MIN_HISTORY:]), default=None).isoformat() if train[CALIBRATION_MIN_HISTORY:] else None,
+                            "target_max_timestamp": max((m.played_at for m in train), default=None).isoformat() if train else None,
                         }
                     )
 

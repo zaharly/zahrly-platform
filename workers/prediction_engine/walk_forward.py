@@ -106,11 +106,38 @@ def _feature_factor(match, features, side):
     return min(1.15, max(0.85, factor))
 
 
-def _temperature_probs(prediction: Prediction, temperature: float) -> Prediction:
-    if temperature <= 0:
+def _confidence_calibration(prediction: Prediction, params: tuple[float, float]) -> Prediction:
+    """Calibrate only top-class confidence; preserve class ranking and odds shape."""
+    a, b = params
+    raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
+    total = sum(raw)
+    raw = [x / total for x in raw]
+    top = max(range(3), key=lambda i: raw[i])
+    confidence = min(1.0 - 1e-12, max(1e-12, raw[top]))
+    logit = log(confidence / (1.0 - confidence))
+    calibrated = 1.0 / (1.0 + exp(-(a + b * logit)))
+    second = max(raw[i] for i in range(3) if i != top)
+    calibrated = max(calibrated, second + 1e-9)
+    calibrated = min(1.0 - 1e-12, calibrated)
+    remainder = 1.0 - calibrated
+    other_sum = sum(raw[i] for i in range(3) if i != top)
+    out = [0.0, 0.0, 0.0]
+    out[top] = calibrated
+    for i in range(3):
+        if i != top:
+            out[i] = remainder * raw[i] / max(other_sum, 1e-15)
+    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, out[0], out[1], out[2], prediction.lambda_home, prediction.lambda_away)
+
+
+def _apply_calibration(prediction: Prediction, calibration) -> Prediction:
+    if calibration is None or calibration == 1.0:
+        return prediction
+    if isinstance(calibration, tuple):
+        return _confidence_calibration(prediction, calibration)
+    if calibration <= 0:
         raise ValueError("temperature must be positive")
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
-    logits = [log(x) / temperature for x in raw]
+    logits = [log(x) / calibration for x in raw]
     pivot = max(logits)
     weights = [exp(x - pivot) for x in logits]
     total = sum(weights)
@@ -118,11 +145,15 @@ def _temperature_probs(prediction: Prediction, temperature: float) -> Prediction
     return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, p[0], p[1], p[2], prediction.lambda_home, prediction.lambda_away)
 
 
-def _calibration_ece(predictions: Sequence[Prediction], outcomes: Sequence[str], temperature: float) -> float:
+def _calibration_probs(prediction: Prediction, calibration) -> tuple[float, float, float]:
+    q = _apply_calibration(prediction, calibration)
+    return q.p_home, q.p_draw, q.p_away
+
+
+def _calibration_ece(predictions: Sequence[Prediction], outcomes: Sequence[str], calibration) -> float:
     bins = [{'n': 0, 'confidence': 0.0, 'correct': 0.0} for _ in range(10)]
     for p, y in zip(predictions, outcomes):
-        q = _temperature_probs(p, temperature)
-        probs = (q.p_home, q.p_draw, q.p_away)
+        probs = _calibration_probs(p, calibration)
         confidence = max(probs)
         predicted = ('H', 'D', 'A')[max(range(3), key=lambda i: probs[i])]
         b = bins[min(9, int(confidence * 10.0))]
@@ -133,68 +164,106 @@ def _calibration_ece(predictions: Sequence[Prediction], outcomes: Sequence[str],
     return sum((b['n'] / n) * abs((b['correct'] - b['confidence']) / b['n']) for b in bins if b['n'])
 
 
-def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[str], temperature: float) -> tuple[float, float, float, float]:
+def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[str], calibration) -> tuple[float, float, float, float]:
     brier = 0.0
     log_loss = 0.0
     rps = 0.0
     for p, y in zip(predictions, outcomes):
-        q = _temperature_probs(p, temperature)
-        probs = (q.p_home, q.p_draw, q.p_away)
+        probs = _calibration_probs(p, calibration)
         target = {'H': (1.0, 0.0, 0.0), 'D': (0.0, 1.0, 0.0), 'A': (0.0, 0.0, 1.0)}[y]
         idx = {'H': 0, 'D': 1, 'A': 2}[y]
         brier += sum((a - z) ** 2 for a, z in zip(probs, target))
         log_loss -= log(max(1e-15, probs[idx]))
         rps += ((probs[0] - target[0]) ** 2 + (probs[0] + probs[1] - target[0] - target[1]) ** 2) / 2.0
     n = len(predictions)
-    return brier / n, log_loss / n, rps / n, _calibration_ece(predictions, outcomes, temperature)
+    return brier / n, log_loss / n, rps / n, _calibration_ece(predictions, outcomes, calibration)
 
 
-def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]) -> tuple[float, dict]:
-    """Fit scalar temperature on chronological calibration data, selecting ECE only
-    inside a proper-score-preserving envelope around the original NLL solution."""
+def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
+    """Fit a low-variance confidence calibrator on chronological calibration data.
+
+    The transform has two parameters but never changes the winning class. Candidate
+    selection is based on calibration ECE, with strict guards against degrading the
+    uncalibrated Brier/LogLoss/RPS by more than tiny absolute tolerances. The OOS set
+    is never used to fit or select the calibration parameters.
+    """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
-    if len(predictions) < 20:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "method": "temperature_ece_guarded"}
+    if len(predictions) < 40:
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "method": "confidence_logistic_guarded"}
 
-    candidates = [0.20 + i * 0.025 for i in range(161)]
-    scored = [(t, *_calibration_scores(predictions, outcomes, t)) for t in candidates]
-    baseline = next(row for row in scored if abs(row[0] - 1.0) < 1e-12)
-    nll_best = min(scored, key=lambda row: (row[2], row[0]))
+    def pava(points):
+        blocks = []
+        for x, y, w in points:
+            blocks.append([x, y, w])
+            while len(blocks) >= 2 and blocks[-2][1] > blocks[-1][1]:
+                a, c = blocks[-2], blocks[-1]
+                wsum = a[2] + c[2]
+                blocks[-2] = [a[0], (a[1] * a[2] + c[1] * c[2]) / wsum, wsum]
+                blocks.pop()
+        return blocks
 
-    # Preserve the successful baseline's probabilistic behavior: ECE is allowed
-    # to improve only inside a tight envelope around the uncalibrated scores.
-    allowed_brier = baseline[1] + max(0.005, 0.01 * abs(baseline[1]))
-    allowed_nll = baseline[2] + 0.01
-    allowed_rps = baseline[3] + 0.005
-    eligible = [row for row in scored if row[1] <= allowed_brier and row[2] <= allowed_nll and row[3] <= allowed_rps]
-    ece_best = min(eligible, key=lambda row: (row[4], row[2], row[1])) if eligible else nll_best
+    # Fit a monotone target on coarse confidence quantiles, shrunk toward 0.5.
+    rows = []
+    for p, y in zip(predictions, outcomes):
+        probs = (p.p_home, p.p_draw, p.p_away)
+        c = max(probs)
+        pred = ('H', 'D', 'A')[max(range(3), key=lambda i: probs[i])]
+        rows.append((c, float(pred == y)))
+    rows.sort()
+    q = max(4, min(8, len(rows) // 30))
+    bins = []
+    for i in range(q):
+        chunk = rows[i * len(rows) // q:(i + 1) * len(rows) // q]
+        if not chunk:
+            continue
+        mean_c = sum(x for x, _ in chunk) / len(chunk)
+        acc = sum(y for _, y in chunk)
+        # Strong shrinkage is deliberate because the historical calibration pool is small.
+        shrunk = (acc + 25.0 * 0.5) / (len(chunk) + 25.0)
+        bins.append((mean_c, shrunk, len(chunk)))
+    blocks = pava(bins)
 
-    # Require a meaningful ECE improvement before moving away from the original
-    # NLL-optimal temperature; otherwise keep the proven NLL choice.
-    if ece_best[4] < nll_best[4] - 0.002:
-        chosen = ece_best
-        selection = "ECE_WITH_PROPER_SCORE_GUARDRAILS"
-    else:
-        chosen = nll_best
-        selection = "NLL_BASELINE"
+    def target(c):
+        if not blocks:
+            return c
+        if c <= blocks[0][0]:
+            return blocks[0][1]
+        if c >= blocks[-1][0]:
+            return blocks[-1][1]
+        for left, right in zip(blocks, blocks[1:]):
+            if left[0] <= c <= right[0]:
+                span = max(right[0] - left[0], 1e-12)
+                return left[1] + (right[1] - left[1]) * (c - left[0]) / span
+        return c
 
-    t, brier, nll, rps, ece_value = chosen
-    return t, {
-        "status": "FITTED",
-        "n": len(predictions),
-        "temperature": t,
-        "brier": brier,
-        "log_loss": nll,
-        "rps": rps,
-        "ece": ece_value,
-        "nll_opt_temperature": nll_best[0],
-        "nll_opt_ece": nll_best[4],
-        "ece_opt_temperature": ece_best[0],
-        "ece_opt_ece": ece_best[4],
-        "selection": selection,
-        "method": "temperature_ece_guarded",
-    }
+    # Convert the monotone mapping to a logistic two-parameter approximation.
+    best = (0.0, 1.0)
+    best_loss = float("inf")
+    for a_i in range(-12, 13):
+        a = a_i / 20.0
+        for b_i in range(10, 31):
+            b = b_i / 10.0
+            loss = 0.0
+            for c, y in rows:
+                cc = min(1.0 - 1e-9, max(1e-9, c))
+                z = a + b * log(cc / (1.0 - cc))
+                mapped = 1.0 / (1.0 + exp(-z))
+                loss += (mapped - target(c)) ** 2
+            if loss < best_loss:
+                best_loss = loss
+                best = (a, b)
+
+    identity = (0.0, 1.0)
+    base = _calibration_scores(predictions, outcomes, identity)
+    candidates = [identity, best]
+    # Include a conservative interpolation toward the fitted mapping.
+    for alpha in (0.25, 0.50, 0.75):
+        candidates.append((best[0] * alpha, 1.0 + (best[1] - 1.0) * alpha))
+    eligible = [c for c in candidates if _calibration_scores(predictions, outcomes, c)[0] <= base[0] + 0.003 and _calibration_scores(predictions, outcomes, c)[1] <= base[1] + 0.006 and _calibration_scores(predictions, outcomes, c)[2] <= base[2] + 0.003]
+    chosen = min(eligible, key=lambda c: (_calibration_scores(predictions, outcomes, c)[3], _calibration_scores(predictions, outcomes, c)[1])) if eligible else identity
+    scores = _calibration_scores(predictions, outcomes, chosen)
+    return chosen, {"status": "FITTED", "n": len(predictions), "parameters": [round(float(x), 8) for x in chosen], "brier": scores[0], "log_loss": scores[1], "rps": scores[2], "ece": scores[3], "base_ece": base[3], "method": "confidence_logistic_guarded"}
 
 
 def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, team_rates=None):
@@ -243,7 +312,7 @@ def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPo
     out = []
     for m in test:
         raw = predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy, features, team_rates)
-        out.append(_temperature_probs(raw, temperature) if temperature != 1.0 else raw)
+        out.append(_apply_calibration(raw, temperature))
         h = ratings.get(m.home_team_id, EloState(elo_policy.initial_rating))
         a = ratings.get(m.away_team_id, EloState(elo_policy.initial_rating))
         ratings[m.home_team_id], ratings[m.away_team_id], _ = update_elo(h, a, m.home_goals, m.away_goals, elo_policy)

@@ -11,6 +11,16 @@ from collections.abc import Iterator
 from io import BytesIO
 from typing import Any
 
+try:
+    import lz4.frame as lz4_frame
+except ImportError:
+    lz4_frame = None
+
+try:
+    import zstandard as zstd
+except ImportError:
+    zstd = None
+
 _ID_KEYS = ("fixture_id", "match_id", "game_id", "fixtureId", "matchId", "gameId", "fixtureid", "matchid", "gameid", "event_id", "eventId", "id")
 _HOME_KEYS = ("home_team_id", "home_id", "homeTeamId", "homeId", "match_hometeam_id", "matchHomeTeamId", "localteam_id", "home_team", "team_home_id")
 _AWAY_KEYS = ("away_team_id", "away_id", "awayTeamId", "awayId", "match_awayteam_id", "matchAwayTeamId", "visitorteam_id", "away_team", "team_away_id")
@@ -21,46 +31,93 @@ _HOME_OBJECT_KEYS = ("home", "homeTeam", "home_team", "localTeam", "localteam")
 _AWAY_OBJECT_KEYS = ("away", "awayTeam", "away_team", "visitorTeam", "visitorteam")
 
 
-def _decode_bytes(raw: bytes) -> bytes | None:
-    candidates = [raw]
-    if raw[:2] == b"\x1f\x8b":
+def _decompress_candidates(raw: bytes) -> list[bytes]:
+    out = [raw]
+    attempts = [
+        ("gzip", lambda: gzip.decompress(raw)),
+        ("zlib", lambda: zlib.decompress(raw)),
+        ("deflate", lambda: zlib.decompress(raw, -15)),
+        ("gzip-zlib", lambda: zlib.decompress(raw, 31)),
+        ("bz2", lambda: bz2.decompress(raw)),
+        ("lzma", lambda: lzma.decompress(raw)),
+    ]
+    if zstd is not None:
+        attempts.append(("zstd", lambda: zstd.ZstdDecompressor().decompress(raw)))
+    if lz4_frame is not None:
+        attempts.append(("lz4", lambda: lz4_frame.decompress(raw)))
+    for _, fn in attempts:
         try:
-            candidates.insert(0, gzip.decompress(raw))
-        except (OSError, EOFError, gzip.BadGzipFile):
-            pass
-    for fn in (zlib.decompress, bz2.decompress, lzma.decompress):
-        try:
-            candidates.insert(0, fn(raw))
-        except (OSError, EOFError, zlib.error, lzma.LZMAError):
-            pass
+            decoded = fn()
+        except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError):
+            continue
+        if decoded and decoded not in out:
+            out.insert(0, decoded)
     try:
         with zipfile.ZipFile(BytesIO(raw)) as zf:
             names = [name for name in zf.namelist() if not name.endswith("/")]
-            if names:
-                candidates.insert(0, zf.read(names[0]))
+            for name in names:
+                decoded = zf.read(name)
+                if decoded and decoded not in out:
+                    out.insert(0, decoded)
     except (zipfile.BadZipFile, OSError, IndexError):
         pass
-    for data in candidates:
-        if data is not None:
-            return data
+    return out
+
+
+def _decode_bytes(raw: bytes) -> bytes | None:
+    for candidate in _decompress_candidates(raw):
+        if candidate:
+            return candidate
+    return None
+
+
+def _decode_text_payload(raw: bytes) -> Any:
+    for enc in ("utf-8-sig", "utf-16", "utf-16-le", "utf-16-be"):
+        try:
+            text = raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        stripped = text.lstrip("\ufeff").strip()
+        if not stripped:
+            continue
+        try:
+            return json.loads(stripped)
+        except (TypeError, ValueError):
+            pass
+        lines = [x.strip() for x in stripped.splitlines() if x.strip()]
+        if len(lines) > 1:
+            try:
+                return [json.loads(line.lstrip("\ufeff")) for line in lines]
+            except (TypeError, ValueError):
+                pass
+        return text
     return None
 
 
 def _decode_json_container(value: Any) -> Any:
     cur = value
-    for _ in range(10):
+    seen: set[bytes] = set()
+    for _ in range(12):
         if isinstance(cur, bytes):
-            raw = _decode_bytes(cur)
-            if raw is None:
+            if cur in seen:
                 return cur
-            for enc in ("utf-8-sig", "utf-16", "latin-1"):
-                try:
-                    cur = raw.decode(enc)
+            seen.add(cur)
+            candidates = _decompress_candidates(cur)
+            for raw in candidates:
+                parsed = _decode_text_payload(raw)
+                if parsed is not None and parsed is not raw:
+                    cur = parsed
                     break
-                except UnicodeDecodeError:
-                    continue
             else:
-                return cur
+                # Handle base64 stored directly as bytes, including base64-wrapped compressed payloads.
+                try:
+                    text = cur.decode("ascii").strip()
+                    decoded = base64.b64decode(text, validate=True)
+                except (UnicodeDecodeError, ValueError, base64.binascii.Error):
+                    return cur
+                if not decoded or decoded == cur:
+                    return cur
+                cur = decoded
             continue
         if not isinstance(cur, str):
             return cur
@@ -77,15 +134,13 @@ def _decode_json_container(value: Any) -> Any:
                 return [json.loads(line.lstrip("\ufeff")) for line in lines]
             except (TypeError, ValueError):
                 pass
-        if len(text) >= 8:
-            try:
-                decoded = base64.b64decode(text, validate=False)
-                if decoded and decoded != text.encode():
-                    cur = decoded
-                    continue
-            except (ValueError, base64.binascii.Error):
-                pass
-        return cur
+        try:
+            decoded = base64.b64decode(text, validate=True)
+        except (ValueError, base64.binascii.Error):
+            return cur
+        if not decoded or decoded == text.encode():
+            return cur
+        cur = decoded
     return cur
 
 

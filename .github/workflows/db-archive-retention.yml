@@ -2,6 +2,11 @@ name: Database Archive Retention to S3
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'ops/database_archive_retention.py'
+      - '.github/workflows/db-archive-retention.yml'
   schedule:
     - cron: '20 3 * * *'
 

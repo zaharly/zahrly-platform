@@ -59,14 +59,6 @@ def _walk(v:Any)->Iterable[dict[str,Any]]:
         for k in ("response","rows","results","data","payload","body","content","items"):
             if k in v:yield from _walk(v[k])
 
-def _s3():
-    return boto3.client("s3",region_name=os.environ.get("S3_REGION","eu-north-1"),aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],config=Config(retries={"max_attempts":5,"mode":"standard"}))
-
-def _uri(uri):
-    p=urlparse(uri)
-    if p.scheme!="s3" or not p.netloc or not p.path.lstrip("/"): raise ValueError(f"invalid archive uri:{uri}")
-    return p.netloc,p.path.lstrip("/")
-
 def _fixture_id(o):
     f=o.get("fixture")
     if isinstance(f,dict) and f.get("id") is not None:return str(f["id"])
@@ -145,7 +137,8 @@ def build_feature_index(conn,target_matches,latest_target=None):
         for o in _walk(decoded):
             fid=_fixture_id(o)
             if not fid or fid not in matches:continue
-            played,_,_=matches[fid]; tid=aliases.get(_team_id(o) or "")
+            played,_,_=matches[fid]; external_tid=_team_id(o); tid=aliases.get(str(external_tid)) if external_tid is not None else None
+            if tid is None and external_tid is not None:tid=f"api-football:{str(external_tid)}"
             if not tid:continue
             vals={}
             if dataset in {"fixture_statistics","fixture_players_statistics"}:

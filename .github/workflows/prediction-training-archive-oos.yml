@@ -3,6 +3,7 @@ name: Prediction Training - S3 Archive OOS
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # This workflow is intentionally present on this branch so branch pushes can execute it.
+# Gate fix verification run: preserve canonical archive -> training -> rating -> OOS -> gate path.
 on:
   workflow_dispatch:
     inputs:
@@ -101,13 +102,21 @@ jobs:
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive
+        env:
+          ARCHIVE_COMPLETE_SEASONS: '2008,2009,2010,2011'
         run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints
-        if: success()
+        env:
+          ARCHIVE_COMPLETE_SEASONS: '2008,2009,2010,2011'
+          PREDICTION_TRAINING_RUN_ID: ${{ env.PREDICTION_TRAINING_RUN_ID }}
         run: python -m workers.prediction_engine.rating_checkpoints
       - name: Build persisted OOS benchmark (Brier/ECE/RPS + market coverage)
-        if: success()
+        env:
+          ARCHIVE_COMPLETE_SEASONS: '2008,2009,2010,2011'
+          PREDICTION_TRAINING_RUN_ID: ${{ env.PREDICTION_TRAINING_RUN_ID }}
         run: python -m workers.prediction_engine.oos_benchmark
       - name: Evaluate promotion gates without activation
-        if: success()
+        env:
+          ARCHIVE_COMPLETE_SEASONS: '2008,2009,2010,2011'
+          PREDICTION_TRAINING_RUN_ID: ${{ env.PREDICTION_TRAINING_RUN_ID }}
         run: python -m workers.prediction_engine.benchmark_gate

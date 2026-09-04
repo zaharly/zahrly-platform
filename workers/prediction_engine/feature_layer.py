@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlparse
-import base64, gzip, hashlib, json, os
+import base64,gzip,hashlib,json,os
 import boto3
 from botocore.config import Config
 
@@ -13,63 +13,67 @@ STAT_ALIASES={"ball possession":"possession_pct","possession":"possession_pct","
 
 @dataclass(frozen=True)
 class FeatureSnapshot:
-    values: dict[str,float]=field(default_factory=dict)
-    available: dict[str,bool]=field(default_factory=dict)
-    sources: tuple[str,...]=()
-    def get(self,key:str,default:float|None=None): return self.values.get(key,default)
+    values:dict[str,float]=field(default_factory=dict)
+    available:dict[str,bool]=field(default_factory=dict)
+    sources:tuple[str,...]=()
+    def get(self,key:str,default:float|None=None):return self.values.get(key,default)
 
 def _utc(v):
     if v is None:return None
-    d=v if isinstance(v,datetime) else datetime.fromisoformat(str(v).replace("Z","+00:00"))
+    if isinstance(v,datetime):d=v
+    else:
+        text=str(v).strip()
+        if not text:return None
+        try:
+            number=float(text);d=datetime.fromtimestamp(number/(1000.0 if number>1e11 else 1.0),tz=timezone.utc)
+        except (ValueError,OverflowError):d=datetime.fromisoformat(text.replace("Z","+00:00"))
     return d.replace(tzinfo=timezone.utc) if d.tzinfo is None else d.astimezone(timezone.utc)
 
 def _decode_archive(value:Any)->Any:
-    current=value
-    for _ in range(6):
-        if isinstance(current,bytes):
-            raw=current
+    cur=value
+    for _ in range(8):
+        if isinstance(cur,bytes):
+            raw=cur
             if raw[:2]==b"\x1f\x8b":
                 try:raw=gzip.decompress(raw)
-                except (OSError,EOFError):return value
-            try:current=raw.decode('utf-8');continue
-            except UnicodeDecodeError:return value
-        if not isinstance(current,str):return current
-        text=current.strip()
-        if not text:return current
+                except (OSError,EOFError):return cur
+            try:cur=raw.decode("utf-8-sig");continue
+            except UnicodeDecodeError:return cur
+        if not isinstance(cur,str):return cur
+        text=cur.strip()
+        if not text:return cur
         try:return json.loads(text)
-        except (TypeError,ValueError):
-            if len(text)>=32 and len(text)%4==0:
-                try:decoded=base64.b64decode(text,validate=True)
-                except (ValueError,base64.binascii.Error):decoded=None
-                if decoded:
-                    current=decoded;continue
-            lines=[line.strip() for line in text.splitlines() if line.strip()]
-            parsed=[]
-            for line in lines:
-                try:item=json.loads(line)
-                except (TypeError,ValueError):parsed=[];break
-                parsed.append(item)
-            return parsed if parsed else current
-    return current
+        except (TypeError,ValueError):pass
+        lines=[x.strip().lstrip("\ufeff") for x in text.splitlines() if x.strip()]
+        if len(lines)>1:
+            try:return [json.loads(x) for x in lines]
+            except (TypeError,ValueError):pass
+        try:
+            decoded=base64.b64decode(text,validate=False)
+            if decoded and decoded!=text.encode():cur=decoded;continue
+        except (ValueError,base64.binascii.Error):pass
+        return cur
+    return cur
 
-def _fixture_id(o, inherited=None):
+def _fixture_id(o,inherited=None):
     f=o.get("fixture")
     if isinstance(f,dict) and f.get("id") is not None:return str(f["id"])
     for k in ("fixture_id","fixtureId","match_id","matchId"):
         if o.get(k) is not None:return str(o[k])
     return str(inherited) if inherited is not None else None
 
-def _walk(v:Any, inherited_fixture_id=None)->Iterable[dict[str,Any]]:
+def _walk(v:Any,inherited_fixture_id=None)->Iterable[dict[str,Any]]:
     if isinstance(v,list):
         for x in v:yield from _walk(x,inherited_fixture_id)
-    elif isinstance(v,dict):
-        own=_fixture_id(v,inherited_fixture_id)
-        if own is not None and not any(k in v for k in ("fixture","fixture_id","fixtureId","match_id","matchId")):
-            item=dict(v);item["__context_fixture_id"]=own;yield item
-        else:yield v
-        for x in v.values():yield from _walk(x,own)
+        return
+    if not isinstance(v,dict):return
+    own=_fixture_id(v,inherited_fixture_id);item=dict(v)
+    if own is not None:item["__context_fixture_id"]=own
+    yield item
+    for x in v.values():yield from _walk(x,own)
 
 def _team_id(o):
+    if not isinstance(o,dict):return None
     t=o.get("team")
     if isinstance(t,dict) and t.get("id") is not None:return str(t["id"])
     for k in ("team_id","teamId","match_hometeam_id","match_awayteam_id"):
@@ -79,6 +83,12 @@ def _team_id(o):
 def _number(v):
     if v is None or isinstance(v,bool):return None
     if isinstance(v,(int,float)):return float(v)
+    if isinstance(v,dict):
+        for k in ("total","value","current","percentage","percent","goals","score"):
+            if k in v:
+                n=_number(v[k])
+                if n is not None:return n
+        return None
     if isinstance(v,str):
         s=v.strip().replace("%","")
         if s in {"","-","null","None"}:return None
@@ -86,26 +96,32 @@ def _number(v):
         except ValueError:return None
     return None
 
-def _stats(o):
+def _stats(o)->Iterable[tuple[str|None,str,float]]:
     stats=o.get("statistics")
     if not isinstance(stats,list):return
     for item in stats:
         if not isinstance(item,dict):continue
-        key=STAT_ALIASES.get(str(item.get("type","")).strip().lower()); n=_number(item.get("value"))
-        if key and n is not None:yield key,n
+        team_value=item.get("team")
+        team_id=str(team_value.get("id")) if isinstance(team_value,dict) and team_value.get("id") is not None else _team_id(item) or _team_id(o)
+        nested=item.get("statistics")
+        if isinstance(nested,list):
+            for stat in nested:
+                if not isinstance(stat,dict):continue
+                key=STAT_ALIASES.get(str(stat.get("type","")).strip().lower());n=_number(stat.get("value"))
+                if key and n is not None:yield team_id,key,n
+        else:
+            key=STAT_ALIASES.get(str(item.get("type","")).strip().lower());n=_number(item.get("value"))
+            if key and n is not None:yield team_id,key,n
 
 def _events(o):
-    out={}; typ=str(o.get("type","")).lower(); detail=str(o.get("detail","")).lower()
-    if "card" in typ or "card" in detail:
-        if "red" in detail:out["red_cards"]=1.0
-        elif "yellow" in detail:out["yellow_cards"]=1.0
+    out={};typ=str(o.get("type","")).lower();detail=str(o.get("detail","")).lower()
+    if "card" in typ or "card" in detail:out["red_cards" if "red" in detail else "yellow_cards"]=1.0
     if "corner" in typ or "corner" in detail:out["corners"]=1.0
     if "goal" in typ:out["goals"]=1.0
     return out
 
 def _s3():
-    endpoint=os.environ.get("S3_ENDPOINT_URL") or None
-    return boto3.client("s3",region_name=os.environ.get("S3_REGION","eu-north-1"),endpoint_url=endpoint,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],config=Config(retries={"max_attempts":5,"mode":"standard"}))
+    return boto3.client("s3",region_name=os.environ.get("S3_REGION","eu-north-1"),endpoint_url=os.environ.get("S3_ENDPOINT_URL") or None,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],config=Config(retries={"max_attempts":5,"mode":"standard"}))
 
 def _uri(uri):
     p=urlparse(uri)
@@ -118,84 +134,76 @@ def _matches(conn):
 
 def _aliases(conn):
     with conn.cursor() as cur:
-        cur.execute("select external_team_id::text as external_team_id, team_id::text as team_id from public.team_aliases where provider='api-football'")
+        cur.execute("select external_team_id::text as external_team_id,team_id::text as team_id from public.team_aliases where provider='api-football'")
         return {r["external_team_id"]:r["team_id"] for r in cur.fetchall() if r["external_team_id"] and r["team_id"]}
 
 def _manifests(conn,latest):
     with conn.cursor() as cur:
-        cur.execute("""
-            select manifest_id::text as id,dataset_type,object_uri,checksum,date_end
-            from internal.archive_catalog
-            where provider='api-football'
-              and object_uri like 's3://%%'
-              and completeness_score>=0.0
-              and dataset_type=any(%s)
-              and (dataset_type=any(%s) or date_end is null or date_end<%s)
-            order by date_end nulls last,manifest_id
-        """,(list(HISTORICAL_DATASETS),list(DETAIL_DATASETS),latest))
+        cur.execute("select manifest_id::text as id,dataset_type,object_uri,checksum,date_end from internal.archive_catalog where provider='api-football' and object_uri like 's3://%%' and completeness_score>=0.0 and dataset_type=any(%s) and (dataset_type=any(%s) or date_end is null or date_end<%s) order by date_end nulls last,manifest_id",(list(HISTORICAL_DATASETS),list(DETAIL_DATASETS),latest))
         return cur.fetchall()
 
-def _observation_available_at(dataset:str,played:datetime,date_end:datetime|None)->datetime|None:
+def _observation_available_at(dataset,played,date_end):
     if dataset in DETAIL_DATASETS:return played
     return _utc(date_end) if date_end is not None else None
 
-def _feature_values(dataset,o):
-    vals={}
-    if dataset in {"fixture_statistics","fixture_players_statistics"}:
-        for k,v in _stats(o):vals[f"{dataset}.{k}"]=v
-    elif dataset=="fixture_events":
-        vals.update({f"{dataset}.{k}":v for k,v in _events(o).items()})
-    elif dataset=="lineups":
-        if isinstance(o.get("startXI"),list):vals["lineups.starting_xi"]=float(len(o["startXI"]))
-        if isinstance(o.get("substitutes"),list):vals["lineups.substitutes"]=float(len(o["substitutes"]))
-    else:
-        for k,v in o.items():
-            if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id"}:continue
-            n=_number(v)
-            if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
-    return vals
+def _tid(aliases,external):
+    if external is None:return None
+    return aliases.get(str(external),f"api-football:{str(external)}")
 
 def build_feature_index(conn,target_matches,latest_target=None):
     targets=list(target_matches)
     if not targets:return {}
     latest=_utc(latest_target) if latest_target else max(_utc(m.played_at) for m in targets)
-    matches=_matches(conn); aliases=_aliases(conn); team_history={}; fixture_history={}; s3=_s3()
+    matches=_matches(conn);aliases=_aliases(conn);history={};s3=_s3()
     for row in _manifests(conn,latest):
-        bucket,key=_uri(row["object_uri"]); raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
+        bucket,key=_uri(row["object_uri"]);raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest()!=row["checksum"]:raise RuntimeError(f"archive checksum mismatch:{row['id']}")
-        manifest_end=_utc(row["date_end"]) if row["date_end"] is not None else None; dataset=row["dataset_type"]
-        decoded=_decode_archive(raw)
+        dataset=row["dataset_type"];manifest_end=_utc(row["date_end"]);decoded=_decode_archive(raw)
         for o in _walk(decoded):
             fid=_fixture_id(o,o.get("__context_fixture_id"))
             if not fid or fid not in matches:continue
-            played,_,_=matches[fid]; available_at=_observation_available_at(dataset,played,manifest_end)
-            if available_at is None or available_at>=played:continue
-            vals=_feature_values(dataset,o)
-            if not vals:continue
-            if dataset in DETAIL_DATASETS:
-                fixture_history.setdefault(fid,[]).append((played,available_at,vals,dataset))
+            played,home_id,away_id=matches[fid];available_at=_observation_available_at(dataset,played,manifest_end)
+            if available_at is None:continue
+            def add(tid,vals):
+                if tid and vals:history.setdefault(tid,[]).append((played,available_at,vals,dataset))
+            if dataset in {"fixture_statistics","fixture_players_statistics"}:
+                for ext,key_name,n in _stats(o):add(_tid(aliases,ext),{f"{dataset}.{key_name}":n})
                 continue
-            external_tid=_team_id(o); tid=aliases.get(str(external_tid)) if external_tid is not None else None
-            if tid is None and external_tid is not None:tid=f"api-football:{str(external_tid)}"
-            if not tid:continue
-            team_history.setdefault(tid,[]).append((played,available_at,vals,dataset))
-    for rows in team_history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
-    for rows in fixture_history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
+            if dataset=="fixture_events":
+                add(_tid(aliases,_team_id(o)),{f"{dataset}.{k}":v for k,v in _events(o).items()})
+                continue
+            vals={}
+            if dataset=="lineups":
+                if isinstance(o.get("startXI"),list):vals["lineups.starting_xi"]=float(len(o["startXI"]))
+                if isinstance(o.get("substitutes"),list):vals["lineups.substitutes"]=float(len(o["substitutes"]))
+            else:
+                for k,v in o.items():
+                    if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id","fixture","teams","team"}:continue
+                    n=_number(v)
+                    if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
+            if not vals:continue
+            ext=_team_id(o)
+            if dataset=="lineups" and ext is None:
+                t=o.get("teams")
+                if isinstance(t,dict):
+                    for side in ("home","away"):
+                        team=t.get(side)
+                        if isinstance(team,dict):add(_tid(aliases,team.get("id")),vals)
+                continue
+            add(_tid(aliases,ext),vals)
+    for rows in history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
     out={}
     for m in targets:
-        kickoff=_utc(m.played_at); values={}; sources=set()
-        for played,available_at,vals,dataset in fixture_history.get(m.match_id,[]):
-            if played<kickoff and available_at<kickoff:
-                sources.add(dataset)
-                for k,v in vals.items():values[k]=values.get(k,0.0)+v
+        kickoff=_utc(m.played_at);values={};sources=set()
         for side,tid in (("home",m.home_team_id),("away",m.away_team_id)):
-            rows=[r for r in team_history.get(tid,[]) if r[0]<kickoff and r[1] is not None and r[1]<kickoff][-5:]
+            rows=[r for r in history.get(tid,[]) if r[0]<kickoff and r[1] is not None and r[1]<kickoff][-5:]
             grouped={}
             for _,_,vals,dataset in rows:
                 sources.add(dataset)
                 for k,v in vals.items():grouped.setdefault(k,[]).append(v)
             for k,vs in grouped.items():
-                values[f"{side}.last5.{k}.mean"]=sum(vs)/len(vs); values[f"{side}.last5.{k}.count"]=float(len(vs))
+                values[f"{side}.last5.{k}.mean"]=sum(vs)/len(vs)
+                values[f"{side}.last5.{k}.count"]=float(len(vs))
         out[m.match_id]=FeatureSnapshot(values,{k:True for k in values},tuple(sorted(sources)))
     return out
 

@@ -51,19 +51,24 @@ def _decode_archive(value:Any)->Any:
             return parsed if parsed else current
     return current
 
-def _walk(v:Any)->Iterable[dict[str,Any]]:
-    if isinstance(v,list):
-        for x in v:yield from _walk(x)
-    elif isinstance(v,dict):
-        yield v
-        for x in v.values():yield from _walk(x)
-
-def _fixture_id(o):
+def _fixture_id(o, inherited=None):
     f=o.get("fixture")
     if isinstance(f,dict) and f.get("id") is not None:return str(f["id"])
     for k in ("fixture_id","fixtureId","match_id","matchId"):
         if o.get(k) is not None:return str(o[k])
-    return None
+    return str(inherited) if inherited is not None else None
+
+def _walk(v:Any, inherited_fixture_id=None)->Iterable[dict[str,Any]]:
+    if isinstance(v,list):
+        for x in v:yield from _walk(x,inherited_fixture_id)
+    elif isinstance(v,dict):
+        own=_fixture_id(v,inherited_fixture_id)
+        # Copy only a tiny context scalar; never mutate provider payloads.
+        if own is not None and not any(k in v for k in ("fixture","fixture_id","fixtureId","match_id","matchId")):
+            item=dict(v);item["__context_fixture_id"]=own;yield item
+        else:
+            yield v
+        for x in v.values():yield from _walk(x,own)
 
 def _team_id(o):
     t=o.get("team")
@@ -137,7 +142,7 @@ def build_feature_index(conn,target_matches,latest_target=None):
         manifest_end=_utc(row["date_end"]) if row["date_end"] is not None else None; dataset=row["dataset_type"]
         decoded=_decode_archive(raw)
         for o in _walk(decoded):
-            fid=_fixture_id(o)
+            fid=_fixture_id(o,o.get("__context_fixture_id"))
             if not fid or fid not in matches:continue
             played,_,_=matches[fid]; external_tid=_team_id(o); tid=aliases.get(str(external_tid)) if external_tid is not None else None
             if tid is None and external_tid is not None:tid=f"api-football:{str(external_tid)}"
@@ -151,7 +156,7 @@ def build_feature_index(conn,target_matches,latest_target=None):
                 if isinstance(o.get("substitutes"),list):vals["lineups.substitutes"]=float(len(o["substitutes"]))
             else:
                 for k,v in o.items():
-                    if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id"}:continue
+                    if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id"}:continue
                     n=_number(v)
                     if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
             if vals:

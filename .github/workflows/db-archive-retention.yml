@@ -8,7 +8,7 @@ on:
       - 'ops/database_archive_retention.py'
       - '.github/workflows/db-archive-retention.yml'
   schedule:
-    - cron: '20 3 * * *'
+    - cron: '0 * * * *'
 
 permissions:
   contents: read
@@ -32,6 +32,7 @@ jobs:
       KEEP_OOS_RUNS: '3'
       KEEP_RATING_MODELS: '2'
       CRON_RETENTION_DAYS: '2'
+      CRON_RETENTION_HOURS: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v5

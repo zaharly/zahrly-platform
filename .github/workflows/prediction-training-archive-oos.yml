@@ -43,7 +43,6 @@ jobs:
       SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
       SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
       ARCHIVE_SEASONS: ${{ inputs.seasons || '' }}
       OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
       OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
@@ -61,7 +60,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for v in AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SUPABASE_DB_URL_RAW SUPABASE_SERVICE_ROLE_KEY S3_BUCKET API_FOOTBALL_KEY; do
+          for v in AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY SUPABASE_DB_URL_RAW SUPABASE_SERVICE_ROLE_KEY S3_BUCKET; do
             test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
           done
       - name: Verify AWS identity and archive bucket access
@@ -101,69 +100,6 @@ jobs:
           PY
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
-      - name: Rehydrate missing historical fixture payloads from canonical API
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import hashlib
-          import json
-          import os
-          import re
-          import time
-          from urllib.parse import quote
-          import boto3
-          import psycopg
-          import requests
-
-          db_url = os.environ['SUPABASE_DB_URL']
-          api_key = os.environ['API_FOOTBALL_KEY'].strip().replace('\r', '').replace('\n', '').replace('\\r', '').replace('\\n', '')
-          if not api_key:
-              raise SystemExit('API_FOOTBALL_KEY is empty after normalization')
-          s3 = boto3.client('s3', region_name=os.environ['S3_REGION'], aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY'])
-          headers = {'x-apisports-key': api_key, 'Accept': 'application/json'}
-
-          with psycopg.connect(db_url, connect_timeout=20) as conn:
-              rows = conn.execute("""
-                  select manifest_id::text, season, row_count, object_uri, checksum
-                  from internal.archive_catalog
-                  where provider='api-football' and dataset_type='fixtures' and season in (2008,2009,2010)
-                  order by season, object_uri
-              """).fetchall()
-          if len(rows) != 17:
-              raise SystemExit(f'expected 17 historical fixture manifests, got {len(rows)}')
-
-          prepared = []
-          for manifest_id, season, expected_rows, uri, old_checksum in rows:
-              m = re.search(r'/league=([^/]+)/dataset=fixtures/', uri)
-              if not m:
-                  raise SystemExit(f'cannot extract league from {uri}')
-              league = m.group(1)
-              response = requests.get(f'https://v3.football.api-sports.io/fixtures?league={quote(league)}&season={season}', headers=headers, timeout=30)
-              response.raise_for_status()
-              document = response.json()
-              data = document.get('response') if isinstance(document, dict) else None
-              if not isinstance(data, list) or document.get('errors'):
-                  raise SystemExit(f'API response invalid for season={season} league={league}: errors={document.get("errors") if isinstance(document, dict) else "non-object"}')
-              if len(data) != int(expected_rows):
-                  raise SystemExit(f'row-count mismatch season={season} league={league}: catalog={expected_rows} api={len(data)}')
-              body = (json.dumps(document, ensure_ascii=False, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
-              checksum = hashlib.sha256(body).hexdigest()
-              bucket, key = uri[5:].split('/', 1)
-              prepared.append((manifest_id, season, league, int(expected_rows), bucket, key, checksum, body, old_checksum))
-              print(f'validated season={season} league={league} rows={len(data)}', flush=True)
-              time.sleep(1.0)
-
-          with psycopg.connect(db_url, connect_timeout=20) as conn:
-              with conn.transaction():
-                  for manifest_id, season, league, row_count, bucket, key, checksum, body, old_checksum in prepared:
-                      s3.put_object(Bucket=bucket, Key=key, Body=body, ContentType='application/json', Metadata={'sha256': checksum, 'archive_repair': 'canonical-api-football-fixtures'})
-                      verify = s3.get_object(Bucket=bucket, Key=key)['Body'].read()
-                      if hashlib.sha256(verify).hexdigest() != checksum:
-                          raise SystemExit(f'S3 checksum verification failed season={season} league={league}')
-                      conn.execute('update internal.archive_catalog set checksum=%s, row_count=%s where manifest_id=%s', (checksum, row_count, manifest_id))
-          print(json.dumps({'status':'REPAIRED','manifest_count':len(prepared),'seasons':[2008,2009,2010]}, sort_keys=True))
-          PY
       - name: Run historical training from S3 archive
         run: python -m workers.prediction_engine.historical_training_job
       - name: Persist Elo/Glicko rating checkpoints

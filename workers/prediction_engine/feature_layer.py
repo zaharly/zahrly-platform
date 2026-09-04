@@ -143,11 +143,28 @@ def _observation_available_at(dataset:str,played:datetime,date_end:datetime|None
     if dataset in DETAIL_DATASETS:return played
     return _utc(date_end) if date_end is not None else None
 
+def _feature_values(dataset,o):
+    vals={}
+    if dataset in {"fixture_statistics","fixture_players_statistics"}:
+        for k,v in _stats(o):vals[f"{dataset}.{k}"]=v
+    elif dataset=="fixture_events":
+        vals.update({f"{dataset}.{k}":v for k,v in _events(o).items()})
+    elif dataset=="lineups":
+        if isinstance(o.get("startXI"),list):vals["lineups.starting_xi"]=float(len(o["startXI"]))
+        if isinstance(o.get("substitutes"),list):vals["lineups.substitutes"]=float(len(o["substitutes"]))
+    else:
+        for k,v in o.items():
+            if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id"}:continue
+            n=_number(v)
+            if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_")}"]=n
+    return vals
+
 def build_feature_index(conn,target_matches,latest_target=None):
     targets=list(target_matches)
     if not targets:return {}
     latest=_utc(latest_target) if latest_target else max(_utc(m.played_at) for m in targets)
-    matches=_matches(conn); aliases=_aliases(conn); history={}; s3=_s3()
+    matches=_matches(conn); aliases=_aliases(conn); team_history={}; fixture_history={}; s3=_s3()
+    target_ids={m.match_id for m in targets}
     for row in _manifests(conn,latest):
         bucket,key=_uri(row["object_uri"]); raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest()!=row["checksum"]:raise RuntimeError(f"archive checksum mismatch:{row['id']}")
@@ -156,30 +173,33 @@ def build_feature_index(conn,target_matches,latest_target=None):
         for o in _walk(decoded):
             fid=_fixture_id(o,o.get("__context_fixture_id"))
             if not fid or fid not in matches:continue
-            played,_,_=matches[fid]; external_tid=_team_id(o); tid=aliases.get(str(external_tid)) if external_tid is not None else None
+            played,_,_=matches[fid]; available_at=_observation_available_at(dataset,played,manifest_end)
+            if available_at is None or available_at>=played:continue
+            vals=_feature_values(dataset,o)
+            if not vals:continue
+            # Fixture-detail datasets are intrinsically keyed by fixture. Do not
+            # require a team identity for these records: events/statistics/lineups
+            # frequently carry their team only on a nested child node.
+            if dataset in DETAIL_DATASETS:
+                fixture_history.setdefault(fid,[]).append((played,available_at,vals,dataset))
+                continue
+            external_tid=_team_id(o); tid=aliases.get(str(external_tid)) if external_tid is not None else None
             if tid is None and external_tid is not None:tid=f"api-football:{str(external_tid)}"
             if not tid:continue
-            vals={}
-            if dataset in {"fixture_statistics","fixture_players_statistics"}:
-                for k,v in _stats(o):vals[f"{dataset}.{k}"]=v
-            elif dataset=="fixture_events": vals.update({f"{dataset}.{k}":v for k,v in _events(o).items()})
-            elif dataset=="lineups":
-                if isinstance(o.get("startXI"),list):vals["lineups.starting_xi"]=float(len(o["startXI"]))
-                if isinstance(o.get("substitutes"),list):vals["lineups.substitutes"]=float(len(o["substitutes"]))
-            else:
-                for k,v in o.items():
-                    if k in {"id","team_id","teamId","fixture_id","fixtureId","season","league_id","__context_fixture_id"}:continue
-                    n=_number(v)
-                    if n is not None:vals[f"{dataset}.{str(k).lower().replace(' ','_')}"]=n
-            if vals:
-                available_at=_observation_available_at(dataset,played,manifest_end)
-                history.setdefault(tid,[]).append((played,available_at,vals,dataset))
-    for rows in history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
+            team_history.setdefault(tid,[]).append((played,available_at,vals,dataset))
+    for rows in team_history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
+    for rows in fixture_history.values():rows.sort(key=lambda x:(x[0],x[1] or x[0]))
     out={}
     for m in targets:
         kickoff=_utc(m.played_at); values={}; sources=set()
+        # Match-level features are valid whenever the detail payload belongs to
+        # this fixture and its observation time is strictly before kickoff.
+        for played,available_at,vals,dataset in fixture_history.get(m.match_id,[]):
+            if played<kickoff and available_at<kickoff:
+                sources.add(dataset)
+                for k,v in vals.items():values[k]=values.get(k,0.0)+v
         for side,tid in (("home",m.home_team_id),("away",m.away_team_id)):
-            rows=[r for r in history.get(tid,[]) if r[0]<kickoff and r[1] is not None and r[1]<kickoff][-5:]
+            rows=[r for r in team_history.get(tid,[]) if r[0]<kickoff and r[1] is not None and r[1]<kickoff][-5:]
             grouped={}
             for _,_,vals,dataset in rows:
                 sources.add(dataset)

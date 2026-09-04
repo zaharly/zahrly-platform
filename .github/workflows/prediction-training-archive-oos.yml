@@ -117,7 +117,9 @@ jobs:
           import requests
 
           db_url = os.environ['SUPABASE_DB_URL']
-          api_key = os.environ['API_FOOTBALL_KEY'].strip()
+          api_key = os.environ['API_FOOTBALL_KEY'].strip().replace('\r', '').replace('\n', '').replace('\\r', '').replace('\\n', '')
+          if not api_key:
+              raise SystemExit('API_FOOTBALL_KEY is empty after normalization')
           s3 = boto3.client('s3', region_name=os.environ['S3_REGION'], aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY'])
           headers = {'x-apisports-key': api_key, 'Accept': 'application/json'}
 

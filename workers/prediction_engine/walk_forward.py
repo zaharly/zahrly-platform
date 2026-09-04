@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from math import exp
+from math import exp, log
 from typing import Iterable, Sequence
 
 from .dixon_coles import DixonColesPolicy, probability_matrix, result_probabilities, time_decay_weight
@@ -106,6 +106,45 @@ def _feature_factor(match, features, side):
     return min(1.15, max(0.85, factor))
 
 
+def _temperature_probs(prediction: Prediction, temperature: float) -> Prediction:
+    if temperature <= 0:
+        raise ValueError("temperature must be positive")
+    raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
+    logits = [log(x) / temperature for x in raw]
+    pivot = max(logits)
+    weights = [exp(x - pivot) for x in logits]
+    total = sum(weights)
+    p = [x / total for x in weights]
+    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, p[0], p[1], p[2], prediction.lambda_home, prediction.lambda_away)
+
+
+def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]) -> tuple[float, dict]:
+    """Fit multiclass temperature only on a leakage-safe calibration split.
+
+    Grid search is deliberately bounded and deterministic. T>1 softens confidence;
+    T<1 sharpens it. We optimize log-loss, the same proper scoring rule used by the gate.
+    """
+    if len(predictions) != len(outcomes):
+        raise ValueError("predictions/outcomes length mismatch")
+    if len(predictions) < 20:
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions)}
+    index = {"H": 0, "D": 1, "A": 2}
+    best_t = 1.0
+    best_loss = float("inf")
+    for i in range(81):
+        t = 0.20 + i * 0.05
+        loss = 0.0
+        for p, y in zip(predictions, outcomes):
+            q = _temperature_probs(p, t)
+            probs = (q.p_home, q.p_draw, q.p_away)
+            loss -= log(max(1e-15, probs[index[y]]))
+        loss /= len(predictions)
+        if loss < best_loss - 1e-12:
+            best_loss = loss
+            best_t = t
+    return best_t, {"status": "FITTED", "n": len(predictions), "temperature": best_t, "log_loss": best_loss}
+
+
 def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, team_rates=None):
     if _utc(match.played_at) < _utc(cutoff):
         raise LeakageError("test match must be at or after fold cutoff")
@@ -125,7 +164,7 @@ def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc
     return Prediction(match.match_id, match.home_team_id, match.away_team_id, ph, pd, pa, hl, al)
 
 
-def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None):
+def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, temperature=1.0):
     cutoff = _utc(cutoff)
     train = sorted(train, key=lambda m: _utc(m.played_at))
     test = sorted(test, key=lambda m: _utc(m.played_at))
@@ -145,7 +184,8 @@ def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPo
     team_rates = _team_rates(train, cutoff, dc_policy)
     out = []
     for m in test:
-        out.append(predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy, features, team_rates))
+        raw = predict_with_state(m, ratings, train, cutoff, elo_policy, dc_policy, features, team_rates)
+        out.append(_temperature_probs(raw, temperature) if temperature != 1.0 else raw)
         h = ratings.get(m.home_team_id, EloState(elo_policy.initial_rating))
         a = ratings.get(m.away_team_id, EloState(elo_policy.initial_rating))
         ratings[m.home_team_id], ratings[m.away_team_id], _ = update_elo(h, a, m.home_goals, m.away_goals, elo_policy)

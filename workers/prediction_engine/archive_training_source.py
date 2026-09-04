@@ -8,7 +8,7 @@ from botocore.config import Config
 from psycopg.rows import dict_row
 from .walk_forward import Match
 from .season_resolver import resolve_season
-from .archive_payload_adapters import walk_fixture_rows
+from .archive_payload_adapters import walk_fixture_rows,_decode_json_container
 
 @dataclass(frozen=True)
 class ArchiveManifest:
@@ -114,18 +114,26 @@ def _score_pair(row):
     if ag is None:ag=_number(row.get('away_goals'))
     return hg,ag
 
+def _shape_summary(value,depth=0):
+    if depth>2:return type(value).__name__
+    if isinstance(value,dict):return {str(k):_shape_summary(v,depth+1) for k,v in list(value.items())[:40]}
+    if isinstance(value,list):return {'type':'list','len':len(value),'item':_shape_summary(value[0],depth+1) if value else None}
+    if isinstance(value,str):return {'type':'str','len':len(value),'prefix':value[:300]}
+    return type(value).__name__
+
 def load_settled_matches(conn,as_of=None):
     complete_seasons=fetch_complete_archive_seasons(conn)
     manifests=fetch_fixture_manifests(conn,complete_seasons=complete_seasons)
     if not manifests:raise RuntimeError('prediction_training_source_unavailable:no_complete_fixture_manifests')
-    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};diagnostics={}
+    team_map=fetch_team_identity_map(conn);client=_s3_client();cutoff=_as_datetime(as_of or datetime.now(timezone.utc));by_id={};diagnostics={};empty_shapes=[]
     for manifest in manifests:
         bucket,key=_parse_uri(manifest.object_uri);archive_season,logical_season=_season_from_manifest(manifest);raw=client.get_object(Bucket=bucket,Key=key)['Body'].read()
         if hashlib.sha256(raw).hexdigest()!=manifest.checksum:raise RuntimeError(f'archive checksum mismatch:{manifest.manifest_id}')
         stats=diagnostics.setdefault(str(archive_season or 'unknown'),{'logical_season':logical_season,'manifest_count':0,'expected_rows':0,'walked':0,'accepted':0,'missing_fields':0,'bad_date':0,'pre_cutoff':0,'missing_team_identity':0})
         stats['manifest_count']+=1;stats['expected_rows']+=manifest.row_count
+        walked_any=False
         for row in walk_fixture_rows(raw):
-            stats['walked']+=1
+            walked_any=True;stats['walked']+=1
             fixture=row.get('fixture') or {};teams=row.get('teams') or {};fid=fixture.get('id') if isinstance(fixture,dict) else None;date=_fixture_date(row)
             home=(teams.get('home') or {}).get('id') if isinstance(teams,dict) and isinstance(teams.get('home'),dict) else (teams.get('home') if isinstance(teams,dict) else None)
             away=(teams.get('away') or {}).get('id') if isinstance(teams,dict) and isinstance(teams.get('away'),dict) else (teams.get('away') if isinstance(teams,dict) else None);hg,ag=_score_pair(row)
@@ -140,8 +148,11 @@ def load_settled_matches(conn,as_of=None):
             elif existing!=candidate:
                 if (existing.played_at,existing.home_team_id,existing.away_team_id,existing.home_goals,existing.away_goals)!=(candidate.played_at,candidate.home_team_id,candidate.away_team_id,candidate.home_goals,candidate.away_goals):raise RuntimeError(f'conflicting archived fixture payload:{fid}')
                 if existing.season is None and logical_season is not None:by_id[str(fid)]=candidate
+        if not walked_any and len(empty_shapes)<5:
+            try: empty_shapes.append({'manifest_id':manifest.manifest_id,'season':manifest.season,'object_uri':manifest.object_uri,'shape':_shape_summary(_decode_json_container(raw))})
+            except Exception as exc: empty_shapes.append({'manifest_id':manifest.manifest_id,'season':manifest.season,'object_uri':manifest.object_uri,'shape_error':str(exc)})
     missing=[season for season in sorted(complete_seasons) if diagnostics.get(str(season),{}).get('expected_rows',0)>0 and diagnostics.get(str(season),{}).get('accepted',0)==0]
-    print(json.dumps({'complete_archive_seasons':sorted(complete_seasons),'archive_fixture_parse_diagnostics':diagnostics,'unparsed_complete_seasons':missing},sort_keys=True),flush=True)
+    print(json.dumps({'complete_archive_seasons':sorted(complete_seasons),'archive_fixture_parse_diagnostics':diagnostics,'unparsed_complete_seasons':missing,'empty_fixture_payload_shapes':empty_shapes},sort_keys=True),flush=True)
     if missing:raise RuntimeError(f'prediction_training_source_unavailable:complete_seasons_with_zero_parsed_fixtures:{missing}')
     matches=sorted(by_id.values(),key=lambda m:(m.played_at,m.match_id))
     if not matches:raise RuntimeError('prediction_training_source_unavailable:no_canonical_settled_matches')

@@ -170,6 +170,16 @@ def run_fold(train, test, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPo
     test = sorted(test, key=lambda m: _utc(m.played_at))
     if not train or not test:
         raise ValueError("walk-forward fold requires non-empty train and test sets")
+    # Calibration folds can split a historical training set inside a matchday, so
+    # several rows may share the exact boundary timestamp. Those boundary rows are
+    # not before the calibration cutoff and must never enter the calibration model.
+    # Drop them deterministically rather than weakening the strict leakage invariant.
+    test_start = min(_utc(m.played_at) for m in test)
+    if any(_utc(m.played_at) >= test_start for m in train):
+        train = [m for m in train if _utc(m.played_at) < test_start]
+        cutoff = max(cutoff, test_start)
+    if not train:
+        raise LeakageError("fold training is empty after removing timestamp-boundary rows")
     if any(_utc(m.played_at) >= cutoff for m in train):
         raise LeakageError("fold training contains future data")
     if any(_utc(m.played_at) < cutoff for m in test):

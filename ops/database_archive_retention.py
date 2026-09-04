@@ -19,6 +19,7 @@ PREFIX = os.environ.get("S3_PREFIX", "zahrly/archive/database").strip("/")
 KEEP_OOS_RUNS = int(os.environ.get("KEEP_OOS_RUNS", "3"))
 KEEP_RATING_MODELS = int(os.environ.get("KEEP_RATING_MODELS", "2"))
 CRON_RETENTION_DAYS = int(os.environ.get("CRON_RETENTION_DAYS", "2"))
+CRON_RETENTION_HOURS = int(os.environ.get("CRON_RETENTION_HOURS", "1"))
 
 
 def normalized_db_url(raw: str) -> str:
@@ -26,9 +27,7 @@ def normalized_db_url(raw: str) -> str:
     p = urlsplit(raw)
     if p.scheme not in {"postgres", "postgresql"} or not p.hostname or p.password is None:
         raise RuntimeError("SUPABASE_DB_URL must be a valid PostgreSQL URL with a password")
-    host = p.hostname.lower().rstrip(".")
-    # A malformed secret can encode the @ separator as part of the hostname.
-    host = host.lstrip("@")
+    host = p.hostname.lower().rstrip(".").lstrip("@")
     project_ref = "qosvqlwkexrhswcuakib"
     pooler_host = "aws-0-eu-central-1.pooler.supabase.com"
     pooler_port = 5432
@@ -74,8 +73,9 @@ def archive_query(client, query: str, key: str) -> tuple[int, str, int]:
                     copy_sql = f"COPY ({query}) TO STDOUT"
                     with cur.copy(copy_sql) as copy:
                         for chunk in copy:
-                            gz.write(chunk)
-                            rows += chunk.count(b"\n")
+                            data = chunk.tobytes() if isinstance(chunk, memoryview) else bytes(chunk)
+                            gz.write(data)
+                            rows += data.count(b"\n")
         digest_hash = hashlib.sha256()
         with path.open("rb") as fh:
             for chunk in iter(lambda: fh.read(1024 * 1024), b""):
@@ -173,13 +173,13 @@ def main() -> None:
                 raise RuntimeError(f"rating delete mismatch: archived={rows}, deleted={deleted}")
             results.append({"table": "internal.prediction_rating_checkpoints", "rows": rows, "s3_key": key, "sha256": digest, "bytes": size})
 
-        cron_count = conn.execute("SELECT count(*) AS n FROM cron.job_run_details WHERE start_time < now() - make_interval(days => %s)", (CRON_RETENTION_DAYS,)).fetchone()["n"]
+        cron_count = conn.execute("SELECT count(*) AS n FROM cron.job_run_details WHERE start_time < now() - make_interval(hours => %s)", (CRON_RETENTION_HOURS,)).fetchone()["n"]
         if cron_count:
             key = f"{PREFIX}/cron/job_run_details/archive_run={run_tag}.jsonl.gz"
-            q = "SELECT row_to_json(x)::text FROM (SELECT * FROM cron.job_run_details WHERE start_time < now() - make_interval(days => %s) ORDER BY start_time, runid) x" % CRON_RETENTION_DAYS
+            q = "SELECT row_to_json(x)::text FROM (SELECT * FROM cron.job_run_details WHERE start_time < now() - make_interval(hours => %s) ORDER BY start_time, runid) x" % CRON_RETENTION_HOURS
             rows, digest, size = archive_query(client, q, key)
             with conn.transaction():
-                cur = conn.execute("DELETE FROM cron.job_run_details WHERE start_time < now() - make_interval(days => %s)", (CRON_RETENTION_DAYS,), prepare=False)
+                cur = conn.execute("DELETE FROM cron.job_run_details WHERE start_time < now() - make_interval(hours => %s)", (CRON_RETENTION_HOURS,), prepare=False)
                 deleted = cur.rowcount
             if deleted != rows:
                 raise RuntimeError(f"cron delete mismatch: archived={rows}, deleted={deleted}")
@@ -190,7 +190,7 @@ def main() -> None:
         for table in ("internal.prediction_oos_benchmark", "internal.prediction_rating_checkpoints", "cron.job_run_details"):
             conn.execute(sql.SQL("VACUUM (ANALYZE) {}").format(sql.Identifier(*table.split("."))))
 
-    manifest = {"run_tag": run_tag, "bucket": BUCKET, "prefix": PREFIX, "retention": {"keep_oos_runs": KEEP_OOS_RUNS, "keep_rating_models": KEEP_RATING_MODELS, "cron_days": CRON_RETENTION_DAYS}, "results": results}
+    manifest = {"run_tag": run_tag, "bucket": BUCKET, "prefix": PREFIX, "retention": {"keep_oos_runs": KEEP_OOS_RUNS, "keep_rating_models": KEEP_RATING_MODELS, "cron_hours": CRON_RETENTION_HOURS, "legacy_cron_days": CRON_RETENTION_DAYS}, "results": results}
     print(json.dumps(manifest, sort_keys=True))
 
 

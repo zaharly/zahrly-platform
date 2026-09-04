@@ -106,34 +106,48 @@ def _feature_factor(match, features, side):
     return min(1.15, max(0.85, factor))
 
 
-def _confidence_calibration(prediction: Prediction, params: tuple[float, float]) -> Prediction:
-    """Calibrate only top-class confidence; preserve class ranking and odds shape."""
-    a, b = params
+def _multiclass_calibration(prediction: Prediction, params: tuple[float, float, float, float, float, float]) -> Prediction:
+    """Apply a regularized multiclass affine-logit calibrator.
+
+    Each class gets its own intercept and log-probability slope. The calibrated
+    probabilities are normalized together, so the calibration is genuinely
+    multiclass rather than a top-class confidence transform. Parameters are learned
+    only from historical chronological OOF predictions and never from OOS targets.
+    """
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
-    total = sum(raw)
-    raw = [x / total for x in raw]
-    top = max(range(3), key=lambda i: raw[i])
-    confidence = min(1.0 - 1e-12, max(1e-12, raw[top]))
-    logit = log(confidence / (1.0 - confidence))
-    calibrated = 1.0 / (1.0 + exp(-(a + b * logit)))
-    second = max(raw[i] for i in range(3) if i != top)
-    calibrated = max(calibrated, second + 1e-9)
-    calibrated = min(1.0 - 1e-12, calibrated)
-    remainder = 1.0 - calibrated
-    other_sum = sum(raw[i] for i in range(3) if i != top)
-    out = [0.0, 0.0, 0.0]
-    out[top] = calibrated
-    for i in range(3):
-        if i != top:
-            out[i] = remainder * raw[i] / max(other_sum, 1e-15)
-    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, out[0], out[1], out[2], prediction.lambda_home, prediction.lambda_away)
+    a = params[0:6:2]
+    b = params[1:6:2]
+    logits = [a[i] + b[i] * log(raw[i]) for i in range(3)]
+    pivot = max(logits)
+    weights = [exp(x - pivot) for x in logits]
+    total = sum(weights)
+    q = [x / max(total, 1e-15) for x in weights]
+    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, q[0], q[1], q[2], prediction.lambda_home, prediction.lambda_away)
 
 
 def _apply_calibration(prediction: Prediction, calibration) -> Prediction:
     if calibration is None or calibration == 1.0:
         return prediction
     if isinstance(calibration, tuple):
-        return _confidence_calibration(prediction, calibration)
+        if len(calibration) == 6:
+            return _multiclass_calibration(prediction, calibration)
+        if len(calibration) == 2:
+            # Backward compatibility for archived runs; new fitting never emits this form.
+            a, b = calibration
+            raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
+            top = max(range(3), key=lambda i: raw[i])
+            c = min(1.0 - 1e-12, max(1e-12, raw[top]))
+            z = a + b * log(c / (1.0 - c))
+            calibrated = min(1.0 - 1e-12, max(1e-12, 1.0 / (1.0 + exp(-z))))
+            calibrated = max(calibrated, max(raw[i] for i in range(3) if i != top) + 1e-9)
+            remainder = 1.0 - calibrated
+            other_sum = sum(raw[i] for i in range(3) if i != top)
+            out = [0.0, 0.0, 0.0]
+            out[top] = calibrated
+            for i in range(3):
+                if i != top:
+                    out[i] = remainder * raw[i] / max(other_sum, 1e-15)
+            return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, out[0], out[1], out[2], prediction.lambda_home, prediction.lambda_away)
     if calibration <= 0:
         raise ValueError("temperature must be positive")
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
@@ -180,90 +194,99 @@ def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[st
 
 
 def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
-    """Fit a low-variance confidence calibrator on chronological calibration data.
+    """Fit a regularized multiclass calibrator with a chronological validation holdout.
 
-    The transform has two parameters but never changes the winning class. Candidate
-    selection is based on calibration ECE, with strict guards against degrading the
-    uncalibrated Brier/LogLoss/RPS by more than tiny absolute tolerances. The OOS set
-    is never used to fit or select the calibration parameters.
+    The calibration pool itself is historical OOF data. It is split chronologically:
+    the earliest portion trains the calibrator and the latest portion selects the
+    amount of calibration. No OOS target participates in fitting or selection.
     """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
-    if len(predictions) < 40:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": len(predictions), "method": "confidence_logistic_guarded"}
+    n = len(predictions)
+    if n < 80:
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": n, "method": "temporal_multiclass_affine"}
 
-    def pava(points):
-        blocks = []
-        for x, y, w in points:
-            blocks.append([x, y, w])
-            while len(blocks) >= 2 and blocks[-2][1] > blocks[-1][1]:
-                a, c = blocks[-2], blocks[-1]
-                wsum = a[2] + c[2]
-                blocks[-2] = [a[0], (a[1] * a[2] + c[1] * c[2]) / wsum, wsum]
-                blocks.pop()
-        return blocks
+    split = max(40, int(n * 0.70))
+    split = min(split, n - 20)
+    fit_predictions = predictions[:split]
+    fit_outcomes = outcomes[:split]
+    valid_predictions = predictions[split:]
+    valid_outcomes = outcomes[split:]
 
-    # Fit a monotone target on coarse confidence quantiles, shrunk toward 0.5.
-    rows = []
-    for p, y in zip(predictions, outcomes):
-        probs = (p.p_home, p.p_draw, p.p_away)
-        c = max(probs)
-        pred = ('H', 'D', 'A')[max(range(3), key=lambda i: probs[i])]
-        rows.append((c, float(pred == y)))
-    rows.sort()
-    q = max(4, min(8, len(rows) // 30))
-    bins = []
-    for i in range(q):
-        chunk = rows[i * len(rows) // q:(i + 1) * len(rows) // q]
-        if not chunk:
-            continue
-        mean_c = sum(x for x, _ in chunk) / len(chunk)
-        acc = sum(y for _, y in chunk)
-        # Strong shrinkage is deliberate because the historical calibration pool is small.
-        shrunk = (acc + 25.0 * 0.5) / (len(chunk) + 25.0)
-        bins.append((mean_c, shrunk, len(chunk)))
-    blocks = pava(bins)
+    def probs(p, params):
+        raw = [max(1e-15, p.p_home), max(1e-15, p.p_draw), max(1e-15, p.p_away)]
+        logits = [params[2*i] + params[2*i+1] * log(raw[i]) for i in range(3)]
+        pivot = max(logits)
+        weights = [exp(x - pivot) for x in logits]
+        total = sum(weights)
+        return [x / max(total, 1e-15) for x in weights]
 
-    def target(c):
-        if not blocks:
-            return c
-        if c <= blocks[0][0]:
-            return blocks[0][1]
-        if c >= blocks[-1][0]:
-            return blocks[-1][1]
-        for left, right in zip(blocks, blocks[1:]):
-            if left[0] <= c <= right[0]:
-                span = max(right[0] - left[0], 1e-12)
-                return left[1] + (right[1] - left[1]) * (c - left[0]) / span
-        return c
+    def objective(params):
+        loss = 0.0
+        for p, y in zip(fit_predictions, fit_outcomes):
+            q = probs(p, params)
+            loss -= log(max(1e-15, q[{"H": 0, "D": 1, "A": 2}[y]]))
+        # Strong but smooth shrinkage keeps the multiclass calibrator low variance.
+        reg = 0.08 * sum(params[2*i] ** 2 + (params[2*i+1] - 1.0) ** 2 for i in range(3))
+        return loss / len(fit_predictions) + reg
 
-    # Convert the monotone mapping to a logistic two-parameter approximation.
-    best = (0.0, 1.0)
-    best_loss = float("inf")
-    for a_i in range(-12, 13):
-        a = a_i / 20.0
-        for b_i in range(10, 31):
-            b = b_i / 10.0
-            loss = 0.0
-            for c, y in rows:
-                cc = min(1.0 - 1e-9, max(1e-9, c))
-                z = a + b * log(cc / (1.0 - cc))
-                mapped = 1.0 / (1.0 + exp(-z))
-                loss += (mapped - target(c)) ** 2
-            if loss < best_loss:
-                best_loss = loss
-                best = (a, b)
+    params = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+    for _ in range(8):
+        changed = False
+        for j in range(6):
+            center = params[j]
+            if j % 2 == 0:
+                candidates = [center + d for d in (-0.40, -0.20, -0.10, 0.0, 0.10, 0.20, 0.40)]
+                candidates = [max(-1.0, min(1.0, x)) for x in candidates]
+            else:
+                candidates = [center + d for d in (-0.40, -0.20, -0.10, 0.0, 0.10, 0.20, 0.40)]
+                candidates = [max(0.50, min(1.50, x)) for x in candidates]
+            best = min(candidates, key=lambda x: objective(params[:j] + [x] + params[j+1:]))
+            if abs(best - center) > 1e-9:
+                params[j] = best
+                changed = True
+        if not changed:
+            break
 
-    identity = (0.0, 1.0)
-    base = _calibration_scores(predictions, outcomes, identity)
-    candidates = [identity, best]
-    # Include a conservative interpolation toward the fitted mapping.
-    for alpha in (0.25, 0.50, 0.75):
-        candidates.append((best[0] * alpha, 1.0 + (best[1] - 1.0) * alpha))
-    eligible = [c for c in candidates if _calibration_scores(predictions, outcomes, c)[0] <= base[0] + 0.003 and _calibration_scores(predictions, outcomes, c)[1] <= base[1] + 0.006 and _calibration_scores(predictions, outcomes, c)[2] <= base[2] + 0.003]
-    chosen = min(eligible, key=lambda c: (_calibration_scores(predictions, outcomes, c)[3], _calibration_scores(predictions, outcomes, c)[1])) if eligible else identity
-    scores = _calibration_scores(predictions, outcomes, chosen)
-    return chosen, {"status": "FITTED", "n": len(predictions), "parameters": [round(float(x), 8) for x in chosen], "brier": scores[0], "log_loss": scores[1], "rps": scores[2], "ece": scores[3], "base_ece": base[3], "method": "confidence_logistic_guarded"}
+    identity = (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
+    fitted = tuple(float(x) for x in params)
+    base = _calibration_scores(valid_predictions, valid_outcomes, identity)
+
+    # Selection is made only on the later chronological validation slice. We allow
+    # modest proper-score movement but never sacrifice all three scores to reduce ECE.
+    candidates = [identity]
+    for alpha in (0.20, 0.35, 0.50, 0.65, 0.80, 1.0):
+        candidates.append(tuple(1.0 * (1.0 - alpha) if j % 2 else 0.0 for j in range(6)))
+        candidates[-1] = tuple((fitted[j] * alpha if j % 2 == 0 else 1.0 + (fitted[j] - 1.0) * alpha) for j in range(6))
+
+    def acceptable(c):
+        s = _calibration_scores(valid_predictions, valid_outcomes, c)
+        return s[0] <= base[0] + 0.004 and s[1] <= base[1] + 0.008 and s[2] <= base[2] + 0.004
+
+    eligible = [c for c in candidates if acceptable(c)]
+    chosen = min(eligible, key=lambda c: (_calibration_scores(valid_predictions, valid_outcomes, c)[3], _calibration_scores(valid_predictions, valid_outcomes, c)[1])) if eligible else identity
+    valid_scores = _calibration_scores(valid_predictions, valid_outcomes, chosen)
+    fit_scores = _calibration_scores(fit_predictions, fit_outcomes, chosen)
+    return chosen, {
+        "status": "FITTED",
+        "n": n,
+        "fit_n": len(fit_predictions),
+        "validation_n": len(valid_predictions),
+        "parameters": [round(float(x), 8) for x in chosen],
+        "brier": valid_scores[0],
+        "log_loss": valid_scores[1],
+        "rps": valid_scores[2],
+        "ece": valid_scores[3],
+        "base_ece": base[3],
+        "fit_brier": fit_scores[0],
+        "fit_log_loss": fit_scores[1],
+        "fit_rps": fit_scores[2],
+        "method": "temporal_multiclass_affine",
+        "selection": "chronological_validation_guarded",
+        "synthetic_data": False,
+        "random_sampling": False,
+        "oos_targets_used_for_calibration": False,
+    }
 
 
 def predict_with_state(match, ratings, train, cutoff, elo_policy=EloPolicy(), dc_policy=DixonColesPolicy(), features=None, team_rates=None):

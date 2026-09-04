@@ -3,6 +3,7 @@ name: Prediction Training - S3 Archive OOS
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
+# DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
 on:
   workflow_dispatch:
     inputs:

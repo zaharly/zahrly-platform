@@ -164,7 +164,6 @@ def build_feature_index(conn,target_matches,latest_target=None):
     if not targets:return {}
     latest=_utc(latest_target) if latest_target else max(_utc(m.played_at) for m in targets)
     matches=_matches(conn); aliases=_aliases(conn); team_history={}; fixture_history={}; s3=_s3()
-    target_ids={m.match_id for m in targets}
     for row in _manifests(conn,latest):
         bucket,key=_uri(row["object_uri"]); raw=s3.get_object(Bucket=bucket,Key=key)["Body"].read()
         if hashlib.sha256(raw).hexdigest()!=row["checksum"]:raise RuntimeError(f"archive checksum mismatch:{row['id']}")
@@ -177,9 +176,6 @@ def build_feature_index(conn,target_matches,latest_target=None):
             if available_at is None or available_at>=played:continue
             vals=_feature_values(dataset,o)
             if not vals:continue
-            # Fixture-detail datasets are intrinsically keyed by fixture. Do not
-            # require a team identity for these records: events/statistics/lineups
-            # frequently carry their team only on a nested child node.
             if dataset in DETAIL_DATASETS:
                 fixture_history.setdefault(fid,[]).append((played,available_at,vals,dataset))
                 continue
@@ -192,8 +188,6 @@ def build_feature_index(conn,target_matches,latest_target=None):
     out={}
     for m in targets:
         kickoff=_utc(m.played_at); values={}; sources=set()
-        # Match-level features are valid whenever the detail payload belongs to
-        # this fixture and its observation time is strictly before kickoff.
         for played,available_at,vals,dataset in fixture_history.get(m.match_id,[]):
             if played<kickoff and available_at<kickoff:
                 sources.add(dataset)

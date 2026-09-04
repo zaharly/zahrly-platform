@@ -1,0 +1,76 @@
+name: Database Archive Retention to S3
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '20 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zahrly-db-archive-retention
+  cancel-in-progress: false
+
+jobs:
+  archive-retention:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      S3_ENDPOINT_URL: https://s3.eu-north-1.amazonaws.com
+      S3_REGION: eu-north-1
+      S3_BUCKET: zahrly-community-storage
+      S3_PREFIX: zahrly/archive/database
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      KEEP_OOS_RUNS: '3'
+      KEEP_RATING_MODELS: '2'
+      CRON_RETENTION_DAYS: '2'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install maintenance dependencies
+        run: python -m pip install --disable-pip-version-check 'psycopg[binary]>=3.2,<4' 'boto3>=1.35,<2'
+
+      - name: Validate maintenance secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          for v in SUPABASE_DB_URL S3_ACCESS_KEY_ID S3_SECRET_ACCESS_KEY S3_BUCKET; do
+            test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
+          done
+
+      - name: Validate S3
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, boto3
+          c=boto3.client('s3', region_name=os.environ['S3_REGION'], endpoint_url=os.environ['S3_ENDPOINT_URL'], aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'], aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY'])
+          c.head_bucket(Bucket=os.environ['S3_BUCKET'])
+          print('S3 access: OK')
+          PY
+
+      - name: Archive and prune database detail data
+        run: python ops/database_archive_retention.py | tee database_archive_retention.json
+
+      - name: Verify post-cleanup database size
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, psycopg
+          with psycopg.connect(os.environ['SUPABASE_DB_URL']) as c:
+              size=c.execute("select pg_database_size(current_database())").fetchone()[0]
+              print(f'database_bytes={size}')
+              print(f'database_mb={size/1024/1024:.1f}')
+          PY
+
+      - name: Upload maintenance manifest
+        uses: actions/upload-artifact@v6
+        with:
+          name: database-archive-retention-${{ github.run_id }}
+          path: database_archive_retention.json
+          if-no-files-found: error

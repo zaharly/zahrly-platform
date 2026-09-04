@@ -32,7 +32,17 @@ _AWAY_OBJECT_KEYS = ("away", "awayTeam", "away_team", "visitorTeam", "visitortea
 
 
 def _decompress_candidates(raw: bytes) -> list[bytes]:
+    """Return raw bytes plus any successfully decoded compression candidates.
+
+    Compression detection is intentionally best-effort: ordinary JSON/NDJSON is
+    common in the archive, so every optional decoder may legitimately reject it.
+    A decoder-specific exception must never abort payload inspection.
+    """
     out = [raw]
+    stripped = raw.lstrip()
+    if stripped.startswith((b"{", b"[")):
+        return out
+
     attempts = [
         ("gzip", lambda: gzip.decompress(raw)),
         ("zlib", lambda: zlib.decompress(raw)),
@@ -48,7 +58,9 @@ def _decompress_candidates(raw: bytes) -> list[bytes]:
     for _, fn in attempts:
         try:
             decoded = fn()
-        except (OSError, EOFError, ValueError, zlib.error, lzma.LZMAError):
+        except Exception:
+            # These are speculative decoders, not the canonical parser. Reject
+            # only this candidate and continue trying the remaining formats.
             continue
         if decoded and decoded not in out:
             out.insert(0, decoded)
@@ -59,7 +71,7 @@ def _decompress_candidates(raw: bytes) -> list[bytes]:
                 decoded = zf.read(name)
                 if decoded and decoded not in out:
                     out.insert(0, decoded)
-    except (zipfile.BadZipFile, OSError, IndexError):
+    except Exception:
         pass
     return out
 

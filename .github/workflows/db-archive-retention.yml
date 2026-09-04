@@ -47,6 +47,42 @@ jobs:
             test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
           done
 
+      - name: Normalize Supabase connection
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+          raw=os.environ['SUPABASE_DB_URL'].strip()
+          p=urlsplit(raw)
+          if p.scheme not in {'postgres','postgresql'} or not p.hostname or p.password is None:
+              raise SystemExit('invalid SUPABASE_DB_URL')
+          host=p.hostname.lower().rstrip('.').lstrip('@')
+          project='qosvqlwkexrhswcuakib'
+          user=unquote(p.username or 'postgres')
+          password=quote(unquote(p.password), safe='')
+          if host.endswith('.pooler.supabase.com'):
+              target_host=host
+              target_port=p.port or 5432
+              if '.' not in user:
+                  user=f'postgres.{project}'
+          elif host == f'db.{project}.supabase.co':
+              target_host='aws-0-eu-central-1.pooler.supabase.com'
+              target_port=5432
+              if user == 'postgres':
+                  user=f'postgres.{project}'
+          else:
+              raise SystemExit(f'unsupported Supabase host: {host}')
+          query=p.query or ''
+          if 'sslmode=' not in query:
+              query=f'{query}&sslmode=require' if query else 'sslmode=require'
+          normalized=urlunsplit(('postgresql',f'{quote(user,safe="")}:{password}@{target_host}:{target_port}',p.path or '/postgres',query,''))
+          with open(os.environ['GITHUB_ENV'],'a',encoding='utf-8') as f:
+              f.write('SUPABASE_DB_URL='+normalized+'\n')
+          print(f'PostgreSQL endpoint selected: {target_host}:{target_port}')
+          PY
+
       - name: Validate S3
         shell: bash
         run: |
@@ -61,16 +97,35 @@ jobs:
       - name: Archive and prune database detail data
         run: python ops/database_archive_retention.py | tee database_archive_retention.json
 
-      - name: Verify post-cleanup database size
+      - name: Verify cleanup results
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
           import os, psycopg
-          with psycopg.connect(os.environ['SUPABASE_DB_URL']) as c:
-              size=c.execute("select pg_database_size(current_database())").fetchone()[0]
-              print(f'database_bytes={size}')
-              print(f'database_mb={size/1024/1024:.1f}')
+          from urllib.parse import quote, unquote, urlsplit, urlunsplit
+          raw=os.environ['SUPABASE_DB_URL'].strip(); p=urlsplit(raw); host=p.hostname.lower().rstrip('.').lstrip('@'); user=unquote(p.username or 'postgres'); password=quote(unquote(p.password),safe='')
+          project='qosvqlwkexrhswcuakib'
+          if host.endswith('.pooler.supabase.com'):
+              target_host,target_port=host,p.port or 5432
+              if '.' not in user: user=f'postgres.{project}'
+          else:
+              target_host,target_port='aws-0-eu-central-1.pooler.supabase.com',5432
+              if user=='postgres': user=f'postgres.{project}'
+          query=p.query or 'sslmode=require'
+          if 'sslmode=' not in query: query += '&sslmode=require'
+          dsn=urlunsplit(('postgresql',f'{quote(user,safe="")}:{password}@{target_host}:{target_port}',p.path or '/postgres',query,''))
+          with psycopg.connect(dsn) as c:
+              db_size=c.execute('select pg_database_size(current_database())').fetchone()[0]
+              checks=c.execute("""
+                select
+                  (select count(*) from internal.prediction_oos_benchmark) as oos_rows,
+                  (select count(*) from internal.prediction_rating_checkpoints) as rating_rows,
+                  (select count(*) from cron.job_run_details) as cron_rows
+              """).fetchone()
+              print(f'database_bytes={db_size}')
+              print(f'database_mb={db_size/1024/1024:.1f}')
+              print(f'oos_rows={checks[0]} rating_rows={checks[1]} cron_rows={checks[2]}')
           PY
 
       - name: Upload maintenance manifest

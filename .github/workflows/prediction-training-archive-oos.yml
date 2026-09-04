@@ -2,8 +2,8 @@ name: Prediction Training - S3 Archive OOS
 
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
-# This workflow is intentionally present on this branch so branch pushes can execute it.
 # Gate fix verification run: preserve canonical archive -> training -> rating -> OOS -> gate path.
+# Includes S3 artifact archival after benchmark evaluation.
 on:
   workflow_dispatch:
     inputs:

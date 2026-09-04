@@ -5,6 +5,7 @@ name: Prediction Training - S3 Archive OOS
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
 # Automatic push execution is intentionally disabled; training runs only by explicit workflow_dispatch.
+# PR synchronization touch: exercise the dedicated stale-artifact cleanup workflow.
 on:
   workflow_dispatch:
     inputs:

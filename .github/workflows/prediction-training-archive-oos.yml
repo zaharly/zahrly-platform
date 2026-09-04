@@ -2,7 +2,6 @@ name: Prediction Training - S3 Archive OOS
 
 # Historical-only training path. Never touches 7-Day Rolling or active campaigns.
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
-# Gate fix verification run: preserve canonical archive -> training -> rating -> OOS -> gate path.
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 on:
   workflow_dispatch:
@@ -24,7 +23,7 @@ on:
       - 'prediction/training-archive-oos-v2'
 
 concurrency:
-  group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}-${{ github.sha }}
+  group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -112,9 +111,9 @@ jobs:
       - name: Build persisted OOS benchmark (Brier/ECE/RPS + market coverage)
         if: success()
         run: python -m workers.prediction_engine.oos_benchmark
+      - name: Archive OOS benchmark to S3 before gate evaluation
+        if: success()
+        run: python -m workers.prediction_engine.archive_prediction_artifacts
       - name: Evaluate promotion gates without activation
         if: success()
         run: python -m workers.prediction_engine.benchmark_gate
-      - name: Archive OOS benchmark to S3 immediately
-        if: success()
-        run: python -m workers.prediction_engine.archive_prediction_artifacts

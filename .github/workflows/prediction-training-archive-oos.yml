@@ -100,34 +100,8 @@ jobs:
           PY
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
-      - name: Inspect representative legacy fixture payloads
-        shell: bash
-        run: |
-          set -euo pipefail
-          python - <<'PY'
-          import boto3, json
-          s3 = boto3.client('s3', region_name='${{ secrets.S3_REGION }}')
-          keys = {
-              '2008': 'zahrly/archive/historical/raw/provider=api-football/season=2008/country=API_216cb4cb-79eb-499d-8f1c-7bb9f5e38b45/league=4/dataset=fixtures/job=1c98738c-3d7e-4c3e-b67d-cb372f8bbfd9.json',
-              '2009': 'zahrly/archive/historical/raw/provider=api-football/season=2009/country=API_216cb4cb-79eb-499d-8f1c-7bb9f5e38b45/league=21/dataset=fixtures/job=e43ddd6c-200a-4d9d-8973-7b31c2a36a04.json',
-              '2010': 'zahrly/archive/historical/raw/provider=api-football/season=2010/country=GB-SCT/league=179/dataset=fixtures/job=2c421e2b-b124-49ed-a2a7-a7ecf16e4179.json',
-              '2011': 'zahrly/archive/historical/raw/provider=api-football/season=2011/league=388/dataset=fixtures/job=93556da1-74be-4a44-9186-ec4019440884.json',
-          }
-          for season, key in keys.items():
-              body = s3.get_object(Bucket='zahrly-community-storage', Key=key)['Body'].read()
-              print(f'PAYLOAD {season}: bytes={len(body)} prefix_hex={body[:32].hex()}')
-              print(f'PAYLOAD {season}: prefix={body[:1000]!r}')
-              try:
-                  obj = json.loads(body.decode('utf-8-sig'))
-                  if isinstance(obj, dict):
-                      print(f'PAYLOAD {season}: json_type=dict keys={list(obj.keys())[:30]}')
-                  else:
-                      print(f'PAYLOAD {season}: json_type={type(obj).__name__} length={len(obj)}')
-              except Exception as exc:
-                  print(f'PAYLOAD {season}: json_decode_error={type(exc).__name__}:{exc}')
-          PY
       - name: Run historical training from S3 archive
-        run: python -m workers.prediction_engine.historical_training_job
+        run: python -m training.archive_oos.run_historical_training_with_recovery
       - name: Persist Elo/Glicko rating checkpoints
         if: success()
         run: python -m workers.prediction_engine.rating_checkpoints

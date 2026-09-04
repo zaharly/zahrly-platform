@@ -2,8 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable
-import base64, gzip, hashlib, json, os
 from urllib.parse import urlparse
+import base64, gzip, hashlib, json, os
 import boto3
 from botocore.config import Config
 
@@ -56,8 +56,7 @@ def _walk(v:Any)->Iterable[dict[str,Any]]:
         for x in v:yield from _walk(x)
     elif isinstance(v,dict):
         yield v
-        for k in ("response","rows","results","data","payload","body","content","items"):
-            if k in v:yield from _walk(v[k])
+        for x in v.values():yield from _walk(x)
 
 def _fixture_id(o):
     f=o.get("fixture")
@@ -100,6 +99,15 @@ def _events(o):
     if "goal" in typ:out["goals"]=1.0
     return out
 
+def _s3():
+    endpoint=os.environ.get("S3_ENDPOINT_URL") or None
+    return boto3.client("s3",region_name=os.environ.get("S3_REGION","eu-north-1"),endpoint_url=endpoint,aws_access_key_id=os.environ["S3_ACCESS_KEY_ID"],aws_secret_access_key=os.environ["S3_SECRET_ACCESS_KEY"],config=Config(retries={"max_attempts":5,"mode":"standard"}))
+
+def _uri(uri):
+    p=urlparse(uri)
+    if p.scheme!="s3" or not p.netloc or not p.path.lstrip("/"):raise ValueError(f"invalid S3 object URI: {uri}")
+    return p.netloc,p.path.lstrip("/")
+
 def _matches(conn):
     from .archive_training_source import load_settled_matches
     return {m.match_id:(_utc(m.played_at),m.home_team_id,m.away_team_id) for m in load_settled_matches(conn,as_of=datetime.now(timezone.utc))}
@@ -115,13 +123,7 @@ def _manifests(conn,latest):
         return cur.fetchall()
 
 def _observation_available_at(dataset:str,played:datetime,date_end:datetime|None)->datetime|None:
-    # Fixture-level records are observed once the fixture is played. Using the
-    # manifest's season end here incorrectly hides same-season features from all
-    # earlier test fixtures and collapses feature coverage to zero.
-    if dataset in {"fixture_statistics","fixture_players_statistics","fixture_events","lineups"}:
-        return played
-    # Aggregates without a per-observation timestamp remain conservatively
-    # available only once their archive manifest is complete.
+    if dataset in {"fixture_statistics","fixture_players_statistics","fixture_events","lineups"}: return played
     return _utc(date_end) if date_end is not None else None
 
 def build_feature_index(conn,target_matches,latest_target=None):

@@ -106,23 +106,32 @@ def _feature_factor(match, features, side):
     return min(1.15, max(0.85, factor))
 
 
-def _multiclass_calibration(prediction: Prediction, params: tuple[float, float, float, float, float, float]) -> Prediction:
-    """Apply a regularized multiclass affine-logit calibrator.
+def _apply_class_conditional_calibration(prediction: Prediction, params: tuple[float, float, float, float, float, float]) -> Prediction:
+    """Calibrate the reported top-label probability conditioned on its class.
 
-    Each class gets its own intercept and log-probability slope. The calibrated
-    probabilities are normalized together, so the calibration is genuinely
-    multiclass rather than a top-class confidence transform. Parameters are learned
-    only from historical chronological OOF predictions and never from OOS targets.
+    This directly matches the gate's top-label ECE definition: calibration is
+    conditioned on whether HOME, DRAW or AWAY is the predicted class. The argmax
+    class is never changed and the non-top probabilities retain their original
+    relative proportions. Parameters are learned only from historical OOF pairs.
     """
     raw = [max(1e-15, prediction.p_home), max(1e-15, prediction.p_draw), max(1e-15, prediction.p_away)]
-    a = params[0:6:2]
-    b = params[1:6:2]
-    logits = [a[i] + b[i] * log(raw[i]) for i in range(3)]
-    pivot = max(logits)
-    weights = [exp(x - pivot) for x in logits]
-    total = sum(weights)
-    q = [x / max(total, 1e-15) for x in weights]
-    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, q[0], q[1], q[2], prediction.lambda_home, prediction.lambda_away)
+    top = max(range(3), key=lambda i: raw[i])
+    c = min(1.0 - 1e-12, max(1e-12, raw[top]))
+    a = params[2 * top]
+    b = params[2 * top + 1]
+    z = a + b * log(c / (1.0 - c))
+    calibrated = 1.0 / (1.0 + exp(-z))
+    # Keep the predicted class unchanged and keep all probabilities on the simplex.
+    other_max = max(raw[i] for i in range(3) if i != top)
+    calibrated = min(1.0 - 1e-12, max(other_max + 1e-9, calibrated))
+    remainder = 1.0 - calibrated
+    other_sum = sum(raw[i] for i in range(3) if i != top)
+    out = [0.0, 0.0, 0.0]
+    out[top] = calibrated
+    for i in range(3):
+        if i != top:
+            out[i] = remainder * raw[i] / max(other_sum, 1e-15)
+    return Prediction(prediction.match_id, prediction.home_team_id, prediction.away_team_id, out[0], out[1], out[2], prediction.lambda_home, prediction.lambda_away)
 
 
 def _apply_calibration(prediction: Prediction, calibration) -> Prediction:
@@ -130,7 +139,7 @@ def _apply_calibration(prediction: Prediction, calibration) -> Prediction:
         return prediction
     if isinstance(calibration, tuple):
         if len(calibration) == 6:
-            return _multiclass_calibration(prediction, calibration)
+            return _apply_class_conditional_calibration(prediction, calibration)
         if len(calibration) == 2:
             # Backward compatibility for archived runs; new fitting never emits this form.
             a, b = calibration
@@ -193,78 +202,107 @@ def _calibration_scores(predictions: Sequence[Prediction], outcomes: Sequence[st
     return brier / n, log_loss / n, rps / n, _calibration_ece(predictions, outcomes, calibration)
 
 
-def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
-    """Fit a regularized multiclass calibrator with a chronological validation holdout.
+def _fit_platt_for_top_class(predictions: Sequence[Prediction], outcomes: Sequence[str], top_class: int, min_n: int = 50):
+    rows = []
+    labels = []
+    for p, y in zip(predictions, outcomes):
+        raw = (p.p_home, p.p_draw, p.p_away)
+        top = max(range(3), key=lambda i: raw[i])
+        if top != top_class:
+            continue
+        c = min(1.0 - 1e-12, max(1e-12, raw[top]))
+        rows.append(log(c / (1.0 - c)))
+        labels.append(1.0 if y == ('H', 'D', 'A')[top] else 0.0)
+    if len(rows) < min_n:
+        return 0.0, 1.0, len(rows)
 
-    The calibration pool itself is historical OOF data. It is split chronologically:
-    the earliest portion trains the calibrator and the latest portion selects the
-    amount of calibration. No OOS target participates in fitting or selection.
+    # Deterministic regularized Newton fit. The target is top-label correctness,
+    # exactly the quantity used by the ECE gate.
+    a = 0.0
+    b = 1.0
+    for _ in range(20):
+        g_a = g_b = 0.0
+        h_aa = h_ab = h_bb = 0.0
+        for x, y in zip(rows, labels):
+            z = max(-30.0, min(30.0, a + b * x))
+            q = 1.0 / (1.0 + exp(-z))
+            w = max(1e-8, q * (1.0 - q))
+            err = q - y
+            g_a += err
+            g_b += err * x
+            h_aa += w
+            h_ab += w * x
+            h_bb += w * x * x
+        # Ridge toward identity; intercept is shrunk to 0 and slope to 1.
+        lam = 0.10
+        g_a += lam * a
+        g_b += lam * (b - 1.0)
+        h_aa += lam
+        h_bb += lam
+        det = h_aa * h_bb - h_ab * h_ab
+        if abs(det) < 1e-10:
+            break
+        da = (g_a * h_bb - g_b * h_ab) / det
+        db = (h_aa * g_b - h_ab * g_a) / det
+        new_a = max(-1.5, min(1.5, a - da))
+        new_b = max(0.25, min(2.0, b - db))
+        if abs(new_a - a) + abs(new_b - b) < 1e-7:
+            a, b = new_a, new_b
+            break
+        a, b = new_a, new_b
+    return a, b, len(rows)
+
+
+def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
+    """Fit class-conditional top-label calibration on historical OOF data.
+
+    The gate measures top-label ECE. Therefore calibration is conditioned on the
+    predicted class (HOME/DRAW/AWAY) instead of mixing all three classes in one
+    confidence curve. A chronological holdout is used only for model selection.
+    The final calibrator is selected only if it does not worsen Brier, LogLoss or
+    RPS on that holdout beyond small numerical guardrails. No OOS target is used.
     """
     if len(predictions) != len(outcomes):
         raise ValueError("predictions/outcomes length mismatch")
     n = len(predictions)
-    if n < 80:
-        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": n, "method": "temporal_multiclass_affine"}
+    if n < 120:
+        return 1.0, {"status": "INSUFFICIENT_CALIBRATION_DATA", "n": n, "method": "class_conditional_top_label"}
 
-    split = max(40, int(n * 0.70))
-    split = min(split, n - 20)
+    split = max(80, int(n * 0.75))
+    split = min(split, n - 40)
     fit_predictions = predictions[:split]
     fit_outcomes = outcomes[:split]
     valid_predictions = predictions[split:]
     valid_outcomes = outcomes[split:]
-
-    def probs(p, params):
-        raw = [max(1e-15, p.p_home), max(1e-15, p.p_draw), max(1e-15, p.p_away)]
-        logits = [params[2*i] + params[2*i+1] * log(raw[i]) for i in range(3)]
-        pivot = max(logits)
-        weights = [exp(x - pivot) for x in logits]
-        total = sum(weights)
-        return [x / max(total, 1e-15) for x in weights]
-
-    def objective(params):
-        loss = 0.0
-        for p, y in zip(fit_predictions, fit_outcomes):
-            q = probs(p, params)
-            loss -= log(max(1e-15, q[{"H": 0, "D": 1, "A": 2}[y]]))
-        # Strong but smooth shrinkage keeps the multiclass calibrator low variance.
-        reg = 0.08 * sum(params[2*i] ** 2 + (params[2*i+1] - 1.0) ** 2 for i in range(3))
-        return loss / len(fit_predictions) + reg
-
-    params = [0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
-    for _ in range(8):
-        changed = False
-        for j in range(6):
-            center = params[j]
-            if j % 2 == 0:
-                candidates = [center + d for d in (-0.40, -0.20, -0.10, 0.0, 0.10, 0.20, 0.40)]
-                candidates = [max(-1.0, min(1.0, x)) for x in candidates]
-            else:
-                candidates = [center + d for d in (-0.40, -0.20, -0.10, 0.0, 0.10, 0.20, 0.40)]
-                candidates = [max(0.50, min(1.50, x)) for x in candidates]
-            best = min(candidates, key=lambda x: objective(params[:j] + [x] + params[j+1:]))
-            if abs(best - center) > 1e-9:
-                params[j] = best
-                changed = True
-        if not changed:
-            break
-
     identity = (0.0, 1.0, 0.0, 1.0, 0.0, 1.0)
-    fitted = tuple(float(x) for x in params)
+    fitted = []
+    counts = []
+    for cls in range(3):
+        a, b, count = _fit_platt_for_top_class(fit_predictions, fit_outcomes, cls, min_n=35)
+        fitted.extend((a, b))
+        counts.append(count)
+    fitted = tuple(fitted)
     base = _calibration_scores(valid_predictions, valid_outcomes, identity)
 
-    # Selection is made only on the later chronological validation slice. We allow
-    # modest proper-score movement but never sacrifice all three scores to reduce ECE.
+    # Shrink each class-specific fit toward identity. Selection is entirely on the
+    # later chronological validation slice. This avoids the previous failure mode
+    # where a single global curve averaged incompatible HOME/DRAW/AWAY calibration.
     candidates = [identity]
-    for alpha in (0.20, 0.35, 0.50, 0.65, 0.80, 1.0):
-        candidates.append(tuple(1.0 * (1.0 - alpha) if j % 2 else 0.0 for j in range(6)))
-        candidates[-1] = tuple((fitted[j] * alpha if j % 2 == 0 else 1.0 + (fitted[j] - 1.0) * alpha) for j in range(6))
+    for alpha in (0.15, 0.25, 0.40, 0.55, 0.70, 0.85, 1.0):
+        candidates.append(tuple(
+            fitted[j] * alpha if j % 2 == 0 else 1.0 + (fitted[j] - 1.0) * alpha
+            for j in range(6)
+        ))
 
     def acceptable(c):
         s = _calibration_scores(valid_predictions, valid_outcomes, c)
-        return s[0] <= base[0] + 0.004 and s[1] <= base[1] + 0.008 and s[2] <= base[2] + 0.004
+        return s[0] <= base[0] + 0.003 and s[1] <= base[1] + 0.006 and s[2] <= base[2] + 0.003
 
     eligible = [c for c in candidates if acceptable(c)]
-    chosen = min(eligible, key=lambda c: (_calibration_scores(valid_predictions, valid_outcomes, c)[3], _calibration_scores(valid_predictions, valid_outcomes, c)[1])) if eligible else identity
+    chosen = min(
+        eligible,
+        key=lambda c: (_calibration_scores(valid_predictions, valid_outcomes, c)[3], _calibration_scores(valid_predictions, valid_outcomes, c)[1]),
+    ) if eligible else identity
     valid_scores = _calibration_scores(valid_predictions, valid_outcomes, chosen)
     fit_scores = _calibration_scores(fit_predictions, fit_outcomes, chosen)
     return chosen, {
@@ -273,6 +311,7 @@ def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
         "fit_n": len(fit_predictions),
         "validation_n": len(valid_predictions),
         "parameters": [round(float(x), 8) for x in chosen],
+        "top_class_counts": {"H": counts[0], "D": counts[1], "A": counts[2]},
         "brier": valid_scores[0],
         "log_loss": valid_scores[1],
         "rps": valid_scores[2],
@@ -281,8 +320,10 @@ def fit_temperature(predictions: Sequence[Prediction], outcomes: Sequence[str]):
         "fit_brier": fit_scores[0],
         "fit_log_loss": fit_scores[1],
         "fit_rps": fit_scores[2],
-        "method": "temporal_multiclass_affine",
+        "method": "class_conditional_top_label",
         "selection": "chronological_validation_guarded",
+        "target": "top_label_correctness",
+        "argmax_preserved": True,
         "synthetic_data": False,
         "random_sampling": False,
         "oos_targets_used_for_calibration": False,

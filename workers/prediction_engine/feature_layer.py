@@ -8,6 +8,7 @@ import boto3
 from botocore.config import Config
 
 HISTORICAL_DATASETS={"fixture_statistics","fixture_players_statistics","fixture_events","lineups","standings","team_statistics","team_seasons","squads","players","coaches","transfers","team_countries","top_scorers","player_statistics","top_yellow_cards","top_red_cards","top_assists"}
+DETAIL_DATASETS={"fixture_statistics","fixture_players_statistics","fixture_events","lineups"}
 STAT_ALIASES={"ball possession":"possession_pct","possession":"possession_pct","total shots":"shots","shots on goal":"shots_on_target","shots on target":"shots_on_target","corner kicks":"corners","fouls":"fouls","yellow cards":"yellow_cards","red cards":"red_cards","offsides":"offsides","total passes":"passes","passes accurate":"passes_accurate","expected goals":"xg"}
 
 @dataclass(frozen=True)
@@ -63,11 +64,9 @@ def _walk(v:Any, inherited_fixture_id=None)->Iterable[dict[str,Any]]:
         for x in v:yield from _walk(x,inherited_fixture_id)
     elif isinstance(v,dict):
         own=_fixture_id(v,inherited_fixture_id)
-        # Copy only a tiny context scalar; never mutate provider payloads.
         if own is not None and not any(k in v for k in ("fixture","fixture_id","fixtureId","match_id","matchId")):
             item=dict(v);item["__context_fixture_id"]=own;yield item
-        else:
-            yield v
+        else:yield v
         for x in v.values():yield from _walk(x,own)
 
 def _team_id(o):
@@ -124,11 +123,24 @@ def _aliases(conn):
 
 def _manifests(conn,latest):
     with conn.cursor() as cur:
-        cur.execute("select manifest_id::text as id,dataset_type,object_uri,checksum,date_end from internal.archive_catalog where provider='api-football' and object_uri like 's3://%%' and completeness_score>=0.0 and dataset_type=any(%s) and date_end is not null and date_end<%s order by date_end,manifest_id",(list(HISTORICAL_DATASETS),latest))
+        cur.execute("""
+            select manifest_id::text as id,dataset_type,object_uri,checksum,date_end
+            from internal.archive_catalog
+            where provider='api-football'
+              and object_uri like 's3://%%'
+              and completeness_score>=0.0
+              and dataset_type=any(%s)
+              and (
+                    dataset_type=any(%s)
+                    or date_end is null
+                    or date_end<%s
+                  )
+            order by date_end nulls last,manifest_id
+        """,(list(HISTORICAL_DATASETS),list(DETAIL_DATASETS),latest))
         return cur.fetchall()
 
 def _observation_available_at(dataset:str,played:datetime,date_end:datetime|None)->datetime|None:
-    if dataset in {"fixture_statistics","fixture_players_statistics","fixture_events","lineups"}: return played
+    if dataset in DETAIL_DATASETS:return played
     return _utc(date_end) if date_end is not None else None
 
 def build_feature_index(conn,target_matches,latest_target=None):

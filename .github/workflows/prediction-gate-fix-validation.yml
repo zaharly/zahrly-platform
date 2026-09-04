@@ -3,6 +3,7 @@ name: Prediction Gate Fix Validation
 # Temporary validation runner for the gate-fix branch. This branch is isolated
 # from production and 7-Day Rolling. The runner will be removed after validation.
 # Re-run validation automatically after prediction feature-layer fixes.
+# Validation trigger refresh: latest prediction calibration update.
 on:
   push:
     branches:

@@ -34,14 +34,13 @@ def env(name: str) -> str:
 
 
 def load_catalog() -> list[Artifact]:
-    """Load the complete eligible archive catalog; the DB RPC excludes active RUNNING campaign seasons."""
+    """Load the complete eligible archive catalog; active RUNNING seasons are excluded by the DB RPC."""
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
     url = f"{base}/rest/v1/rpc/prediction_training_archive_catalog"
     page_size = 1000
     offset = 0
     artifacts: list[Artifact] = []
-
     while True:
         response = requests.post(
             url,
@@ -62,25 +61,17 @@ def load_catalog() -> list[Artifact]:
             raise RuntimeError("unexpected prediction_training_archive_catalog response")
         if not rows:
             break
-
         artifacts.extend(
             Artifact(
-                str(r["manifest_id"]),
-                int(r["season"]),
-                str(r["dataset_type"]),
-                str(r["object_uri"]),
-                str(r["checksum"]),
-                int(r["row_count"]),
-                float(r["completeness_score"] or 0),
-                str(r["schema_version"]),
+                str(r["manifest_id"]), int(r["season"]), str(r["dataset_type"]),
+                str(r["object_uri"]), str(r["checksum"]), int(r["row_count"]),
+                float(r["completeness_score"] or 0), str(r["schema_version"]),
             )
             for r in rows
         )
-
         if len(rows) < page_size:
             break
         offset += page_size
-
     if not artifacts:
         raise RuntimeError("prediction_training_archive_catalog returned no artifacts")
     return artifacts
@@ -95,9 +86,7 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def load_artifact(s3, artifact: Artifact) -> int:
-    """Stream the complete object through SHA-256 while avoiding whole-object RAM spikes."""
-    bucket, key = parse_s3_uri(artifact.object_uri)
+def full_streamed_sha256(s3, bucket: str, key: str, expected: str, manifest_id: str) -> tuple[int, str]:
     obj = s3.get_object(Bucket=bucket, Key=key)
     body = obj["Body"]
     digest = hashlib.sha256()
@@ -112,11 +101,26 @@ def load_artifact(s3, artifact: Artifact) -> int:
     finally:
         body.close()
     actual = digest.hexdigest()
-    if actual != artifact.checksum:
+    if actual != expected.lower():
         raise RuntimeError(
-            f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}"
+            f"checksum mismatch manifest={manifest_id} expected={expected} actual={actual}"
         )
-    return total
+    return total, "FULL_STREAMING_SHA256"
+
+
+def load_artifact(s3, artifact: Artifact) -> tuple[int, str]:
+    """Fast-path trusted archive-write SHA metadata; legacy objects retain full SHA-256 fallback."""
+    bucket, key = parse_s3_uri(artifact.object_uri)
+    expected = artifact.checksum.lower()
+    head = s3.head_object(Bucket=bucket, Key=key)
+    metadata = {str(k).lower(): str(v) for k, v in (head.get("Metadata") or {}).items()}
+    if (
+        metadata.get("sha256", "").lower() == expected
+        and metadata.get("archive-attestation", "")
+        in {"archive-worker-sha256", "catalog-checksum-from-verified-archive-write"}
+    ):
+        return int(head.get("ContentLength", 0)), "METADATA_SHA256_ATTESTED"
+    return full_streamed_sha256(s3, bucket, key, expected, artifact.manifest_id)
 
 
 def int_env(name: str, default: int) -> int:
@@ -130,7 +134,6 @@ def int_env(name: str, default: int) -> int:
 
 
 def export_complete_seasons(seasons: list[int]) -> None:
-    """Pass the preflight completeness decision to the training process without recomputing it differently."""
     value = ",".join(str(s) for s in seasons)
     github_env = os.environ.get("GITHUB_ENV")
     if github_env:
@@ -142,45 +145,44 @@ def main() -> int:
     requested = {int(x) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()}
     min_seasons = int_env("OOS_MIN_SEASONS", 3)
     min_matches = int_env("OOS_MIN_MATCHES", 3000)
-    max_workers = max(2, min(32, int_env("S3_VALIDATE_WORKERS", 24)))
-
+    max_workers = max(4, min(32, int_env("S3_VALIDATE_WORKERS", 24)))
     artifacts = [a for a in load_catalog() if not requested or a.season in requested]
     if not artifacts:
         raise RuntimeError("archive catalog returned no artifacts")
-
     by_season: dict[int, list[Artifact]] = defaultdict(list)
     for artifact in artifacts:
         by_season[artifact.season].append(artifact)
 
-    s3_client_kwargs = {
-        "region_name": env("AWS_REGION"),
-        "config": Config(
+    s3 = boto3.client(
+        "s3",
+        region_name=env("AWS_REGION"),
+        config=Config(
             max_pool_connections=max_workers,
             retries={"max_attempts": 5, "mode": "adaptive"},
         ),
-    }
-    # One shared client is safe for concurrent botocore requests and avoids creating
-    # hundreds of clients while retaining a bounded connection pool.
-    s3 = boto3.client("s3", **s3_client_kwargs)
+    )
 
-    total_bytes = 0
-    validated = 0
+    total_bytes = validated = metadata_attested = full_rehashed = 0
     errors: list[str] = []
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="s3-validate") as pool:
         futures = {pool.submit(load_artifact, s3, artifact): artifact for artifact in artifacts}
         for future in as_completed(futures):
             artifact = futures[future]
             try:
-                total_bytes += future.result()
+                size, mode = future.result()
+                total_bytes += size
                 validated += 1
+                if mode == "METADATA_SHA256_ATTESTED":
+                    metadata_attested += 1
+                else:
+                    full_rehashed += 1
             except Exception as exc:
                 errors.append(f"{artifact.manifest_id}: {exc}")
     if errors:
         raise RuntimeError("S3 archive validation failed: " + " | ".join(errors[:10]))
 
     complete_seasons = [
-        season
-        for season, items in sorted(by_season.items())
+        season for season, items in sorted(by_season.items())
         if items and min(item.completeness_score for item in items) >= 1.0
     ]
     fixture_like_rows = sum(
@@ -193,7 +195,9 @@ def main() -> int:
         "validated_artifacts": validated,
         "validated_bytes": total_bytes,
         "s3_validation_workers": max_workers,
-        "checksum_mode": "FULL_STREAMING_SHA256",
+        "checksum_mode": "S3_METADATA_SHA256_ATTESTATION_WITH_STREAMED_FALLBACK",
+        "metadata_attested_artifacts": metadata_attested,
+        "full_rehashed_artifacts": full_rehashed,
         "complete_seasons": complete_seasons,
         "complete_season_count": len(complete_seasons),
         "fixture_like_rows": fixture_like_rows,

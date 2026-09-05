@@ -7,6 +7,8 @@ on:
       - '.github/workflows/prediction-runtime.yml'
       - 'workers/prediction_engine/rolling_prediction_cycle.py'
       - 'workers/prediction_engine/prediction_runtime_entrypoint.py'
+      - 'workers/prediction_engine/prediction_lifecycle.py'
+      - 'supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
@@ -103,10 +105,25 @@ jobs:
             test -n "${!v}" || { echo "missing runtime value: $v"; exit 1; }
           done
 
+      - name: Apply prediction lifecycle schema
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import psycopg
+          sql = Path('supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql').read_text(encoding='utf-8')
+          with psycopg.connect(os.environ['SUPABASE_DB_URL'], connect_timeout=20, sslmode='require') as conn:
+              conn.execute(sql)
+              conn.commit()
+          print('prediction lifecycle schema verified')
+          PY
+
       - name: Validate Python runtime
         run: |
           python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
           python -m py_compile workers/prediction_engine/prediction_runtime_entrypoint.py
+          python -m py_compile workers/prediction_engine/prediction_lifecycle.py
 
       - name: Run prediction lifecycle
         run: python -m workers.prediction_engine.prediction_runtime_entrypoint

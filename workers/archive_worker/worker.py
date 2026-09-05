@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Historical archive worker with S3 object verification."""
+"""Historical archive worker with S3 object verification and persisted SHA-256 attestation."""
 from __future__ import annotations
 
 import hashlib
@@ -98,7 +98,6 @@ def upload_and_verify(payload: bytes, campaign: dict) -> tuple[str, str]:
     bucket = env("S3_BUCKET")
     region = env("S3_REGION")
     endpoint = os.environ.get("S3_ENDPOINT_URL", "").strip() or None
-
     client_kwargs = {
         "service_name": "s3",
         "region_name": region,
@@ -108,23 +107,40 @@ def upload_and_verify(payload: bytes, campaign: dict) -> tuple[str, str]:
     }
     if endpoint:
         client_kwargs["endpoint_url"] = endpoint
-
     client = boto3.client(**client_kwargs)
     prefix = env("S3_PREFIX", required=False, default="zahrly/archive").strip("/")
     key = f"{prefix}/{campaign['dataset_type']}/season={campaign['season']}/campaign={campaign['campaign_id']}.json"
     digest = hashlib.sha256(payload).hexdigest()
 
     set_stage("S3_PUT")
-    client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType="application/json")
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=payload,
+        ContentType="application/json",
+        Metadata={"sha256": digest, "archive-attestation": "archive-worker-sha256"},
+    )
 
     set_stage("S3_HEAD")
     head = client.head_object(Bucket=bucket, Key=key)
     if int(head.get("ContentLength", -1)) != len(payload):
         raise RuntimeError("S3 object length verification failed")
+    metadata = {str(k).lower(): str(v) for k, v in (head.get("Metadata") or {}).items()}
+    if metadata.get("sha256") != digest or metadata.get("archive-attestation") != "archive-worker-sha256":
+        raise RuntimeError("S3 checksum metadata attestation failed")
 
     set_stage("S3_GET")
-    body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
-    if hashlib.sha256(body).hexdigest() != digest:
+    body = client.get_object(Bucket=bucket, Key=key)["Body"]
+    remote_digest = hashlib.sha256()
+    try:
+        while True:
+            chunk = body.read(1024 * 1024)
+            if not chunk:
+                break
+            remote_digest.update(chunk)
+    finally:
+        body.close()
+    if remote_digest.hexdigest() != digest:
         raise RuntimeError("S3 object checksum verification failed")
     return f"s3://{bucket}/{key}", digest
 
@@ -194,5 +210,5 @@ def main() -> int:
             conn.close()
 
 
-if __name__ == "__main__":
+if __name__=='__main__':
     raise SystemExit(main())

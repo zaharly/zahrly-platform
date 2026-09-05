@@ -122,7 +122,7 @@ def main() -> None:
                 conn.execute(
                     "update internal.prediction_jobs set status='QUEUED',started_at=null,"
                     "finished_at=null,error_code='PREDICTION_GATE_BLOCKED',error_message=%s "
-                    "where job_id=%s::uuid and status='RUNNING'",
+                    "where job_id=%s::uuid",
                     (str(exc), job_id),
                 )
                 conn.commit()
@@ -132,7 +132,7 @@ def main() -> None:
                 conn.execute(
                     "update internal.prediction_jobs set status='QUEUED',started_at=null,"
                     "finished_at=null,error_code='LIFECYCLE_RETRY',error_message=%s "
-                    "where job_id=%s::uuid and status='RUNNING'",
+                    "where job_id=%s::uuid",
                     (str(exc)[:2000], job_id),
                 )
                 conn.commit()

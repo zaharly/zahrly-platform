@@ -7,6 +7,7 @@ name: Prediction Training - S3 Archive OOS
 # Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
 # Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
 # Eligibility invariant: archive catalog excludes seasons covered by active RUNNING historical campaigns.
+# Checksum invariant: preflight still validates the full SHA-256 of every artifact; optimization is execution-only.
 on:
   workflow_dispatch:
     inputs:
@@ -27,6 +28,7 @@ on:
       - 'prediction/training-archive-oos-v2'
     paths:
       - '.github/workflows/prediction-training-archive-oos.yml'
+      - 'training/archive_oos/run.py'
       - 'workers/prediction_engine/historical_training_job.py'
       - 'workers/prediction_engine/walk_forward.py'
 
@@ -54,6 +56,7 @@ jobs:
       ARCHIVE_SEASONS: ${{ inputs.seasons || '' }}
       OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
       OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
+      S3_VALIDATE_WORKERS: '24'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

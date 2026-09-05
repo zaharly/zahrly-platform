@@ -95,18 +95,28 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def load_artifact(s3, artifact: Artifact) -> int:
+    """Stream the complete object through SHA-256 while avoiding whole-object RAM spikes."""
     bucket, key = parse_s3_uri(artifact.object_uri)
     obj = s3.get_object(Bucket=bucket, Key=key)
-    data = obj["Body"].read()
-    actual = sha256_bytes(data)
+    body = obj["Body"]
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        while True:
+            chunk = body.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+    finally:
+        body.close()
+    actual = digest.hexdigest()
     if actual != artifact.checksum:
-        raise RuntimeError(f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}")
-    return len(data)
+        raise RuntimeError(
+            f"checksum mismatch manifest={artifact.manifest_id} expected={artifact.checksum} actual={actual}"
+        )
+    return total
 
 
 def int_env(name: str, default: int) -> int:
@@ -132,7 +142,7 @@ def main() -> int:
     requested = {int(x) for x in os.environ.get("ARCHIVE_SEASONS", "").split(",") if x.strip()}
     min_seasons = int_env("OOS_MIN_SEASONS", 3)
     min_matches = int_env("OOS_MIN_MATCHES", 3000)
-    max_workers = max(2, min(16, int_env("S3_VALIDATE_WORKERS", 12)))
+    max_workers = max(2, min(32, int_env("S3_VALIDATE_WORKERS", 24)))
 
     artifacts = [a for a in load_catalog() if not requested or a.season in requested]
     if not artifacts:
@@ -142,21 +152,22 @@ def main() -> int:
     for artifact in artifacts:
         by_season[artifact.season].append(artifact)
 
-    def make_client():
-        return boto3.client(
-            "s3",
-            region_name=env("AWS_REGION"),
-            config=Config(max_pool_connections=max_workers, retries={"max_attempts": 5, "mode": "standard"}),
-        )
-
-    def validate_one(artifact: Artifact) -> int:
-        return load_artifact(make_client(), artifact)
+    s3_client_kwargs = {
+        "region_name": env("AWS_REGION"),
+        "config": Config(
+            max_pool_connections=max_workers,
+            retries={"max_attempts": 5, "mode": "adaptive"},
+        ),
+    }
+    # One shared client is safe for concurrent botocore requests and avoids creating
+    # hundreds of clients while retaining a bounded connection pool.
+    s3 = boto3.client("s3", **s3_client_kwargs)
 
     total_bytes = 0
     validated = 0
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(validate_one, artifact): artifact for artifact in artifacts}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="s3-validate") as pool:
+        futures = {pool.submit(load_artifact, s3, artifact): artifact for artifact in artifacts}
         for future in as_completed(futures):
             artifact = futures[future]
             try:
@@ -182,6 +193,7 @@ def main() -> int:
         "validated_artifacts": validated,
         "validated_bytes": total_bytes,
         "s3_validation_workers": max_workers,
+        "checksum_mode": "FULL_STREAMING_SHA256",
         "complete_seasons": complete_seasons,
         "complete_season_count": len(complete_seasons),
         "fixture_like_rows": fixture_like_rows,

@@ -1,4 +1,5 @@
 from __future__ import annotations
+# Training source invariant: archive preflight must provide the complete season set.
 import hashlib,json,os
 from datetime import datetime,timezone
 from math import log

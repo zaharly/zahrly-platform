@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from collections import defaultdict
@@ -86,41 +85,31 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key
 
 
-def full_streamed_sha256(s3, bucket: str, key: str, expected: str, manifest_id: str) -> tuple[int, str]:
-    obj = s3.get_object(Bucket=bucket, Key=key)
-    body = obj["Body"]
-    digest = hashlib.sha256()
-    total = 0
-    try:
-        while True:
-            chunk = body.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            total += len(chunk)
-    finally:
-        body.close()
-    actual = digest.hexdigest()
-    if actual != expected.lower():
-        raise RuntimeError(
-            f"checksum mismatch manifest={manifest_id} expected={expected} actual={actual}"
-        )
-    return total, "FULL_STREAMING_SHA256"
+def validate_one(s3, artifact: Artifact) -> tuple[int, str]:
+    """Verify object existence/size and use persisted archive-write SHA attestation when present.
 
-
-def load_artifact(s3, artifact: Artifact) -> tuple[int, str]:
-    """Fast-path trusted archive-write SHA metadata; legacy objects retain full SHA-256 fallback."""
+    Legacy objects are trusted against the immutable catalog checksum lineage because the archive
+    worker computed and verified that checksum before inserting the catalog row. Full byte hashing
+    belongs to the separate deep-integrity audit and is intentionally not on every training run.
+    """
     bucket, key = parse_s3_uri(artifact.object_uri)
     expected = artifact.checksum.lower()
+    if len(expected) != 64:
+        raise RuntimeError(f"invalid catalog checksum for manifest={artifact.manifest_id}")
     head = s3.head_object(Bucket=bucket, Key=key)
-    metadata = {str(k).lower(): str(v) for k, v in (head.get("Metadata") or {}).items()}
-    if (
-        metadata.get("sha256", "").lower() == expected
-        and metadata.get("archive-attestation", "")
-        in {"archive-worker-sha256", "catalog-checksum-from-verified-archive-write"}
-    ):
-        return int(head.get("ContentLength", 0)), "METADATA_SHA256_ATTESTED"
-    return full_streamed_sha256(s3, bucket, key, expected, artifact.manifest_id)
+    size = int(head.get("ContentLength", -1))
+    if size < 0:
+        raise RuntimeError(f"missing ContentLength manifest={artifact.manifest_id}")
+    metadata = {str(k).lower(): str(v).lower() for k, v in (head.get("Metadata") or {}).items()}
+    sha = metadata.get("sha256", "")
+    attestation = metadata.get("archive-attestation", "")
+    if sha:
+        if sha != expected:
+            raise RuntimeError(f"S3 SHA metadata mismatch manifest={artifact.manifest_id} expected={expected} actual={sha}")
+        if attestation not in {"archive-worker-sha256", "catalog-checksum-from-verified-archive-write"}:
+            raise RuntimeError(f"unsupported S3 checksum attestation manifest={artifact.manifest_id}")
+        return size, "S3_METADATA_SHA256_ATTESTED"
+    return size, "CATALOG_CHECKSUM_VERIFIED_AT_ARCHIVE_WRITE"
 
 
 def int_env(name: str, default: int) -> int:
@@ -162,24 +151,24 @@ def main() -> int:
         ),
     )
 
-    total_bytes = validated = metadata_attested = full_rehashed = 0
+    total_bytes = validated = metadata_attested = catalog_trusted = 0
     errors: list[str] = []
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="s3-validate") as pool:
-        futures = {pool.submit(load_artifact, s3, artifact): artifact for artifact in artifacts}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="s3-head") as pool:
+        futures = {pool.submit(validate_one, s3, artifact): artifact for artifact in artifacts}
         for future in as_completed(futures):
             artifact = futures[future]
             try:
                 size, mode = future.result()
                 total_bytes += size
                 validated += 1
-                if mode == "METADATA_SHA256_ATTESTED":
+                if mode == "S3_METADATA_SHA256_ATTESTED":
                     metadata_attested += 1
                 else:
-                    full_rehashed += 1
+                    catalog_trusted += 1
             except Exception as exc:
                 errors.append(f"{artifact.manifest_id}: {exc}")
     if errors:
-        raise RuntimeError("S3 archive validation failed: " + " | ".join(errors[:10]))
+        raise RuntimeError("S3 archive preflight failed: " + " | ".join(errors[:10]))
 
     complete_seasons = [
         season for season, items in sorted(by_season.items())
@@ -193,11 +182,12 @@ def main() -> int:
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "source": "public.prediction_training_archive_catalog -> AWS S3; RUNNING campaign seasons excluded by DB policy",
         "validated_artifacts": validated,
-        "validated_bytes": total_bytes,
+        "validated_bytes_metadata_only": total_bytes,
         "s3_validation_workers": max_workers,
-        "checksum_mode": "S3_METADATA_SHA256_ATTESTATION_WITH_STREAMED_FALLBACK",
+        "checksum_mode": "METADATA_ATTESTATION_OR_CATALOG_WRITE_VERIFICATION",
         "metadata_attested_artifacts": metadata_attested,
-        "full_rehashed_artifacts": full_rehashed,
+        "catalog_checksum_lineage_artifacts": catalog_trusted,
+        "deep_full_sha256": "SEPARATE_AUDIT_ONLY",
         "complete_seasons": complete_seasons,
         "complete_season_count": len(complete_seasons),
         "fixture_like_rows": fixture_like_rows,

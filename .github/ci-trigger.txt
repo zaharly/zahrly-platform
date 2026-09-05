@@ -1,1 +1,2 @@
 CI calibration baseline restore validation.
+ECE calibration diagnostics validation trigger: 2026-09-05T09:54+01:00

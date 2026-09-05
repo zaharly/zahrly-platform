@@ -3,34 +3,33 @@ from __future__ import annotations
 from typing import Mapping, Any
 
 
-def evaluate_drift(*, rows: list[Mapping[str, Any]], max_relative_regression: float = 0.01) -> dict[str, Any]:
-    """Evaluate candidate drift against reference metrics.
+def evaluate_drift(*, rows: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Evaluate persisted drift evidence using the database status contract.
 
-    Rows must contain metric_name, baseline_value, current_value. A metric passes
-    when the current value does not regress by more than max_relative_regression
-    for lower-is-better metrics (Brier/LogLoss/RPS/ECE).
+    DB statuses are OK/WARN/ALERT/UNKNOWN. Only OK evidence is promotion-safe.
+    Legacy PASS/FAIL rows are accepted for compatibility with earlier tests.
     """
     if not rows:
         return {"status": "FAIL", "reason": "NO_DRIFT_EVIDENCE", "checks": []}
 
-    lower_is_better = {"brier", "logloss", "rps", "ece", "log_loss"}
     checks = []
     for row in rows:
-        name = str(row.get("metric_name", "")).lower()
-        base = row.get("baseline_value")
-        current = row.get("current_value")
-        if name not in lower_is_better or base is None or current is None or float(base) <= 0:
-            checks.append({"metric_name": name, "status": "UNKNOWN"})
-            continue
-        relative_regression = (float(current) - float(base)) / float(base)
-        passed = relative_regression <= max_relative_regression
+        raw = str(row.get("status", "UNKNOWN")).upper()
+        if raw == "PASS":
+            gate_status = "PASS"
+        elif raw == "OK":
+            gate_status = "PASS"
+        elif raw in {"WARN", "ALERT", "FAIL", "UNKNOWN"}:
+            gate_status = "FAIL"
+        else:
+            gate_status = "FAIL"
         checks.append({
-            "metric_name": name,
-            "status": "PASS" if passed else "FAIL",
-            "baseline": float(base),
-            "current": float(current),
-            "relative_regression": relative_regression,
-            "max_relative_regression": max_relative_regression,
+            "metric_name": str(row.get("metric_name", "")),
+            "source_status": raw,
+            "status": gate_status,
+            "baseline": row.get("baseline_value"),
+            "current": row.get("current_value"),
         })
-    status = "PASS" if checks and all(c["status"] == "PASS" for c in checks) else "FAIL"
-    return {"status": status, "checks": checks, "max_relative_regression": max_relative_regression}
+
+    passed = all(c["status"] == "PASS" for c in checks)
+    return {"status": "PASS" if passed else "FAIL", "checks": checks}

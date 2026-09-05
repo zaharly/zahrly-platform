@@ -1,0 +1,1 @@
+Backend-only regression tests cover drift status semantics, market fallback selection, calibration safety, and reference-vs-production incumbent separation.

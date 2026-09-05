@@ -1,0 +1,93 @@
+name: Prediction Gate Fix Validation
+
+# Temporary validation runner for the gate-fix branch. This branch is isolated
+# from production and 7-Day Rolling. The runner will be removed after validation.
+# Re-run validation automatically after prediction feature-layer fixes.
+# Validation trigger refresh: latest prediction calibration update.
+on:
+  push:
+    branches:
+      - prediction/training-archive-oos-v3-gate-fix
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: prediction-gate-fix-validation
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      AWS_REGION: ${{ secrets.S3_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      S3_BUCKET: zahrly-community-storage
+      S3_REGION: ${{ secrets.S3_REGION }}
+      S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      SUPABASE_URL: https://qosvqlwkexrhswcuakib.supabase.co
+      SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ARCHIVE_COMPLETE_SEASONS: 2008,2009,2010,2011
+      OOS_MIN_SEASONS: '3'
+      OOS_MIN_MATCHES: '3000'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r training/archive_oos/requirements.txt
+          pip install -r workers/archive_worker/requirements.txt
+      - name: Compile prediction engine
+        run: python -m compileall -q workers/prediction_engine
+      - name: Configure Supabase IPv4 Session Pooler
+        shell: bash
+        env:
+          SUPABASE_DB_URL_RAW: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit, quote, urlunsplit
+          import psycopg
+          raw = os.environ['SUPABASE_DB_URL_RAW'].strip()
+          parts = urlsplit(raw)
+          if parts.scheme not in {'postgres', 'postgresql'} or not parts.username or parts.password is None:
+              raise SystemExit('invalid SUPABASE_DB_URL format')
+          project_ref = urlsplit(os.environ['SUPABASE_URL']).hostname.split('.', 1)[0]
+          if project_ref != 'qosvqlwkexrhswcuakib':
+              raise SystemExit('unexpected Supabase project reference')
+          pooler_host = 'aws-0-eu-central-1.pooler.supabase.com'
+          username = quote('postgres.' + project_ref, safe='')
+          password = quote(parts.password, safe='')
+          fixed = urlunsplit((parts.scheme, f'{username}:{password}@{pooler_host}:5432', '/postgres', 'sslmode=require', ''))
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as fh:
+              fh.write('SUPABASE_DB_URL=' + fixed + '\n')
+          with psycopg.connect(fixed, connect_timeout=20, sslmode='require') as conn:
+              conn.execute('select 1')
+          print('Supabase IPv4 Session Pooler connectivity: OK')
+          PY
+      - name: Validate archive manifests
+        run: python training/archive_oos/run.py
+      - name: Run historical training
+        run: python -m workers.prediction_engine.historical_training_job
+      - name: Persist rating checkpoints
+        run: python -m workers.prediction_engine.rating_checkpoints
+      - name: Archive rating checkpoints
+        run: python -m workers.prediction_engine.archive_prediction_artifacts
+      - name: Build OOS benchmark
+        run: python -m workers.prediction_engine.oos_benchmark
+      - name: Run prediction-preserving ECE calibration diagnostics
+        run: python -m workers.prediction_engine.prediction_confidence_calibrator
+      - name: Archive OOS benchmark
+        run: python -m workers.prediction_engine.archive_prediction_artifacts
+      - name: Evaluate promotion gates
+        run: python -m workers.prediction_engine.benchmark_gate

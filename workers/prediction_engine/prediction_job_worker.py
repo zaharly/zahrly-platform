@@ -7,7 +7,6 @@ from workers.prediction_engine.prediction_lifecycle import (
     calibration,
     db_connect,
     load_artifact,
-    load_model,
     policy,
     process,
 )
@@ -19,24 +18,43 @@ class GateBlocked(Exception):
         self.gate = gate
 
 
+def load_job_model(conn, model_id: str):
+    release = conn.execute(
+        "select model_version_id::text as model_version_id,release_version,status,created_at "
+        "from public.model_releases where model_version_id=%s::uuid "
+        "order by created_at desc limit 1",
+        (model_id,),
+    ).fetchone()
+    if not release:
+        raise RuntimeError(f"model_release_missing:{model_id}")
+    model = conn.execute(
+        "select id::text as id,version,artifact_uri,training_cutoff "
+        "from public.model_versions where id=%s::uuid",
+        (model_id,),
+    ).fetchone()
+    if not model or not model.get("artifact_uri"):
+        raise RuntimeError(f"model_artifact_missing:{model_id}")
+    return release, model
+
+
+def load_job_policy(conn, policy_id: str):
+    row = conn.execute(
+        "select id::text as id,version,payload from public.policy_versions where id=%s::uuid",
+        (policy_id,),
+    ).fetchone()
+    if not row:
+        raise RuntimeError(f"policy_missing:{policy_id}")
+    return row
+
+
 def main() -> None:
     now = datetime.now(timezone.utc)
     with db_connect() as conn:
-        release, loaded = load_model(conn)
-        model = dict(loaded)
-        artifact, artifact_sha = load_artifact(model["artifact_uri"])
         temperature, cal_version, cal_status = calibration(conn)
-        training = conn.execute(
-            "select status from public.prediction_training_runs "
-            "where model_version_id=%s::uuid order by started_at desc limit 1",
-            (model["id"],),
-        ).fetchone() or {}
-        pol = policy(conn)
-
         jobs = conn.execute(
             "select j.job_id::text as job_id,j.fixture_id::text as fixture_id,"
-            "j.episode_id::text as episode_id,j.model_version_id::text as old_model_version_id,"
-            "j.policy_bundle_id::text as old_policy_bundle_id,"
+            "j.episode_id::text as episode_id,j.model_version_id::text as model_version_id,"
+            "j.policy_bundle_id::text as policy_bundle_id,"
             "f.home_team_id::text as home_team_id,f.away_team_id::text as away_team_id,"
             "f.kickoff_at,f.status,e.episode_status,e.episode_no "
             "from internal.prediction_jobs j "
@@ -52,15 +70,23 @@ def main() -> None:
             job_id = row["job_id"]
             try:
                 with conn.transaction():
-                    # A job that has never executed can safely be rebound to the
-                    # current shadow candidate. Completed predictions are untouched.
-                    conn.execute(
-                        "update internal.prediction_jobs set model_version_id=%s::uuid,"
-                        "policy_bundle_id=%s::uuid,worker_job_id=%s::uuid,started_at=now(),"
+                    claimed = conn.execute(
+                        "update internal.prediction_jobs set worker_job_id=%s::uuid,started_at=now(),"
                         "finished_at=null,error_code=null,error_message=null,status='RUNNING' "
-                        "where job_id=%s::uuid and status='QUEUED'",
-                        (model["id"], pol["id"], job_id, job_id),
-                    )
+                        "where job_id=%s::uuid and status='QUEUED' returning job_id::text as job_id",
+                        (job_id, job_id),
+                    ).fetchone()
+                    if not claimed:
+                        continue
+
+                    release, model = load_job_model(conn, row["model_version_id"])
+                    pol = load_job_policy(conn, row["policy_bundle_id"])
+                    artifact, artifact_sha = load_artifact(model["artifact_uri"])
+                    training = conn.execute(
+                        "select status from internal.prediction_training_runs "
+                        "where model_version_id=%s::uuid order by started_at desc limit 1",
+                        (model["id"],),
+                    ).fetchone() or {}
                     fixture = {
                         "id": row["fixture_id"],
                         "home_team_id": row["home_team_id"],
@@ -114,8 +140,7 @@ def main() -> None:
 
         print(json.dumps({
             "ok": True,
-            "worker": "prediction-job-worker-v2",
-            "model_version_id": model["id"],
+            "worker": "prediction-job-worker-v3",
             "jobs_claimed": len(jobs),
             "jobs_succeeded": sum(1 for r in results if r.get("status", "").startswith("PUBLISHED") or r.get("read_model_published")),
             "jobs_gate_blocked": sum(1 for r in results if r.get("status") == "GATE_BLOCKED"),

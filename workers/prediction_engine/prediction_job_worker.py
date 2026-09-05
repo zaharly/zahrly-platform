@@ -48,9 +48,74 @@ def load_job_policy(conn, policy_id: str):
     return row
 
 
+def ensure_rolling_lineage(conn, now: datetime) -> tuple[str, int, int, int]:
+    """Materialize the current seven-day window and guarantee every eligible
+    active fixture/episode has an auditable prediction job linked to that window."""
+    window_end = now + __import__('datetime').timedelta(days=7)
+    release = conn.execute(
+        "select model_version_id::text as model_version_id from public.model_releases "
+        "where status in ('SHADOW','ACTIVE') order by created_at desc limit 1"
+    ).fetchone()
+    if not release:
+        raise RuntimeError("prediction_model_release_missing_for_rolling_window")
+    pol = conn.execute(
+        "select id::text as id from public.policy_versions "
+        "where policy_type='prediction' and version='prediction-v1' limit 1"
+    ).fetchone()
+    if not pol:
+        raise RuntimeError("prediction_policy_missing_for_rolling_window")
+
+    window = conn.execute(
+        "insert into internal.prediction_rolling_windows(window_start,window_end,source,status) "
+        "values(%s,%s,'github-actions:prediction-runtime','COMPLETED') returning id::text as id",
+        (now, window_end),
+    ).fetchone()
+
+    candidates = conn.execute(
+        "select f.id::text as fixture_id,e.id::text as episode_id "
+        "from public.fixtures f join public.fixture_episodes e on e.fixture_id=f.id "
+        "where f.status='scheduled' and e.episode_status='ACTIVE' "
+        "and f.kickoff_at>=%s and f.kickoff_at<%s",
+        (now, window_end),
+    ).fetchall()
+    created = 0
+    already = 0
+    for c in candidates:
+        existing = conn.execute(
+            "select job_id::text as job_id from internal.prediction_jobs "
+            "where fixture_id=%s::uuid and episode_id=%s::uuid "
+            "and model_version_id=%s::uuid and policy_bundle_id=%s::uuid limit 1",
+            (c['fixture_id'], c['episode_id'], release['model_version_id'], pol['id']),
+        ).fetchone()
+        if existing:
+            already += 1
+            conn.execute(
+                "update internal.prediction_jobs set rolling_window_id=%s::uuid, "
+                "rolling_entered_at=coalesce(rolling_entered_at,%s),rolling_source='7-day-rolling' "
+                "where job_id=%s::uuid and (rolling_window_id is null or rolling_source is null)",
+                (window['id'], now, existing['job_id']),
+            )
+            continue
+        conn.execute(
+            "insert into internal.prediction_jobs "
+            "(fixture_id,episode_id,model_version_id,policy_bundle_id,status,created_at,rolling_window_id,rolling_entered_at,rolling_source) "
+            "values(%s::uuid,%s::uuid,%s::uuid,%s::uuid,'QUEUED',now(),%s::uuid,%s,'7-day-rolling')",
+            (c['fixture_id'], c['episode_id'], release['model_version_id'], pol['id'], window['id'], now),
+        )
+        created += 1
+
+    conn.execute(
+        "update internal.prediction_rolling_windows set candidate_count=%s,jobs_created=%s,jobs_already_present=%s,status='COMPLETED' "
+        "where id=%s::uuid",
+        (len(candidates), created, already, window['id']),
+    )
+    return window['id'], len(candidates), created, already
+
+
 def main() -> None:
     now = datetime.now(timezone.utc)
     with db_connect() as conn:
+        rolling_window_id, rolling_candidates, rolling_created, rolling_existing = ensure_rolling_lineage(conn, now)
         temperature, cal_version, cal_status = calibration(conn)
         jobs = conn.execute(
             "select j.job_id::text as job_id,j.fixture_id::text as fixture_id,"
@@ -183,7 +248,12 @@ def main() -> None:
 
         print(json.dumps({
             "ok": True,
-            "worker": "prediction-job-worker-v3",
+            "worker": "prediction-job-worker-v4",
+            "rolling_window_id": rolling_window_id,
+            "rolling_window_days": 7,
+            "rolling_candidates": rolling_candidates,
+            "rolling_jobs_created": rolling_created,
+            "rolling_jobs_already_present": rolling_existing,
             "jobs_claimed": len(jobs),
             "jobs_succeeded": sum(1 for r in results if r.get("status", "").startswith("PUBLISHED") or r.get("read_model_published")),
             "jobs_gate_blocked": sum(1 for r in results if r.get("status") == "GATE_BLOCKED"),

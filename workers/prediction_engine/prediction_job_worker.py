@@ -9,6 +9,7 @@ from workers.prediction_engine.prediction_lifecycle import (
     load_artifact,
     policy,
     process,
+    state_coverage,
 )
 
 
@@ -70,9 +71,6 @@ def main() -> None:
             job_id = row["job_id"]
             try:
                 with conn.transaction():
-                    # prediction_jobs.worker_job_id is a real FK to worker_jobs.job_id.
-                    # Reuse the deterministic prediction job id as the worker job id so
-                    # lineage is one-to-one and retries remain idempotent.
                     conn.execute(
                         "insert into internal.worker_jobs "
                         "(job_id,queue_name,idempotency_key,status,attempts,worker_id,started_at,finished_at,error_code,error_message) "
@@ -113,6 +111,23 @@ def main() -> None:
                         "episode_status": row["episode_status"],
                         "episode_no": row["episode_no"],
                     }
+
+                    coverage, missing, sources = state_coverage(artifact, fixture)
+                    if coverage < 1.0:
+                        raise GateBlocked({
+                            "eligible": False,
+                            "canonical_fixture_valid": True,
+                            "identity_quality": 1.0,
+                            "minimum_feature_coverage": coverage,
+                            "model_health": "HEALTHY",
+                            "no_future_leakage": True,
+                            "probability_state_valid": False,
+                            "t_minus_hours": (row["kickoff_at"] - now).total_seconds() / 3600,
+                            "team_state_sources": sources,
+                            "missing_features": missing,
+                            "reason": "missing_team_state",
+                        })
+
                     result = process(
                         conn, fixture, episode, release, model, pol, artifact,
                         artifact_sha, cal_version, cal_status, training.get("status"),

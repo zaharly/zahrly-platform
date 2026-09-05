@@ -81,7 +81,7 @@ jobs:
       - name: Archive rating checkpoints
         run: python -m workers.prediction_engine.archive_prediction_artifacts
       - name: Build OOS benchmark
-        run: python -m workers.prediction_engine.oos_benchmark_calibrated
+        run: python -m workers.prediction_engine.oos_benchmark
       - name: Archive OOS benchmark
         run: python -m workers.prediction_engine.archive_prediction_artifacts
       - name: Evaluate promotion gates

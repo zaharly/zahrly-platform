@@ -1,5 +1,5 @@
 import type { LucideIcon } from 'lucide-react'
-import { LayoutDashboard, Siren, History, Globe, Trophy, CalendarDays, Gauge, AlertTriangle, Archive, Activity, ListTree, Layers, FileClock, CheckSquare, Dices, Server, Radio, Coins, Grid3x3, FileDiff, ListOrdered, Cpu, ClipboardList, Inbox, Clock, Repeat, Boxes, Star, FlaskConical, Eye, BarChart3, TrendingUp, SlidersHorizontal, Undo2, Users, KeyRound, ScrollText, Lock, Timer, MapPin, HeartHandshake, Settings, Flag, Cloud, BookOpen, Gift, BadgeDollarSign, Zap, Medal, Radar } from 'lucide-react'
+import { LayoutDashboard, Siren, History, Globe, Trophy, CalendarDays, Gauge, AlertTriangle, Archive, Activity, ListTree, Layers, FileClock, CheckSquare, Dices, Server, Radio, Coins, Grid3x3, FileDiff, ListOrdered, Cpu, ClipboardList, Inbox, Clock, Repeat, Boxes, Star, FlaskConical, Eye, BarChart3, TrendingUp, SlidersHorizontal, Undo2, Users, KeyRound, ScrollText, Lock, Timer, MapPin, HeartHandshake, Settings, Flag, Cloud, BookOpen, Gift, BadgeDollarSign, Zap, Medal, Radar, FileText } from 'lucide-react'
 
 export interface NavItem { label: string; path: string; icon: LucideIcon; badgeKey?: string; locked?: boolean; lockReason?: string }
 export interface NavGroup { id: string; label: string; items: NavItem[] }
@@ -14,7 +14,7 @@ export const NAV_GROUPS: NavGroup[] = [
   { id:'challenges', label:'Challenges', items:[
     {label:'Pick Rush',path:'/pickrush',icon:Zap},{label:'Prize Pool',path:'/prizepool',icon:Medal}]},
   { id:'discover', label:'Discover', items:[
-    {label:'Bookmakers Radar',path:'/bookmakersradar',icon:Radar},{label:'Leaderboards',path:'/leaderboards',icon:Trophy}]},
+    {label:'Bookmaker Directory',path:'/bookmakersradar',icon:Radar},{label:'Bookmaker Reports',path:'/bookmakersradar/reports',icon:FileText,badgeKey:'bookmakerReports'},{label:'Leaderboards',path:'/leaderboards',icon:Trophy}]},
   { id:'predictions', label:'Predictions', items:[
     {label:'Prediction Monitor',path:'/predictions',icon:Activity},{label:'Prediction Episodes',path:'/predictions/episodes',icon:ListTree},{label:'Markets',path:'/markets',icon:Layers},{label:'Evidence Updates',path:'/predictions/evidence',icon:FileClock},{label:'Consistency',path:'/predictions/consistency',icon:CheckSquare,badgeKey:'consistency'},{label:'Simulation',path:'/predictions/simulation',icon:Dices}]},
   { id:'providers', label:'Providers', items:[

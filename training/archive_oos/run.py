@@ -34,7 +34,7 @@ def env(name: str) -> str:
 
 
 def load_catalog() -> list[Artifact]:
-    """Load the complete archive catalog, not just the first REST page."""
+    """Load the complete eligible archive catalog; the DB RPC excludes active RUNNING campaign seasons."""
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
     url = f"{base}/rest/v1/rpc/prediction_training_archive_catalog"
@@ -178,7 +178,7 @@ def main() -> int:
     export_complete_seasons(complete_seasons)
     report = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "source": "public.prediction_training_archive_catalog -> AWS S3",
+        "source": "public.prediction_training_archive_catalog -> AWS S3; RUNNING campaign seasons excluded by DB policy",
         "validated_artifacts": validated,
         "validated_bytes": total_bytes,
         "s3_validation_workers": max_workers,

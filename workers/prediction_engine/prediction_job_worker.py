@@ -4,14 +4,19 @@ import json
 from datetime import datetime, timezone
 
 from workers.prediction_engine.prediction_lifecycle import (
-    baseline,
+    calibration,
     db_connect,
     load_artifact,
     load_model,
-    calibration,
     policy,
     process,
 )
+
+
+class GateBlocked(Exception):
+    def __init__(self, gate: dict):
+        super().__init__(json.dumps(gate, default=str))
+        self.gate = gate
 
 
 def main() -> None:
@@ -46,63 +51,62 @@ def main() -> None:
         for row in jobs:
             job_id = row["job_id"]
             try:
-                # QUEUED jobs have not executed yet. Rebind them atomically to the
-                # current shadow candidate so stale model/policy lineage cannot block
-                # the unified lifecycle. No completed prediction is rewritten here.
-                conn.execute(
-                    "update internal.prediction_jobs set model_version_id=%s::uuid,"
-                    "policy_bundle_id=%s::uuid,worker_job_id=%s::uuid,started_at=now(),"
-                    "finished_at=null,error_code=null,error_message=null,status='RUNNING' "
-                    "where job_id=%s::uuid and status='QUEUED'",
-                    (model["id"], pol["id"], job_id, job_id),
-                )
-                fixture = {
-                    "id": row["fixture_id"],
-                    "home_team_id": row["home_team_id"],
-                    "away_team_id": row["away_team_id"],
-                    "kickoff_at": row["kickoff_at"],
-                    "status": row["status"],
-                }
-                episode = {
-                    "id": row["episode_id"],
-                    "fixture_id": row["fixture_id"],
-                    "episode_status": row["episode_status"],
-                    "episode_no": row["episode_no"],
-                }
-                result = process(
-                    conn, fixture, episode, release, model, pol, artifact,
-                    artifact_sha, cal_version, cal_status, training.get("status"),
-                    temperature, now,
-                )
-                if result.get("read_model_published"):
+                with conn.transaction():
+                    # A job that has never executed can safely be rebound to the
+                    # current shadow candidate. Completed predictions are untouched.
+                    conn.execute(
+                        "update internal.prediction_jobs set model_version_id=%s::uuid,"
+                        "policy_bundle_id=%s::uuid,worker_job_id=%s::uuid,started_at=now(),"
+                        "finished_at=null,error_code=null,error_message=null,status='RUNNING' "
+                        "where job_id=%s::uuid and status='QUEUED'",
+                        (model["id"], pol["id"], job_id, job_id),
+                    )
+                    fixture = {
+                        "id": row["fixture_id"],
+                        "home_team_id": row["home_team_id"],
+                        "away_team_id": row["away_team_id"],
+                        "kickoff_at": row["kickoff_at"],
+                        "status": row["status"],
+                    }
+                    episode = {
+                        "id": row["episode_id"],
+                        "fixture_id": row["fixture_id"],
+                        "episode_status": row["episode_status"],
+                        "episode_no": row["episode_no"],
+                    }
+                    result = process(
+                        conn, fixture, episode, release, model, pol, artifact,
+                        artifact_sha, cal_version, cal_status, training.get("status"),
+                        temperature, now,
+                    )
+                    gate = result.get("gate") or {}
+                    if not gate.get("eligible"):
+                        raise GateBlocked(gate)
+                    if not result.get("read_model_published"):
+                        raise RuntimeError("prediction_lifecycle_did_not_publish_read_model")
                     conn.execute(
                         "update internal.prediction_jobs set status='SUCCEEDED',"
                         "finished_at=now(),error_code=null,error_message=null "
                         "where job_id=%s::uuid",
                         (job_id,),
                     )
-                elif result.get("status") == "GATE_BLOCKED":
-                    conn.execute(
-                        "update internal.prediction_jobs set status='QUEUED',"
-                        "started_at=null,finished_at=null,error_code='PREDICTION_GATE_BLOCKED',"
-                        "error_message=%s where job_id=%s::uuid",
-                        (json.dumps(result.get("gate", {}), default=str), job_id),
-                    )
-                else:
-                    conn.execute(
-                        "update internal.prediction_jobs set status='QUEUED',"
-                        "started_at=null,finished_at=null,error_code='LIFECYCLE_RETRY',"
-                        "error_message=%s where job_id=%s::uuid",
-                        (result.get("status", "RETRY"), job_id),
-                    )
-                conn.commit()
                 results.append(result)
+            except GateBlocked as exc:
+                conn.rollback()
+                conn.execute(
+                    "update internal.prediction_jobs set status='QUEUED',started_at=null,"
+                    "finished_at=null,error_code='PREDICTION_GATE_BLOCKED',error_message=%s "
+                    "where job_id=%s::uuid and status='RUNNING'",
+                    (str(exc), job_id),
+                )
+                conn.commit()
+                results.append({"job_id": job_id, "status": "GATE_BLOCKED", "gate": exc.gate})
             except Exception as exc:
                 conn.rollback()
                 conn.execute(
-                    "update internal.prediction_jobs set status='QUEUED',"
-                    "started_at=null,finished_at=null,error_code='LIFECYCLE_RETRY',"
-                    "error_message=%s where job_id=%s::uuid and status='RUNNING'",
+                    "update internal.prediction_jobs set status='QUEUED',started_at=null,"
+                    "finished_at=null,error_code='LIFECYCLE_RETRY',error_message=%s "
+                    "where job_id=%s::uuid and status='RUNNING'",
                     (str(exc)[:2000], job_id),
                 )
                 conn.commit()
@@ -110,10 +114,10 @@ def main() -> None:
 
         print(json.dumps({
             "ok": True,
-            "worker": "prediction-job-worker-v1",
+            "worker": "prediction-job-worker-v2",
             "model_version_id": model["id"],
             "jobs_claimed": len(jobs),
-            "jobs_succeeded": sum(1 for r in results if r.get("read_model_published")),
+            "jobs_succeeded": sum(1 for r in results if r.get("status", "").startswith("PUBLISHED") or r.get("read_model_published")),
             "jobs_gate_blocked": sum(1 for r in results if r.get("status") == "GATE_BLOCKED"),
             "jobs_retry": sum(1 for r in results if r.get("status") == "RETRY"),
         }, default=str))

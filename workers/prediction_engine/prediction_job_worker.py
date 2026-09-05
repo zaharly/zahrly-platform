@@ -70,6 +70,19 @@ def main() -> None:
             job_id = row["job_id"]
             try:
                 with conn.transaction():
+                    # prediction_jobs.worker_job_id is a real FK to worker_jobs.job_id.
+                    # Reuse the deterministic prediction job id as the worker job id so
+                    # lineage is one-to-one and retries remain idempotent.
+                    conn.execute(
+                        "insert into internal.worker_jobs "
+                        "(job_id,queue_name,idempotency_key,status,attempts,worker_id,started_at,finished_at,error_code,error_message) "
+                        "values (%s::uuid,'prediction_queue',%s,'RUNNING',1,'prediction-job-worker-v3',now(),null,null,null) "
+                        "on conflict (job_id) do update set "
+                        "status='RUNNING',attempts=internal.worker_jobs.attempts+1,"
+                        "worker_id='prediction-job-worker-v3',started_at=now(),finished_at=null,"
+                        "error_code=null,error_message=null",
+                        (job_id, f"prediction:{job_id}"),
+                    )
                     claimed = conn.execute(
                         "update internal.prediction_jobs set worker_job_id=%s::uuid,started_at=now(),"
                         "finished_at=null,error_code=null,error_message=null,status='RUNNING' "
@@ -116,13 +129,23 @@ def main() -> None:
                         "where job_id=%s::uuid",
                         (job_id,),
                     )
+                    conn.execute(
+                        "update internal.worker_jobs set status='SUCCEEDED',finished_at=now(),"
+                        "error_code=null,error_message=null where job_id=%s::uuid",
+                        (job_id,),
+                    )
                 results.append(result)
             except GateBlocked as exc:
                 conn.rollback()
                 conn.execute(
-                    "update internal.prediction_jobs set status='QUEUED',started_at=null,"
+                    "update internal.prediction_jobs set status='QUEUED',worker_job_id=null,started_at=null,"
                     "finished_at=null,error_code='PREDICTION_GATE_BLOCKED',error_message=%s "
                     "where job_id=%s::uuid",
+                    (str(exc), job_id),
+                )
+                conn.execute(
+                    "update internal.worker_jobs set status='RETRYABLE',finished_at=now(),"
+                    "error_code='PREDICTION_GATE_BLOCKED',error_message=%s where job_id=%s::uuid",
                     (str(exc), job_id),
                 )
                 conn.commit()
@@ -130,9 +153,14 @@ def main() -> None:
             except Exception as exc:
                 conn.rollback()
                 conn.execute(
-                    "update internal.prediction_jobs set status='QUEUED',started_at=null,"
+                    "update internal.prediction_jobs set status='QUEUED',worker_job_id=null,started_at=null,"
                     "finished_at=null,error_code='LIFECYCLE_RETRY',error_message=%s "
                     "where job_id=%s::uuid",
+                    (str(exc)[:2000], job_id),
+                )
+                conn.execute(
+                    "update internal.worker_jobs set status='RETRYABLE',finished_at=now(),"
+                    "error_code='LIFECYCLE_RETRY',error_message=%s where job_id=%s::uuid",
                     (str(exc)[:2000], job_id),
                 )
                 conn.commit()

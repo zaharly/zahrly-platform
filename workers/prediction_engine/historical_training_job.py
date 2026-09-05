@@ -10,6 +10,7 @@ from .dixon_coles import DixonColesPolicy,time_decay_weight
 from .elo import EloPolicy,EloState,update_elo
 from .glicko import GlickoPolicy,initial_state,update_pair
 from .season_resolver import normalize_season_label,season_start_year
+from .walk_forward import _team_rates
 MIN_OOS_SAMPLES=3000;MIN_COMPLETE_SEASONS=3;MODEL_VERSION_ADVISORY_LOCK_KEY=74123819
 
 def _normalized_db_url():
@@ -40,13 +41,19 @@ def _fit_glicko(ms,cut,p):
  return r
 
 def _fit_dc(ms,cut,p):
- gf={};ga={};tw=tg=0.
- for m in ms:
-  if m.played_at>=cut:break
-  w=time_decay_weight((cut-m.played_at).total_seconds()/864.,p.decay_half_life_days)
-  for t,x,y in ((m.home_team_id,m.home_goals,m.away_goals),(m.away_team_id,m.away_goals,m.home_goals)):gf[t]=gf.get(t,0)+w*x;ga[t]=ga.get(t,0)+w*y
-  tw+=2*w;tg+=w*(m.home_goals+m.away_goals)
- rate=max(tg/max(tw,1e-12),1e-6);den=max(tw/2,1e-12);return rate,{t:(v/den)/rate for t,v in gf.items()},{t:(v/den)/rate for t,v in ga.items()}
+ return _team_rates(ms,cut,p)
+
+def _validate_dc_fit(rate,attack,defense):
+ if not isinstance(rate,(int,float)) or not (0.25 <= float(rate) <= 4.0):
+  raise RuntimeError(f'prediction_training_gate_failed:invalid_dc_league_rate:{rate!r}')
+ if len(attack) < 2 or len(defense) < 2:
+  raise RuntimeError(f'prediction_training_gate_failed:insufficient_dc_team_parameters:attack={len(attack)}:defense={len(defense)}')
+ vals=list(attack.values())+list(defense.values())
+ if not all(isinstance(v,(int,float)) and v==v and abs(float(v))<100 for v in vals):
+  raise RuntimeError('prediction_training_gate_failed:nonfinite_dc_team_parameters')
+ if all(abs(float(v)) <= 1e-12 for v in vals):
+  raise RuntimeError('prediction_training_gate_failed:dc_team_parameters_all_zero')
+
 
 def _upload(payload,version):
  raw=json.dumps(payload,sort_keys=True,separators=(',',':')).encode();sha=hashlib.sha256(raw).hexdigest();s=boto3.client('s3',region_name=os.environ.get('S3_REGION','eu-north-1'),endpoint_url=os.environ.get('S3_ENDPOINT_URL') or None,aws_access_key_id=os.environ['S3_ACCESS_KEY_ID'],aws_secret_access_key=os.environ['S3_SECRET_ACCESS_KEY']);key=f'zahrly/models/prediction_engine/{version}.json';s.put_object(Bucket=os.environ['S3_BUCKET'],Key=key,Body=raw,ContentType='application/json',Metadata={'sha256':sha,'model_version':version});return f"s3://{os.environ['S3_BUCKET']}/{key}",sha
@@ -107,11 +114,11 @@ def main():
    with conn.transaction():
     for s,(train,test,fc) in zip(summaries,usable):conn.execute("insert into internal.prediction_training_folds(training_run_id,fold_no,train_cutoff,test_start,test_end,status,metrics) values (%s,%s,%s,%s,%s,'SUCCEEDED',%s)",(run_id,s['fold_no'],fc,min(m.played_at for m in test),max(m.played_at for m in test),json.dumps(s)))
    if not total:raise RuntimeError(f'prediction_training_gate_failed:no_oos_predictions:fold_preview={preview}')
-   ep=EloPolicy();gp=GlickoPolicy();dp=DixonColesPolicy();elo=_fit_elo(matches,cutoff,ep);g=_fit_glicko(matches,cutoff,gp);rate,attack,defense=_fit_dc(matches,cutoff,dp);metrics={'settled_matches':len(matches),'folds':len(summaries),'complete_oos_seasons':len(oos_seasons),'oos_seasons':sorted(oos_seasons,key=lambda s:season_start_year(s)),'predictions':int(total),'brier_1x2_mean':tb/total,'log_loss_1x2_mean':tl/total,'rps_1x2_mean':tr/total,'folds_detail':summaries,'feature_layer':{'enabled':True,'datasets':'historical_archive','no_same_fixture_post_match_leakage':True},'season_resolver':{'source':'api-football','archive_key_preserved':True,'logical_labels':sorted(season_inventory,key=lambda s:season_start_year(s))},'validation_status':'ELIGIBLE' if total>=MIN_OOS_SAMPLES and len(oos_seasons)>=MIN_COMPLETE_SEASONS else 'INSUFFICIENT_HISTORY','validation_eligible':total>=MIN_OOS_SAMPLES and len(oos_seasons)>=MIN_COMPLETE_SEASONS,'promotion_blocked':True}
+   ep=EloPolicy();gp=GlickoPolicy();dp=DixonColesPolicy();elo=_fit_elo(matches,cutoff,ep);g=_fit_glicko(matches,cutoff,gp);rate,attack,defense=_fit_dc(matches,cutoff,dp);_validate_dc_fit(rate,attack,defense);metrics={'settled_matches':len(matches),'folds':len(summaries),'complete_oos_seasons':len(oos_seasons),'oos_seasons':sorted(oos_seasons,key=lambda s:season_start_year(s)),'predictions':int(total),'brier_1x2_mean':tb/total,'log_loss_1x2_mean':tl/total,'rps_1x2_mean':tr/total,'dc_fit':{'league_rate':rate,'attack_teams':len(attack),'defense_teams':len(defense),'attack_min':min(attack.values()),'attack_max':max(attack.values()),'defense_min':min(defense.values()),'defense_max':max(defense.values())},'folds_detail':summaries,'feature_layer':{'enabled':True,'datasets':'historical_archive','no_same_fixture_post_match_leakage':True},'season_resolver':{'source':'api-football','archive_key_preserved':True,'logical_labels':sorted(season_inventory,key=lambda s:season_start_year(s))},'validation_status':'ELIGIBLE' if total>=MIN_OOS_SAMPLES and len(oos_seasons)>=MIN_COMPLETE_SEASONS else 'INSUFFICIENT_HISTORY','validation_eligible':total>=MIN_OOS_SAMPLES and len(oos_seasons)>=MIN_COMPLETE_SEASONS,'promotion_blocked':True}
    artifact={'schema_version':'zahrly-prediction-model-v1','model_version_id':model_id,'family':'prediction_engine','training_cutoff':cutoff.isoformat(),'training_source':'s3_fixture_archive','metrics':metrics,'elo':{'initial_rating':ep.initial_rating,'home_advantage':ep.home_advantage,'rating_scale':ep.rating_scale,'k_factor':ep.k_factor,'ratings':{t:x.rating for t,x in elo.items()}},'glicko':{'initial_rating':gp.initial_rating,'initial_rd':gp.initial_rd,'initial_volatility':gp.initial_volatility,'ratings':{t:{'rating':x.rating,'rd':x.rating_deviation,'volatility':x.volatility} for t,x in g.items()}},'dixon_coles':{'decay_half_life_days':dp.decay_half_life_days,'home_advantage':dp.home_advantage,'rho':dp.rho,'max_goals':dp.max_goals,'league_rate':rate,'attack':attack,'defense':defense}}
    uri,sha=_upload(artifact,version);metrics.update({'artifact_uri':uri,'artifact_sha256':sha})
    with conn.transaction():conn.execute("update internal.prediction_training_runs set status='SUCCEEDED',finished_at=now(),metrics=%s where id=%s",(json.dumps(metrics),run_id));conn.execute("update public.model_versions set artifact_uri=%s where id=%s",(uri,model_id));conn.execute("insert into public.model_releases(model_version_id,release_version,status,approval_state,reason) values (%s,%s,'SHADOW','PENDING','historical OOS candidate; promotion remains blocked') on conflict(model_version_id,release_version) do nothing",(model_id,version))
-   print(json.dumps({'status':'SUCCEEDED','training_run_id':run_id,'model_version_id':model_id,'version':version,**{k:metrics[k] for k in ('settled_matches','complete_oos_seasons','predictions','validation_status','validation_eligible','artifact_uri','artifact_sha256')}},sort_keys=True),flush=True)
+   print(json.dumps({'status':'SUCCEEDED','training_run_id':run_id,'model_version_id':model_id,'version':version,**{k:metrics[k] for k in ('settled_matches','complete_oos_seasons','predictions','validation_status','validation_eligible','artifact_uri','artifact_sha256','dc_fit')}},sort_keys=True),flush=True)
   except Exception as exc:
    with conn.transaction():conn.execute("update internal.prediction_training_runs set status='FAILED',finished_at=now(),metrics=coalesce(metrics,'{}'::jsonb)||%s::jsonb where id=%s",(json.dumps({'error':str(exc)[:2000]}),run_id))
    raise

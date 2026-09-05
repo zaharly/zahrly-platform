@@ -1,1 +1,1 @@
-CI baseline trigger for Task 1.3 validation.
+CI calibration baseline restore validation.

@@ -97,6 +97,7 @@ jobs:
           PY
       - name: Validate lifecycle contract and unit tests
         run: |
+          export PYTHONPATH="${GITHUB_WORKSPACE}"
           python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
           python -m py_compile workers/prediction_engine/prediction_model_core.py
           python -m py_compile workers/prediction_engine/prediction_inference.py
@@ -104,6 +105,6 @@ jobs:
           python -m py_compile workers/prediction_engine/prediction_runtime_entrypoint.py
           python -m py_compile workers/prediction_engine/prediction_lifecycle.py
           python -m py_compile workers/prediction_engine/prediction_job_worker.py
-          pytest -q workers/prediction_engine/tests/test_model_and_markets.py
+          python -m pytest -q workers/prediction_engine/tests/test_model_and_markets.py
       - name: Run queued prediction jobs
         run: python -m workers.prediction_engine.prediction_job_worker

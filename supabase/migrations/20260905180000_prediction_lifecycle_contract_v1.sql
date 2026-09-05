@@ -24,3 +24,8 @@ $$;
 
 alter table internal.prediction_baseline_gate_evaluations enable row level security;
 revoke all on internal.prediction_baseline_gate_evaluations from public, anon, authenticated;
+grant usage on schema internal to service_role;
+grant select, insert on internal.prediction_baseline_gate_evaluations to service_role;
+
+-- The canonical lifecycle both records and publishes the shadow read-model.
+grant select, insert, update on public.prediction_read_models to service_role;

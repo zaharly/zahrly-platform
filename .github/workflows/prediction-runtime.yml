@@ -72,37 +72,6 @@ jobs:
           print('Supabase IPv4 Session Pooler configured')
           PY
 
-      - name: Retire legacy Supabase prediction schedulers
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -u
-          python - <<'PY'
-          import os
-          import psycopg
-          names = [
-              'prediction-shadow-scheduler-v1',
-              'prediction-controlled-canary-scheduler-v1',
-              'prediction-market-evidence-v1',
-              'prediction-market-benchmark-v1',
-              'prediction-market-settlement-sync-v1',
-              'prediction-promotion-gate-runner-v1',
-          ]
-          conn = psycopg.connect(os.environ['SUPABASE_DB_URL'], connect_timeout=20, sslmode='require')
-          try:
-              for name in names:
-                  try:
-                      with conn.cursor() as cur:
-                          cur.execute('select cron.unschedule(%s)', (name,))
-                      conn.commit()
-                      print('retired:', name)
-                  except Exception as exc:
-                      conn.rollback()
-                      print('legacy scheduler not retired:', name, type(exc).__name__, str(exc))
-          finally:
-              conn.close()
-          PY
-
       - name: Validate runtime secrets
         shell: bash
         run: |

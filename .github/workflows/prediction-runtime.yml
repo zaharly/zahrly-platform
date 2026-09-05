@@ -6,6 +6,7 @@ on:
     paths:
       - '.github/workflows/prediction-runtime.yml'
       - 'workers/prediction_engine/rolling_prediction_cycle.py'
+      - 'workers/prediction_engine/prediction_runtime_entrypoint.py'
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
@@ -72,7 +73,9 @@ jobs:
           done
 
       - name: Validate Python runtime
-        run: python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
+        run: |
+          python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
+          python -m py_compile workers/prediction_engine/prediction_runtime_entrypoint.py
 
       - name: Run prediction lifecycle
-        run: python -m workers.prediction_engine.rolling_prediction_cycle
+        run: python -m workers.prediction_engine.prediction_runtime_entrypoint

@@ -6,6 +6,7 @@ name: Prediction Training - S3 Archive OOS
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
 # Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
 # Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
+# Eligibility invariant: archive catalog excludes seasons covered by active RUNNING historical campaigns.
 on:
   workflow_dispatch:
     inputs:

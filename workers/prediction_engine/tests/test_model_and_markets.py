@@ -1,16 +1,13 @@
 from workers.prediction_engine.market_derivations import derive_goal_markets, derive_count_markets
-from workers.prediction_engine.prediction_model_core import predict_fixture
+from workers.prediction_engine.prediction_inference import predict_fixture
 
 
-def test_missing_team_state_is_not_silently_defaulted():
+def test_unseen_team_uses_explicit_neutral_cold_start():
     artifact={"elo":{"ratings":{}},"dixon_coles":{"attack":{},"defense":{},"league_rate":1.2,"rho":-0.1}}
     fixture={"home_team_id":"1","away_team_id":"2"}
-    try:
-        predict_fixture(fixture,artifact,0.73)
-    except RuntimeError as exc:
-        assert "missing_team_state" in str(exc)
-    else:
-        raise AssertionError("missing team state must fail closed")
+    result=predict_fixture(fixture,artifact,0.73)
+    assert result["state_sources"] == {"home":"COLD_START_NEUTRAL","away":"COLD_START_NEUTRAL"}
+    assert abs(sum(result["probabilities"].values())-1) < 1e-9
 
 
 def test_goal_markets_share_one_score_state():

@@ -18,6 +18,7 @@ on:
       - 'workers/prediction_engine/tests/**'
       - 'supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'
       - 'supabase/migrations/20260905185600_prediction_lifecycle_evidence_readmodel_v2.sql'
+      - 'supabase/migrations/20260905193500_prediction_market_state_shadow_status_v1.sql'
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
@@ -88,6 +89,7 @@ jobs:
           migrations = [
               Path('supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'),
               Path('supabase/migrations/20260905185600_prediction_lifecycle_evidence_readmodel_v2.sql'),
+              Path('supabase/migrations/20260905193500_prediction_market_state_shadow_status_v1.sql'),
           ]
           with psycopg.connect(os.environ['SUPABASE_DB_URL'], connect_timeout=20, sslmode='require') as conn:
               for path in migrations:

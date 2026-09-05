@@ -8,6 +8,7 @@ name: Prediction Training - S3 Archive OOS
 # Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
 # Eligibility invariant: archive catalog excludes seasons covered by active RUNNING historical campaigns.
 # Checksum invariant: archive writes persist a SHA-256 attestation; preflight verifies it from S3 HEAD and rehashes legacy/unattested objects.
+# Latest-test trigger: 2026-09-05 latest-code verification run.
 on:
   workflow_dispatch:
     inputs:

@@ -99,15 +99,80 @@ function predict(f: any, a: any, temperature: number) {
   const raw = probs(lh, la, Number(dc.rho ?? -.1), Math.min(Math.max(Number(dc.max_goals ?? 10), 1), 12));
   return { lambdas: { home: lh, away: la }, raw_probabilities: raw, probabilities: temperatureScale(raw, temperature) };
 }
+
+async function persistShadowPrediction(f: any, prediction: any, modelId: string, policyId: string, releaseVersion: string, calibration: any, artifactSha: string) {
+  if (releaseVersion === "") throw new Error("invalid_shadow_release");
+  const probs = prediction.probabilities;
+  const picks = [
+    ["1x2_home", probs.home, "HOME"],
+    ["1x2_draw", probs.draw, "DRAW"],
+    ["1x2_away", probs.away, "AWAY"]
+  ] as const;
+  const top = picks.reduce((best, row) => row[1] > best[1] ? row : best, picks[0]);
+  const canonical = JSON.stringify({ episode_id: f.episode_id, model_version_id: modelId, policy_bundle_id: policyId, calibration_policy: calibration.version, artifact_sha256: artifactSha, lambdas: prediction.lambdas, raw_probabilities: prediction.raw_probabilities, probabilities: prediction.probabilities });
+  const baselineHash = await sha256(canonical);
+
+  const existing = await db.from("prediction_baselines").select("id,model_version_id,policy_bundle_id,baseline_hash,baseline_pick,baseline_probability").eq("episode_id", f.episode_id).maybeSingle();
+  if (existing.error) throw existing.error;
+  let baseline = existing.data;
+  if (!baseline) {
+    const inserted = await db.from("prediction_baselines").insert({ episode_id: f.episode_id, model_version_id: modelId, policy_bundle_id: policyId, baseline_pick: top[2], baseline_probability: top[1], baseline_hash: baselineHash }).select("id,model_version_id,policy_bundle_id,baseline_hash,baseline_pick,baseline_probability").single();
+    if (inserted.error) throw inserted.error;
+    baseline = inserted.data;
+  }
+  if (!baseline || baseline.model_version_id !== modelId || baseline.policy_bundle_id !== policyId) {
+    throw new Error("shadow_baseline_conflict_existing_model_or_policy");
+  }
+
+  const marketRows = picks.map(([marketKey, probability]) => ({
+    baseline_id: baseline.id,
+    episode_id: f.episode_id,
+    market_key: marketKey,
+    probability,
+    fair_odds: probability > 0 ? 1 / probability : null,
+    status: "SHADOW",
+    updated_at: new Date().toISOString()
+  }));
+  const markets = await db.from("prediction_market_states").upsert(marketRows, { onConflict: "episode_id,market_key" });
+  if (markets.error) throw markets.error;
+
+  const evidenceHash = await sha256(JSON.stringify({ baseline_hash: baseline.baseline_hash, artifact_sha256: artifactSha, calibration_policy: calibration.version, type: "BASELINE_CREATED" }));
+  const evidence = await db.from("prediction_evidence_updates").upsert({
+    baseline_id: baseline.id,
+    evidence_seq: 1,
+    evidence_type: "BASELINE_CREATED",
+    current_probability: top[1],
+    model_version_id: modelId,
+    evidence_snapshot_hash: evidenceHash
+  }, { onConflict: "baseline_id,evidence_snapshot_hash" });
+  if (evidence.error) throw evidence.error;
+
+  return { baseline_id: baseline.id, baseline_hash: baseline.baseline_hash, market_states: 3, evidence_recorded: true, published_read_model: false };
+}
+
 async function run() {
   const { release, model } = await candidate();
+  if (String(release.status).toUpperCase() !== "SHADOW") throw new Error("shadow_persistence_requires_shadow_release");
   const training = await gate(model.id);
   const policy = await ensurePolicy(); await ensureMarkets();
   const calibration = await calibrationPolicy();
   const a = await artifact(model.artifact_uri);
-  const { data: fixtures, error } = await db.from("fixtures").select("id,home_team_id,away_team_id,kickoff_at,status").eq("status", "scheduled").gte("kickoff_at", new Date().toISOString()).order("kickoff_at", { ascending: true }).limit(MAX_FIXTURES);
+  const { data: fixtures, error } = await db.from("fixtures").select("id,home_team_id,away_team_id,kickoff_at,status,fixture_episodes!inner(id,episode_status)").eq("status", "scheduled").eq("fixture_episodes.episode_status", "ACTIVE").gte("kickoff_at", new Date().toISOString()).order("kickoff_at", { ascending: true }).limit(MAX_FIXTURES);
   if (error) throw error;
-  const previews = (fixtures ?? []).map(f => ({ fixture_id: f.id, kickoff_at: f.kickoff_at, ...predict(f, a.artifact, calibration.temperature) }));
-  return { ok: true, mode: "shadow", model: { id: model.id, version: model.version, release_version: release.release_version, artifact_sha256: a.sha }, training, policy_bundle_id: policy.id, calibration, fixtures_considered: previews.length, shadow_persistence: "disabled_until_gate", previews };
+  const previews = [] as any[];
+  for (const f of fixtures ?? []) {
+    const episode = Array.isArray(f.fixture_episodes) ? f.fixture_episodes[0] : f.fixture_episodes;
+    if (!episode?.id) continue;
+    const fixture = { ...f, episode_id: episode.id };
+    const prediction = predict(fixture, a.artifact, calibration.temperature);
+    const persistence = await persistShadowPrediction(fixture, prediction, model.id, policy.id, release.release_version, calibration, a.sha);
+    previews.push({ fixture_id: f.id, episode_id: episode.id, kickoff_at: f.kickoff_at, ...prediction, persistence });
+  }
+  return { ok: true, mode: "shadow", model: { id: model.id, version: model.version, release_version: release.release_version, artifact_sha256: a.sha }, training, policy_bundle_id: policy.id, calibration, fixtures_considered: previews.length, shadow_persistence: "auditable", read_model_published: false, promotion: { allowed: false, reason: "shadow_release_only" }, previews };
 }
-Deno.serve(async req => { if (req.method !== "POST") return response({ ok: false, error: "POST required" }, 405); try { return response(await run()); } catch (e) { return response({ ok: false, error: String(e) }, 409); } });
+
+Deno.serve(async req => {
+  if (req.method !== "POST") return response({ ok: false, error: "POST required" }, 405);
+  try { return response(await run()); }
+  catch (e) { return response({ ok: false, error: String(e) }, 409); }
+});

@@ -7,8 +7,8 @@ name: Prediction Training - S3 Archive OOS
 # Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
 # Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
 # Eligibility invariant: archive catalog excludes seasons covered by active RUNNING historical campaigns.
-# Checksum invariant: archive writes persist SHA-256 attestation; preflight uses S3 HEAD when present and catalog checksum lineage for legacy verified archives.
-# Latest-test trigger: 2026-09-05 latest-code verification run.
+# Checksum invariant: archive writes persist SHA-256 attestation; preflight performs structural catalog validation only; full SHA-256 is performed while training reads the exact bytes.
+# Scheduling invariant: historical validation runs are isolated by run id; they must never cancel or queue behind another historical validation run.
 on:
   workflow_dispatch:
     inputs:
@@ -32,11 +32,12 @@ on:
       - 'training/archive_oos/run.py'
       - 'workers/archive_worker/worker.py'
       - 'workers/prediction_engine/historical_training_job.py'
+      - 'workers/prediction_engine/archive_training_source.py'
       - 'workers/prediction_engine/walk_forward.py'
 
 concurrency:
-  group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}-${{ github.run_id }}
+  cancel-in-progress: false
 
 jobs:
   archive-preflight:

@@ -12,10 +12,30 @@ def evaluate_promotion(*, summary: Mapping[str, Any], reference_ece: float | Non
     calibration = evaluate_calibration_safety(candidate_ece=candidate_ece, reference_ece=reference_ece)
     drift = evaluate_drift(rows=drift_rows)
     market = evaluate_market_gate(summary)
+
     shadow_status = str(shadow.get("status", "FAIL")).upper()
-    shadow_gate = {"status": "PASS" if shadow_status == "PASS" else "FAIL", "source": "shadow_evaluations"}
-    gates = {"benchmark": benchmark, "calibration": calibration, "drift": drift, "market": market, "shadow": shadow_gate}
-    hard_pass = all(x["status"] == "PASS" for x in (benchmark, calibration, drift, market, shadow_gate))
+    production_incumbent = bool(shadow.get("production_incumbent", False))
+    reference_comparison = shadow_status in {"PASS", "SUCCEEDED", "PASS_REFERENCE_BASELINE"}
+    shadow_gate = {
+        "status": "PASS" if reference_comparison else "FAIL",
+        "source": "shadow_evaluations",
+        "production_incumbent": production_incumbent,
+        "comparison_type": shadow.get("comparison_type"),
+    }
+    incumbent_gate = {
+        "status": "PASS" if production_incumbent else "FAIL",
+        "reason": "PRODUCTION_INCUMBENT_REQUIRED" if not production_incumbent else "PRODUCTION_INCUMBENT_PRESENT",
+    }
+
+    gates = {
+        "benchmark": benchmark,
+        "calibration": calibration,
+        "drift": drift,
+        "market": market,
+        "shadow": shadow_gate,
+        "incumbent": incumbent_gate,
+    }
+    hard_pass = all(x["status"] == "PASS" for x in gates.values())
     return {
         "status": "PASS" if hard_pass else "FAIL",
         "promotion_eligible": hard_pass,

@@ -7,7 +7,7 @@ name: Prediction Training - S3 Archive OOS
 # Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
 # Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
 # Eligibility invariant: archive catalog excludes seasons covered by active RUNNING historical campaigns.
-# Checksum invariant: preflight still validates the full SHA-256 of every artifact; optimization is execution-only.
+# Checksum invariant: archive writes persist a SHA-256 attestation; preflight verifies it from S3 HEAD and rehashes legacy/unattested objects.
 on:
   workflow_dispatch:
     inputs:
@@ -29,6 +29,8 @@ on:
     paths:
       - '.github/workflows/prediction-training-archive-oos.yml'
       - 'training/archive_oos/run.py'
+      - 'training/archive_oos/backfill_checksum_metadata.py'
+      - 'workers/archive_worker/worker.py'
       - 'workers/prediction_engine/historical_training_job.py'
       - 'workers/prediction_engine/walk_forward.py'
 
@@ -57,6 +59,7 @@ jobs:
       OOS_MIN_SEASONS: ${{ inputs.min_oos_seasons || '3' }}
       OOS_MIN_MATCHES: ${{ inputs.min_oos_matches || '3000' }}
       S3_VALIDATE_WORKERS: '24'
+      S3_METADATA_WORKERS: '24'
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -109,6 +112,8 @@ jobs:
               conn.execute('select 1')
           print('Supabase IPv4 Session Pooler connectivity: OK')
           PY
+      - name: Backfill S3 checksum attestations
+        run: python training/archive_oos/backfill_checksum_metadata.py
       - name: Validate archive manifests and checksums
         run: python training/archive_oos/run.py
       - name: Run historical training from S3 archive

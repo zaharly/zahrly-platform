@@ -4,8 +4,7 @@ name: Prediction Training - S3 Archive OOS
 # Uses Supabase Supavisor Session Pooler because GitHub Actions is IPv4-only.
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
-# Automatic push execution is intentionally disabled; training runs only by explicit workflow_dispatch.
-# PR synchronization touch: exercise the dedicated stale-artifact cleanup workflow.
+# Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
 on:
   workflow_dispatch:
     inputs:
@@ -21,6 +20,13 @@ on:
         description: 'Minimum OOS predictions required'
         required: false
         default: '3000'
+  push:
+    branches:
+      - 'prediction/training-archive-oos-v2'
+    paths:
+      - '.github/workflows/prediction-training-archive-oos.yml'
+      - 'workers/prediction_engine/historical_training_job.py'
+      - 'workers/prediction_engine/walk_forward.py'
 
 concurrency:
   group: prediction-training-archive-oos-${{ github.workflow }}-${{ github.ref }}

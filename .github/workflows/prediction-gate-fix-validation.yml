@@ -8,6 +8,9 @@ on:
   push:
     branches:
       - prediction/training-archive-oos-v3-gate-fix
+  pull_request:
+    branches:
+      - main
 
 concurrency:
   group: prediction-gate-fix-validation

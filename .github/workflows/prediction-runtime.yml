@@ -2,6 +2,7 @@ name: Prediction Runtime - GitHub Actions
 
 # Canonical execution path: queued prediction jobs -> lifecycle gate -> published read model.
 # Historical training is manual-only; this workflow never retrains the model.
+# Runtime verification is intentionally performed by GitHub Actions only.
 on:
   push:
     branches: [main]

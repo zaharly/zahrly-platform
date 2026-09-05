@@ -1,6 +1,11 @@
 name: Prediction Runtime - GitHub Actions
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/prediction-runtime.yml'
+      - 'workers/prediction_engine/rolling_prediction_cycle.py'
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'

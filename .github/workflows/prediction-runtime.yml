@@ -13,13 +13,14 @@ on:
       - 'workers/prediction_engine/prediction_lifecycle.py'
       - 'workers/prediction_engine/tests/**'
       - 'supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'
+      - 'supabase/migrations/20260905185600_prediction_lifecycle_evidence_readmodel_v2.sql'
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
 
 concurrency:
   group: prediction-runtime-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   prediction-runtime:
@@ -116,14 +117,18 @@ jobs:
           import os
           from pathlib import Path
           import psycopg
-          sql = Path('supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql').read_text(encoding='utf-8')
+          migrations = [
+              Path('supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'),
+              Path('supabase/migrations/20260905185600_prediction_lifecycle_evidence_readmodel_v2.sql'),
+          ]
           with psycopg.connect(os.environ['SUPABASE_DB_URL'], connect_timeout=20, sslmode='require') as conn:
-              conn.execute(sql)
+              for path in migrations:
+                  conn.execute(path.read_text(encoding='utf-8'))
               conn.commit()
           print('prediction lifecycle schema verified')
           PY
 
-      - name: Validate Python runtime and unit tests
+      - name: Validate lifecycle contract and unit tests
         run: |
           python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
           python -m py_compile workers/prediction_engine/prediction_model_core.py

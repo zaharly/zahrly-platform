@@ -6,8 +6,11 @@ on:
     paths:
       - '.github/workflows/prediction-runtime.yml'
       - 'workers/prediction_engine/rolling_prediction_cycle.py'
+      - 'workers/prediction_engine/prediction_model_core.py'
+      - 'workers/prediction_engine/market_derivations.py'
       - 'workers/prediction_engine/prediction_runtime_entrypoint.py'
       - 'workers/prediction_engine/prediction_lifecycle.py'
+      - 'workers/prediction_engine/tests/**'
       - 'supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'
   workflow_dispatch:
   schedule:
@@ -41,7 +44,7 @@ jobs:
       - name: Install runtime dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install 'psycopg[binary]' boto3 requests
+          pip install 'psycopg[binary]' boto3 requests pytest
 
       - name: Configure Supabase IPv4 Session Pooler
         shell: bash
@@ -119,11 +122,14 @@ jobs:
           print('prediction lifecycle schema verified')
           PY
 
-      - name: Validate Python runtime
+      - name: Validate Python runtime and unit tests
         run: |
           python -m py_compile workers/prediction_engine/rolling_prediction_cycle.py
+          python -m py_compile workers/prediction_engine/prediction_model_core.py
+          python -m py_compile workers/prediction_engine/market_derivations.py
           python -m py_compile workers/prediction_engine/prediction_runtime_entrypoint.py
           python -m py_compile workers/prediction_engine/prediction_lifecycle.py
+          pytest -q workers/prediction_engine/tests/test_model_and_markets.py
 
       - name: Run prediction lifecycle
         run: python -m workers.prediction_engine.prediction_runtime_entrypoint

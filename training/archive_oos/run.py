@@ -34,30 +34,56 @@ def env(name: str) -> str:
 
 
 def load_catalog() -> list[Artifact]:
+    """Load the complete archive catalog, not just the first REST page."""
     base = env("SUPABASE_URL").rstrip("/")
     key = env("SUPABASE_SERVICE_ROLE_KEY")
-    response = requests.post(
-        f"{base}/rest/v1/rpc/prediction_training_archive_catalog",
-        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={}, timeout=60,
-    )
-    response.raise_for_status()
-    rows = response.json()
-    if not isinstance(rows, list):
-        raise RuntimeError("unexpected prediction_training_archive_catalog response")
-    return [
-        Artifact(
-            str(r["manifest_id"]),
-            int(r["season"]),
-            str(r["dataset_type"]),
-            str(r["object_uri"]),
-            str(r["checksum"]),
-            int(r["row_count"]),
-            float(r["completeness_score"] or 0),
-            str(r["schema_version"]),
+    url = f"{base}/rest/v1/rpc/prediction_training_archive_catalog"
+    page_size = 1000
+    offset = 0
+    artifacts: list[Artifact] = []
+
+    while True:
+        response = requests.post(
+            url,
+            headers={
+                "apikey": key,
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "Range-Unit": "items",
+                "Range": f"{offset}-{offset + page_size - 1}",
+            },
+            json={},
+            timeout=60,
         )
-        for r in rows
-    ]
+        if response.status_code not in (200, 206):
+            response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list):
+            raise RuntimeError("unexpected prediction_training_archive_catalog response")
+        if not rows:
+            break
+
+        artifacts.extend(
+            Artifact(
+                str(r["manifest_id"]),
+                int(r["season"]),
+                str(r["dataset_type"]),
+                str(r["object_uri"]),
+                str(r["checksum"]),
+                int(r["row_count"]),
+                float(r["completeness_score"] or 0),
+                str(r["schema_version"]),
+            )
+            for r in rows
+        )
+
+        if len(rows) < page_size:
+            break
+        offset += page_size
+
+    if not artifacts:
+        raise RuntimeError("prediction_training_archive_catalog returned no artifacts")
+    return artifacts
 
 
 def parse_s3_uri(uri: str) -> tuple[str, str]:

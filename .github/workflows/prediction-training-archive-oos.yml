@@ -5,6 +5,7 @@ name: Prediction Training - S3 Archive OOS
 # Large row-level artifacts are archived to S3 as soon as each phase completes.
 # DB retention invariant: detailed OOS/rating rows are transient and must not accumulate in Postgres.
 # Corrected artifact path: production DC parameters are derived from the same estimator used by walk-forward OOS.
+# Catalog pagination invariant: preflight must inspect the full RPC result, not only the first REST page.
 on:
   workflow_dispatch:
     inputs:

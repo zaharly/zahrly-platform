@@ -11,6 +11,7 @@ on:
       - 'workers/prediction_engine/market_derivations.py'
       - 'workers/prediction_engine/prediction_runtime_entrypoint.py'
       - 'workers/prediction_engine/prediction_lifecycle.py'
+      - 'workers/prediction_engine/prediction_job_worker.py'
       - 'workers/prediction_engine/tests/**'
       - 'supabase/migrations/20260905180000_prediction_lifecycle_contract_v1.sql'
       - 'supabase/migrations/20260905185600_prediction_lifecycle_evidence_readmodel_v2.sql'
@@ -136,7 +137,8 @@ jobs:
           python -m py_compile workers/prediction_engine/market_derivations.py
           python -m py_compile workers/prediction_engine/prediction_runtime_entrypoint.py
           python -m py_compile workers/prediction_engine/prediction_lifecycle.py
+          python -m py_compile workers/prediction_engine/prediction_job_worker.py
           pytest -q workers/prediction_engine/tests/test_model_and_markets.py
 
-      - name: Run prediction lifecycle
-        run: python -m workers.prediction_engine.prediction_runtime_entrypoint
+      - name: Run queued prediction jobs
+        run: python -m workers.prediction_engine.prediction_job_worker

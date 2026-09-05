@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
-import { ChevronsLeft, ChevronsRight, Lock } from 'lucide-react'
+import { ChevronsLeft, ChevronsRight, Lock, X } from 'lucide-react'
 import { cn } from '../../lib/shadcn/utils'
 import { NAV_GROUPS } from './navConfig'
 import { useNavBadges } from '../../hooks/useNavBadges'
@@ -11,36 +11,56 @@ function isActive(pathname: string, itemPath: string): boolean {
   return pathname === itemPath || pathname.startsWith(`${itemPath}/`)
 }
 
-export function Sidebar() {
+export function Sidebar({ mobileOpen = false, onMobileClose }: { mobileOpen?: boolean; onMobileClose?: () => void }) {
   const [collapsed, setCollapsed] = useState(false)
   const location = useLocation()
   const badges = useNavBadges()
+
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1024px)')
+    const sync = () => {
+      if (media.matches) onMobileClose?.()
+    }
+    sync()
+    media.addEventListener?.('change', sync)
+    return () => media.removeEventListener?.('change', sync)
+  }, [onMobileClose])
 
   return (
     <TooltipProvider delayDuration={150}>
       <aside
         className={cn(
-          'flex h-screen shrink-0 flex-col border-r border-border bg-card transition-all duration-200',
-          collapsed ? 'w-[68px]' : 'w-[260px]'
+          'fixed inset-y-0 left-0 z-50 flex h-[100dvh] shrink-0 flex-col border-r border-border bg-card shadow-xl transition-[transform,width] duration-200 lg:static lg:z-auto lg:h-screen lg:shadow-none',
+          mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
+          collapsed ? 'lg:w-[68px]' : 'lg:w-[260px]',
+          'w-[min(86vw,300px)]'
         )}
       >
-        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-density-lg">
+        <div className="flex h-14 shrink-0 items-center gap-2 border-b border-border px-4 sm:px-density-lg">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-foreground text-background font-bold text-sm">
             Z
           </div>
           {!collapsed && (
-            <div className="flex flex-col leading-none">
+            <div className="flex min-w-0 flex-col leading-none">
               <span className="text-sm font-semibold tracking-tight">ZAHRLY</span>
               <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Operations Console</span>
             </div>
           )}
+          <button
+            type="button"
+            onClick={() => onMobileClose?.()}
+            aria-label="Close navigation"
+            className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground lg:hidden"
+          >
+            <X className="h-4 w-4" />
+          </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-density-sm py-density-md">
+        <nav className="min-h-0 flex-1 overflow-y-auto px-2 py-3 sm:px-density-sm sm:py-density-md">
           {NAV_GROUPS.map((group) => (
             <div key={group.id} className="mb-density-md">
               {!collapsed && (
-                <div className="px-density-md pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                <div className="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground sm:px-density-md">
                   {group.label}
                 </div>
               )}
@@ -55,10 +75,10 @@ export function Sidebar() {
                         'h-4 w-4 shrink-0',
                         active ? 'text-foreground' : item.locked ? 'text-muted-foreground/60' : 'text-muted-foreground group-hover:text-foreground'
                       )} />
-                      {!collapsed && <span className={cn('truncate', item.locked && 'text-muted-foreground/70')}>{item.label}</span>}
+                      {!collapsed && <span className={cn('min-w-0 truncate', item.locked && 'text-muted-foreground/70')}>{item.label}</span>}
                       {!collapsed && item.locked && <Lock className="ml-auto h-3.5 w-3.5 shrink-0 text-muted-foreground/70" aria-label="Locked" />}
                       {!collapsed && !item.locked && !!badge && (
-                        <span className="ml-auto inline-flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
+                        <span className="ml-auto inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-destructive px-1 text-[10px] font-semibold text-destructive-foreground">
                           {badge}
                         </span>
                       )}
@@ -81,7 +101,7 @@ export function Sidebar() {
                               disabled
                               aria-disabled="true"
                               className={cn(
-                                'group flex w-full cursor-not-allowed items-center gap-2.5 rounded-md px-density-md py-2 text-sm font-medium opacity-80',
+                                'group flex w-full cursor-not-allowed items-center gap-2.5 rounded-md px-3 py-2.5 text-sm font-medium opacity-80 sm:px-density-md sm:py-2',
                                 collapsed && 'justify-center px-0'
                               )}
                             >
@@ -99,8 +119,9 @@ export function Sidebar() {
                   const link = (
                     <Link
                       to={item.path}
+                      onClick={() => onMobileClose?.()}
                       className={cn(
-                        'group flex items-center gap-2.5 rounded-md px-density-md py-2 text-sm font-medium transition-colors',
+                        'group flex items-center gap-2.5 rounded-md px-3 py-2.5 text-sm font-medium transition-colors sm:px-density-md sm:py-2',
                         active ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
                         collapsed && 'justify-center px-0'
                       )}
@@ -125,10 +146,10 @@ export function Sidebar() {
           ))}
         </nav>
 
-        <div className="border-t border-border p-density-sm">
+        <div className="border-t border-border p-2 sm:p-density-sm">
           <button
             onClick={() => setCollapsed((c) => !c)}
-            className="flex w-full items-center justify-center gap-2 rounded-md px-density-md py-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground"
+            className="hidden w-full items-center justify-center gap-2 rounded-md px-density-md py-2 text-xs font-medium text-muted-foreground hover:bg-muted hover:text-foreground lg:flex"
           >
             {collapsed ? <ChevronsRight className="h-4 w-4" /> : <><ChevronsLeft className="h-4 w-4" /> Collapse</>}
           </button>
